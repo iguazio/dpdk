@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #ifndef __RTE_RED_H_INCLUDED__
@@ -62,19 +33,6 @@ extern "C" {
 #define RTE_RED_2POW16                      (1<<16)    /**< 2 power 16 */
 #define RTE_RED_INT16_NBITS                 (sizeof(uint16_t) * CHAR_BIT)
 #define RTE_RED_WQ_LOG2_NUM                 (RTE_RED_WQ_LOG2_MAX - RTE_RED_WQ_LOG2_MIN + 1)
-
-#ifdef RTE_RED_DEBUG
-
-#define RTE_RED_ASSERT(exp)                                      \
-if (!(exp)) {                                                    \
-	rte_panic("line%d\tassert \"" #exp "\" failed\n", __LINE__); \
-}
-
-#else
-
-#define RTE_RED_ASSERT(exp)                 do { } while(0)
-
-#endif /* RTE_RED_DEBUG */
 
 /**
  * Externs
@@ -152,7 +110,7 @@ rte_red_config_init(struct rte_red_config *red_cfg,
 /**
  * @brief Generate random number for RED
  *
- * Implemenetation based on:
+ * Implementation based on:
  * http://software.intel.com/en-us/articles/fast-random-number-generator-on-the-intel-pentiumr-4-processor/
  *
  * 10 bit shift has been found through empirical tests (was 16).
@@ -163,7 +121,7 @@ static inline uint32_t
 rte_fast_rand(void)
 {
 	rte_red_rand_seed = (214013 * rte_red_rand_seed) + 2531011;
-	return (rte_red_rand_seed >> 10);
+	return rte_red_rand_seed >> 10;
 }
 
 /**
@@ -213,7 +171,7 @@ __rte_red_calc_qempty_factor(uint8_t wq_log2, uint16_t m)
 	 * Now using basic math we compute 2^n:
 	 *   2^(f+n) = 2^f * 2^n
 	 *   2^f - we use lookup table
-	 *   2^n - can be replaced with bit shift right oeprations
+	 *   2^n - can be replaced with bit shift right operations
 	 */
 
 	f = (n >> 6) & 0xf;
@@ -246,8 +204,8 @@ rte_red_enqueue_empty(const struct rte_red_config *red_cfg,
 {
 	uint64_t time_diff = 0, m = 0;
 
-	RTE_RED_ASSERT(red_cfg != NULL);
-	RTE_RED_ASSERT(red != NULL);
+	RTE_ASSERT(red_cfg != NULL);
+	RTE_ASSERT(red != NULL);
 
 	red->count ++;
 
@@ -361,8 +319,8 @@ rte_red_enqueue_nonempty(const struct rte_red_config *red_cfg,
 	struct rte_red *red,
 	const unsigned q)
 {
-	RTE_RED_ASSERT(red_cfg != NULL);
-	RTE_RED_ASSERT(red != NULL);
+	RTE_ASSERT(red_cfg != NULL);
+	RTE_ASSERT(red != NULL);
 
 	/**
 	* EWMA filter (Sally Floyd and Van Jacobson):
@@ -424,8 +382,8 @@ rte_red_enqueue(const struct rte_red_config *red_cfg,
 	const unsigned q,
 	const uint64_t time)
 {
-	RTE_RED_ASSERT(red_cfg != NULL);
-	RTE_RED_ASSERT(red != NULL);
+	RTE_ASSERT(red_cfg != NULL);
+	RTE_ASSERT(red != NULL);
 
 	if (q != 0) {
 		return rte_red_enqueue_nonempty(red_cfg, red, q);

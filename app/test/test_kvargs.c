@@ -1,34 +1,5 @@
-/*
+/* SPDX-License-Identifier: BSD-3-Clause
  * Copyright 2014 6WIND S.A.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * - Redistributions of source code must retain the above copyright
- *   notice, this list of conditions and the following disclaimer.
- *
- * - Redistributions in binary form must reproduce the above copyright
- *   notice, this list of conditions and the following disclaimer in
- *   the documentation and/or other materials provided with the
- *   distribution.
- *
- * - Neither the name of 6WIND S.A. nor the names of its
- *   contributors may be used to endorse or promote products derived
- *   from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <stdlib.h>
@@ -166,6 +137,60 @@ static int test_valid_kvargs(void)
 	}
 	rte_kvargs_free(kvlist);
 
+	/* third test using list as value */
+	args = "foo=[0,1],check=value2";
+	valid_keys = valid_keys_list;
+	kvlist = rte_kvargs_parse(args, valid_keys);
+	if (kvlist == NULL) {
+		printf("rte_kvargs_parse() error\n");
+		goto fail;
+	}
+	if (strcmp(kvlist->pairs[0].value, "[0,1]") != 0) {
+		printf("wrong value %s", kvlist->pairs[0].value);
+		goto fail;
+	}
+	count = kvlist->count;
+	if (count != 2) {
+		printf("invalid count value %d\n", count);
+		rte_kvargs_free(kvlist);
+		goto fail;
+	}
+	rte_kvargs_free(kvlist);
+
+	/* test using empty string (it is valid) */
+	args = "";
+	kvlist = rte_kvargs_parse(args, NULL);
+	if (kvlist == NULL) {
+		printf("rte_kvargs_parse() error\n");
+		goto fail;
+	}
+	if (rte_kvargs_count(kvlist, NULL) != 0) {
+		printf("invalid count value\n");
+		goto fail;
+	}
+	rte_kvargs_free(kvlist);
+
+	/* test using empty elements (it is valid) */
+	args = "foo=1,,check=value2,,";
+	kvlist = rte_kvargs_parse(args, NULL);
+	if (kvlist == NULL) {
+		printf("rte_kvargs_parse() error\n");
+		goto fail;
+	}
+	if (rte_kvargs_count(kvlist, NULL) != 2) {
+		printf("invalid count value\n");
+		goto fail;
+	}
+	if (rte_kvargs_count(kvlist, "foo") != 1) {
+		printf("invalid count value for 'foo'\n");
+		goto fail;
+	}
+	if (rte_kvargs_count(kvlist, "check") != 1) {
+		printf("invalid count value for 'check'\n");
+		goto fail;
+	}
+	rte_kvargs_free(kvlist);
+
 	return 0;
 
  fail:
@@ -188,10 +213,11 @@ static int test_invalid_kvargs(void)
 	const char *args_list[] = {
 		"wrong-key=x",     /* key not in valid_keys_list */
 		"foo=1,foo=",      /* empty value */
-		"foo=1,,foo=2",    /* empty key/value */
 		"foo=1,foo",       /* no value */
 		"foo=1,=2",        /* no key */
+		"foo=[1,2",        /* no closing bracket in value */
 		",=",              /* also test with a smiley */
+		"foo=[",           /* no value in list and no closing bracket */
 		NULL };
 	const char **args;
 	const char *valid_keys_list[] = { "foo", "check", NULL };
@@ -205,8 +231,8 @@ static int test_invalid_kvargs(void)
 			rte_kvargs_free(kvlist);
 			goto fail;
 		}
-		return 0;
 	}
+	return 0;
 
  fail:
 	printf("while processing <%s>", *args);
@@ -232,8 +258,4 @@ test_kvargs(void)
 	return 0;
 }
 
-static struct test_command kvargs_cmd = {
-	.command = "kvargs_autotest",
-	.callback = test_kvargs,
-};
-REGISTER_TEST_COMMAND(kvargs_cmd);
+REGISTER_TEST_COMMAND(kvargs_autotest, test_kvargs);

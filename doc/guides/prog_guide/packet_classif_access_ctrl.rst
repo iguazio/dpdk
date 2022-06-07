@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2015 Intel Corporation.
 
 Packet Classification and Access Control
 ========================================
@@ -181,26 +154,26 @@ To define classification for the IPv6 2-tuple: <protocol, IPv6 source address> o
 
 .. code-block:: c
 
-    struct struct ipv6_hdr {
+    struct rte_ipv6_hdr {
         uint32_t vtc_flow;     /* IP version, traffic class & flow label. */
         uint16_t payload_len;  /* IP packet length - includes sizeof(ip_header). */
         uint8_t proto;         /* Protocol, next header. */
         uint8_t hop_limits;    /* Hop limits. */
         uint8_t src_addr[16];  /* IP address of source host. */
         uint8_t dst_addr[16];  /* IP address of destination host(s). */
-    } __attribute__((__packed__));
+    } __rte_packed;
 
 The following array of field definitions can be used:
 
 .. code-block:: c
 
-    struct struct rte_acl_field_def ipv6_2tuple_defs[5] = {
+    struct rte_acl_field_def ipv6_2tuple_defs[5] = {
         {
             .type = RTE_ACL_FIELD_TYPE_BITMASK,
             .size = sizeof (uint8_t),
             .field_index = 0,
             .input_index = 0,
-            .offset = offsetof (struct ipv6_hdr, proto),
+            .offset = offsetof (struct rte_ipv6_hdr, proto),
         },
 
         {
@@ -208,7 +181,7 @@ The following array of field definitions can be used:
             .size = sizeof (uint32_t),
             .field_index = 1,
             .input_index = 1,
-            .offset = offsetof (struct ipv6_hdr, src_addr[0]),
+            .offset = offsetof (struct rte_ipv6_hdr, src_addr[0]),
         },
 
         {
@@ -216,7 +189,7 @@ The following array of field definitions can be used:
             .size = sizeof (uint32_t),
             .field_index = 2,
             .input_index = 2,
-            .offset = offsetof (struct ipv6_hdr, src_addr[4]),
+            .offset = offsetof (struct rte_ipv6_hdr, src_addr[4]),
         },
 
         {
@@ -224,7 +197,7 @@ The following array of field definitions can be used:
             .size = sizeof (uint32_t),
             .field_index = 3,
             .input_index = 3,
-           .offset = offsetof (struct ipv6_hdr, src_addr[8]),
+           .offset = offsetof (struct rte_ipv6_hdr, src_addr[8]),
         },
 
         {
@@ -232,7 +205,7 @@ The following array of field definitions can be used:
            .size = sizeof (uint32_t),
            .field_index = 4,
            .input_index = 4,
-           .offset = offsetof (struct ipv6_hdr, src_addr[12]),
+           .offset = offsetof (struct rte_ipv6_hdr, src_addr[12]),
         },
     };
 
@@ -245,6 +218,74 @@ A typical example of such an IPv6 2-tuple rule is a follows:
 
 Any IPv6 packets with protocol ID 6 (TCP), and source address inside the range
 [2001:db8:1234:0000:0000:0000:0000:0000 - 2001:db8:1234:ffff:ffff:ffff:ffff:ffff] matches the above rule.
+
+In the following example the last element of the search key is 8-bit long.
+So it is a case where the 4 consecutive bytes of an input field are not fully occupied.
+The structure for the classification is:
+
+.. code-block:: c
+
+    struct acl_key {
+        uint8_t ip_proto;
+        uint32_t ip_src;
+        uint32_t ip_dst;
+        uint8_t tos;      /*< This is partially using a 32-bit input element */
+    };
+
+The following array of field definitions can be used:
+
+.. code-block:: c
+
+    struct rte_acl_field_def ipv4_defs[4] = {
+        /* first input field - always one byte long. */
+        {
+            .type = RTE_ACL_FIELD_TYPE_BITMASK,
+            .size = sizeof (uint8_t),
+            .field_index = 0,
+            .input_index = 0,
+            .offset = offsetof (struct acl_key, ip_proto),
+        },
+
+        /* next input field (IPv4 source address) - 4 consecutive bytes. */
+        {
+            .type = RTE_ACL_FIELD_TYPE_MASK,
+            .size = sizeof (uint32_t),
+            .field_index = 1,
+            .input_index = 1,
+           .offset = offsetof (struct acl_key, ip_src),
+        },
+
+        /* next input field (IPv4 destination address) - 4 consecutive bytes. */
+        {
+            .type = RTE_ACL_FIELD_TYPE_MASK,
+            .size = sizeof (uint32_t),
+            .field_index = 2,
+            .input_index = 2,
+           .offset = offsetof (struct acl_key, ip_dst),
+        },
+
+        /*
+         * Next element of search key (Type of Service) is indeed 1 byte long.
+         * Anyway we need to allocate all the 4 consecutive bytes for it.
+         */
+        {
+            .type = RTE_ACL_FIELD_TYPE_BITMASK,
+            .size = sizeof (uint32_t), /* All the 4 consecutive bytes are allocated */
+            .field_index = 3,
+            .input_index = 3,
+            .offset = offsetof (struct acl_key, tos),
+        },
+    };
+
+A typical example of such an IPv4 4-tuple rule is as follows:
+
+::
+
+    source addr/mask  destination addr/mask  tos/mask protocol/mask
+    192.168.1.0/24    192.168.2.31/32        1/0xff   6/0xff
+
+Any IPv4 packets with protocol ID 6 (TCP), source address 192.168.1.[0-255], destination address 192.168.2.31,
+ToS 1 matches the above rule.
 
 When creating a set of rules, for each rule, additional information must be supplied also:
 
@@ -261,8 +302,9 @@ When creating a set of rules, for each rule, additional information must be supp
     Each set could be assigned its own category and by combining them into a single database,
     one lookup returns a result for each of the four sets.
 
-*   **userdata**: A user-defined field that could be any value except zero.
+*   **userdata**: A user-defined value.
     For each category, a successful match returns the userdata field of the highest priority matched rule.
+    When no rules match, returned value is zero.
 
 .. note::
 
@@ -377,7 +419,7 @@ Classify with Multiple Categories
             .data = {.userdata = 1, .category_mask = 3, .priority = 1},
 
             /* destination IPv4 */
-            .field[2] = {.value.u32 = IPv4(192,168,0,0),. mask_range.u32 = 16,},
+            .field[2] = {.value.u32 = RTE_IPV4(192,168,0,0),. mask_range.u32 = 16,},
 
             /* source port */
             .field[3] = {.value.u16 = 0, .mask_range.u16 = 0xffff,},
@@ -391,7 +433,7 @@ Classify with Multiple Categories
             .data = {.userdata = 2, .category_mask = 1, .priority = 2},
 
             /* destination IPv4 */
-            .field[2] = {.value.u32 = IPv4(192,168,1,0),. mask_range.u32 = 24,},
+            .field[2] = {.value.u32 = RTE_IPV4(192,168,1,0),. mask_range.u32 = 24,},
 
             /* source port */
             .field[3] = {.value.u16 = 0, .mask_range.u16 = 0xffff,},
@@ -405,7 +447,7 @@ Classify with Multiple Categories
             .data = {.userdata = 3, .category_mask = 2, .priority = 3},
 
             /* source IPv4 */
-            .field[1] = {.value.u32 = IPv4(10,1,1,1),. mask_range.u32 = 32,},
+            .field[1] = {.value.u32 = RTE_IPV4(10,1,1,1),. mask_range.u32 = 32,},
 
             /* source port */
             .field[3] = {.value.u16 = 0, .mask_range.u16 = 0xffff,},

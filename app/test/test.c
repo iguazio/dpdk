@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <string.h>
@@ -50,7 +21,6 @@ extern cmdline_parse_ctx_t main_ctx[];
 #endif
 
 #include <rte_memory.h>
-#include <rte_memzone.h>
 #include <rte_eal.h>
 #include <rte_cycles.h>
 #include <rte_log.h>
@@ -60,12 +30,15 @@ extern cmdline_parse_ctx_t main_ctx[];
 #endif
 
 #include "test.h"
+#ifdef RTE_LIBRTE_PDUMP
+#include "test_pdump.h"
+#endif
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 const char *prgname; /* to be set to argv[0] */
 
-static const char *recursive_call; /* used in linuxapp for MP and other tests */
+static const char *recursive_call; /* used in linux for MP and other tests */
 
 static int
 no_action(void){ return 0; }
@@ -79,30 +52,31 @@ do_recursive_call(void)
 		int (*action_fn)(void);
 	} actions[] =  {
 			{ "run_secondary_instances", test_mp_secondary },
+#ifdef RTE_LIBRTE_PDUMP
+#ifdef RTE_LIBRTE_RING_PMD
+			{ "run_pdump_server_tests", test_pdump },
+#endif
+#endif
 			{ "test_missing_c_flag", no_action },
 			{ "test_master_lcore_flag", no_action },
-			{ "test_missing_n_flag", no_action },
+			{ "test_invalid_n_flag", no_action },
 			{ "test_no_hpet_flag", no_action },
 			{ "test_whitelist_flag", no_action },
 			{ "test_invalid_b_flag", no_action },
 			{ "test_invalid_vdev_flag", no_action },
 			{ "test_invalid_r_flag", no_action },
-#ifdef RTE_LIBRTE_XEN_DOM0
-			{ "test_dom0_misc_flags", no_action },
-#else
 			{ "test_misc_flags", no_action },
-#endif
 			{ "test_memory_flags", no_action },
 			{ "test_file_prefix", no_action },
 			{ "test_no_huge_flag", no_action },
-#ifdef RTE_LIBRTE_IVSHMEM
-			{ "test_ivshmem", test_ivshmem },
+#ifdef RTE_LIBRTE_TIMER
+			{ "timer_secondary_spawn_wait", test_timer_secondary },
 #endif
 	};
 
 	if (recursive_call == NULL)
 		return -1;
-	for (i = 0; i < sizeof(actions)/sizeof(actions[0]); i++) {
+	for (i = 0; i < RTE_DIM(actions); i++) {
 		if (strcmp(actions[i].env_var, recursive_call) == 0)
 			return (actions[i].action_fn)();
 	}
@@ -110,31 +84,77 @@ do_recursive_call(void)
 	return -1;
 }
 
+int last_test_result;
+
+#define MAX_EXTRA_ARGS 32
+
 int
 main(int argc, char **argv)
 {
 #ifdef RTE_LIBRTE_CMDLINE
 	struct cmdline *cl;
 #endif
+	char *extra_args;
 	int ret;
 
-	ret = rte_eal_init(argc, argv);
-	if (ret < 0)
-		return -1;
+	extra_args = getenv("DPDK_TEST_PARAMS");
+	if (extra_args != NULL && strlen(extra_args) > 0) {
+		char **all_argv;
+		char *eargv[MAX_EXTRA_ARGS];
+		int all_argc;
+		int eargc;
+		int i;
+
+		RTE_LOG(INFO, APP, "Using additional DPDK_TEST_PARAMS: '%s'\n",
+				extra_args);
+		eargc = rte_strsplit(extra_args, strlen(extra_args),
+				eargv, MAX_EXTRA_ARGS, ' ');
+
+		/* merge argc/argv and the environment args */
+		all_argc = argc + eargc;
+		all_argv = malloc(sizeof(*all_argv) * (all_argc + 1));
+		if (all_argv == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		for (i = 0; i < argc; i++)
+			all_argv[i] = argv[i];
+		for (i = 0; i < eargc; i++)
+			all_argv[argc + i] = eargv[i];
+		all_argv[all_argc] = NULL;
+
+		/* call eal_init with combined args */
+		ret = rte_eal_init(all_argc, all_argv);
+		free(all_argv);
+	} else
+		ret = rte_eal_init(argc, argv);
+	if (ret < 0) {
+		ret = -1;
+		goto out;
+	}
 
 #ifdef RTE_LIBRTE_TIMER
-	rte_timer_subsystem_init();
+	if (rte_timer_subsystem_init() < 0) {
+		ret = -1;
+		goto out;
+	}
 #endif
 
-	if (commands_init() < 0)
-		return -1;
+	if (commands_init() < 0) {
+		ret = -1;
+		goto out;
+	}
 
 	argv += ret;
 
 	prgname = argv[0];
 
-	if ((recursive_call = getenv(RECURSIVE_ENV_VAR)) != NULL)
-		return do_recursive_call();
+	recursive_call = getenv(RECURSIVE_ENV_VAR);
+	if (recursive_call != NULL) {
+		ret = do_recursive_call();
+		goto out;
+	}
 
 #ifdef RTE_LIBEAL_USE_HPET
 	if (rte_eal_hpet_init(1) < 0)
@@ -146,64 +166,146 @@ main(int argc, char **argv)
 #ifdef RTE_LIBRTE_CMDLINE
 	cl = cmdline_stdin_new(main_ctx, "RTE>>");
 	if (cl == NULL) {
-		return -1;
+		ret = -1;
+		goto out;
 	}
+
+	char *dpdk_test = getenv("DPDK_TEST");
+	if (dpdk_test && strlen(dpdk_test)) {
+		char buf[1024];
+		snprintf(buf, sizeof(buf), "%s\n", dpdk_test);
+		if (cmdline_in(cl, buf, strlen(buf)) < 0) {
+			printf("error on cmdline input\n");
+			ret = -1;
+			goto out;
+		}
+
+		cmdline_stdin_exit(cl);
+		ret = last_test_result;
+		goto out;
+	}
+	/* if no DPDK_TEST env variable, go interactive */
 	cmdline_interact(cl);
 	cmdline_stdin_exit(cl);
 #endif
+	ret = 0;
 
-	return 0;
+out:
+#ifdef RTE_LIBRTE_TIMER
+	rte_timer_subsystem_finalize();
+#endif
+	rte_eal_cleanup();
+	return ret;
 }
 
 
 int
 unit_test_suite_runner(struct unit_test_suite *suite)
 {
-	int retval, i = 0;
+	int test_success;
+	unsigned int total = 0, executed = 0, skipped = 0;
+	unsigned int succeeded = 0, failed = 0, unsupported = 0;
+	const char *status;
 
-	if (suite->suite_name)
-		printf("Test Suite : %s\n", suite->suite_name);
+	if (suite->suite_name) {
+		printf(" + ------------------------------------------------------- +\n");
+		printf(" + Test Suite : %s\n", suite->suite_name);
+	}
 
-	if (suite->setup)
-		if (suite->setup() != 0)
-			return -1;
+	if (suite->setup) {
+		test_success = suite->setup();
+		if (test_success != 0) {
+			/*
+			 * setup did not pass, so count all enabled tests and
+			 * mark them as failed/skipped
+			 */
+			while (suite->unit_test_cases[total].testcase) {
+				if (!suite->unit_test_cases[total].enabled ||
+				    test_success == TEST_SKIPPED)
+					skipped++;
+				else
+					failed++;
+				total++;
+			}
+			goto suite_summary;
+		}
+	}
 
-	while (suite->unit_test_cases[i].testcase) {
-		/* Run test case setup */
-		if (suite->unit_test_cases[i].setup) {
-			retval = suite->unit_test_cases[i].setup();
-			if (retval != 0)
-				return retval;
+	printf(" + ------------------------------------------------------- +\n");
+
+	while (suite->unit_test_cases[total].testcase) {
+		if (!suite->unit_test_cases[total].enabled) {
+			skipped++;
+			total++;
+			continue;
+		} else {
+			executed++;
 		}
 
-		/* Run test case */
-		if (suite->unit_test_cases[i].testcase() == 0) {
-			printf("TestCase %2d: %s\n", i,
-					suite->unit_test_cases[i].success_msg ?
-					suite->unit_test_cases[i].success_msg :
-					"passed");
-		}
-		else {
-			printf("TestCase %2d: %s\n", i, suite->unit_test_cases[i].fail_msg ?
-					suite->unit_test_cases[i].fail_msg :
-					"failed");
-			return -1;
+		/* run test case setup */
+		if (suite->unit_test_cases[total].setup)
+			test_success = suite->unit_test_cases[total].setup();
+		else
+			test_success = TEST_SUCCESS;
+
+		if (test_success == TEST_SUCCESS) {
+			/* run the test case */
+			test_success = suite->unit_test_cases[total].testcase();
+			if (test_success == TEST_SUCCESS)
+				succeeded++;
+			else if (test_success == TEST_SKIPPED)
+				skipped++;
+			else if (test_success == -ENOTSUP)
+				unsupported++;
+			else
+				failed++;
+		} else if (test_success == -ENOTSUP) {
+			unsupported++;
+		} else {
+			failed++;
 		}
 
-		/* Run test case teardown */
-		if (suite->unit_test_cases[i].teardown) {
-			retval = suite->unit_test_cases[i].teardown();
-			if (retval != 0)
-				return retval;
-		}
+		/* run the test case teardown */
+		if (suite->unit_test_cases[total].teardown)
+			suite->unit_test_cases[total].teardown();
 
-		i++;
+		if (test_success == TEST_SUCCESS)
+			status = "succeeded";
+		else if (test_success == TEST_SKIPPED)
+			status = "skipped";
+		else if (test_success == -ENOTSUP)
+			status = "unsupported";
+		else
+			status = "failed";
+
+		printf(" + TestCase [%2d] : %s %s\n", total,
+				suite->unit_test_cases[total].name, status);
+
+		total++;
 	}
 
 	/* Run test suite teardown */
 	if (suite->teardown)
-		if (suite->teardown() != 0)
-			return -1;
+		suite->teardown();
 
-	return 0;
+	goto suite_summary;
+
+suite_summary:
+	printf(" + ------------------------------------------------------- +\n");
+	printf(" + Test Suite Summary \n");
+	printf(" + Tests Total :       %2d\n", total);
+	printf(" + Tests Skipped :     %2d\n", skipped);
+	printf(" + Tests Executed :    %2d\n", executed);
+	printf(" + Tests Unsupported:  %2d\n", unsupported);
+	printf(" + Tests Passed :      %2d\n", succeeded);
+	printf(" + Tests Failed :      %2d\n", failed);
+	printf(" + ------------------------------------------------------- +\n");
+
+	last_test_result = failed;
+
+	if (failed)
+		return TEST_FAILED;
+	if (total == skipped)
+		return TEST_SKIPPED;
+	return TEST_SUCCESS;
 }

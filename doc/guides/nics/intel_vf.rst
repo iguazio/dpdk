@@ -1,35 +1,8 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-I40E/IXGBE/IGB Virtual Function Driver
-======================================
+Intel Virtual Function Driver
+=============================
 
 Supported Intel® Ethernet Controllers (see the *DPDK Release Notes* for details)
 support the following modes of operation in a virtualized environment:
@@ -93,6 +66,28 @@ and the Physical Function operates on the global resources on behalf of the Virt
 For this out-of-band communication, an SR-IOV enabled NIC provides a memory buffer for each Virtual Function,
 which is called a "Mailbox".
 
+Intel® Ethernet Adaptive Virtual Function
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Adaptive Virtual Function (IAVF) is a SR-IOV Virtual Function with the same device id (8086:1889) on different Intel Ethernet Controller.
+IAVF Driver is VF driver which supports for all future Intel devices without requiring a VM update. And since this happens to be an adaptive VF driver,
+every new drop of the VF driver would add more and more advanced features that can be turned on in the VM if the underlying HW device supports those
+advanced features based on a device agnostic way without ever compromising on the base functionality. IAVF provides generic hardware interface and
+interface between IAVF driver and a compliant PF driver is specified.
+
+Intel products starting Ethernet Controller 700 Series to support Adaptive Virtual Function.
+
+The way to generate Virtual Function is like normal, and the resource of VF assignment depends on the NIC Infrastructure.
+
+For more detail on SR-IOV, please refer to the following documents:
+
+*   `Intel® IAVF HAS <https://www.intel.com/content/dam/www/public/us/en/documents/product-specifications/ethernet-adaptive-virtual-function-hardware-spec.pdf>`_
+
+.. note::
+
+    To use DPDK IAVF PMD on Intel® 700 Series Ethernet Controller, the device id (0x1889) need to specified during device
+    assignment in hypervisor. Take qemu for example, the device assignment should carry the IAVF device id (0x1889) like
+    ``-device vfio-pci,x-pci-device-id=0x1889,host=03:0a.0``.
+
 The PCIE host-interface of Intel Ethernet Switch FM10000 Series VF infrastructure
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -124,12 +119,12 @@ However:
 
     The above is an important consideration to take into account when targeting specific packets to a selected port.
 
-Intel® Fortville 10/40 Gigabit Ethernet Controller VF Infrastructure
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Intel® X710/XL710 Gigabit Ethernet Controller VF Infrastructure
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In a virtualized environment, the programmer can enable a maximum of *128 Virtual Functions (VF)*
-globally per Intel® Fortville 10/40 Gigabit Ethernet Controller NIC device.
-Each VF can have a maximum of 16 queue pairs.
+globally per Intel® X710/XL710 Gigabit Ethernet Controller NIC device.
+The number of queue pairs of each VF can be configured by ``CONFIG_RTE_LIBRTE_I40E_QUEUE_NUM_PER_VF`` in ``config`` file.
 The Physical Function in host could be either configured by the Linux* i40e driver
 (in the case of the Linux Kernel-based Virtual Machine [KVM]) or by DPDK PMD PF driver.
 When using both DPDK PMD PF/VF drivers, the whole NIC will be taken over by DPDK based application.
@@ -151,48 +146,10 @@ For example,
 
         modprobe uio
         insmod igb_uio
-        ./dpdk_nic_bind.py -b igb_uio bb:ss.f
+        ./dpdk-devbind.py -b igb_uio bb:ss.f
         echo 2 > /sys/bus/pci/devices/0000\:bb\:ss.f/max_vfs (To enable two VFs on a specific PCI device)
 
     Launch the DPDK testpmd/example or your own host daemon application using the DPDK PMD library.
-
-*   Using the DPDK PMD PF ixgbe driver to enable VF RSS:
-
-    Same steps as above to install the modules of uio, igb_uio, specify max_vfs for PCI device, and
-    launch the DPDK testpmd/example or your own host daemon application using the DPDK PMD library.
-
-    The available queue number(at most 4) per VF depends on the total number of pool, which is
-    determined by the max number of VF at PF initialization stage and the number of queue specified
-    in config:
-
-    *   If the max number of VF is set in the range of 1 to 32:
-
-        If the number of rxq is specified as 4(e.g. '--rxq 4' in testpmd), then there are totally 32
-        pools(ETH_32_POOLS), and each VF could have 4 or less(e.g. 2) queues;
-
-        If the number of rxq is specified as 2(e.g. '--rxq 2' in testpmd), then there are totally 32
-        pools(ETH_32_POOLS), and each VF could have 2 queues;
-
-    *   If the max number of VF is in the range of 33 to 64:
-
-        If the number of rxq is 4 ('--rxq 4' in testpmd), then error message is expected as rxq is not
-        correct at this case;
-
-        If the number of rxq is 2 ('--rxq 2' in testpmd), then there is totally 64 pools(ETH_64_POOLS),
-        and each VF have 2 queues;
-
-    On host, to enable VF RSS functionality, rx mq mode should be set as ETH_MQ_RX_VMDQ_RSS
-    or ETH_MQ_RX_RSS mode, and SRIOV mode should be activated(max_vfs >= 1).
-    It also needs config VF RSS information like hash function, RSS key, RSS key length.
-
-    .. code-block:: console
-
-        testpmd -c 0xffff -n 4 -- --coremask=<core-mask> --rxq=4 --txq=4 -i
-
-    The limitation for VF RSS on Intel® 82599 10 Gigabit Ethernet Controller is:
-    The hash and key are shared among PF and all VF, the RETA table with 128 entries is also shared
-    among PF and all VF; So it could not to provide a method to query the hash and reta content per
-    VF on guest, while, if possible, please query them on host(PF) for the shared RETA information.
 
 Virtual Function enumeration is performed in the following sequence by the Linux* pci driver for a dual-port NIC.
 When you enable the four Virtual Functions with the above command, the four enabled functions have a Function#
@@ -206,6 +163,9 @@ However:
 .. note::
 
     The above is an important consideration to take into account when targeting specific packets to a selected port.
+
+    For Intel® X710/XL710 Gigabit Ethernet Controller, queues are in pairs. One queue pair means one receive queue and
+    one transmit queue. The default number of queue pairs per VF is 4, and can be 16 in maximum.
 
 Intel® 82599 10 Gigabit Ethernet Controller VF Infrastructure
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -236,10 +196,46 @@ For example,
 
         modprobe uio
         insmod igb_uio
-        ./dpdk_nic_bind.py -b igb_uio bb:ss.f
+        ./dpdk-devbind.py -b igb_uio bb:ss.f
         echo 2 > /sys/bus/pci/devices/0000\:bb\:ss.f/max_vfs (To enable two VFs on a specific PCI device)
 
     Launch the DPDK testpmd/example or your own host daemon application using the DPDK PMD library.
+
+*   Using the DPDK PMD PF ixgbe driver to enable VF RSS:
+
+    Same steps as above to install the modules of uio, igb_uio, specify max_vfs for PCI device, and
+    launch the DPDK testpmd/example or your own host daemon application using the DPDK PMD library.
+
+    The available queue number (at most 4) per VF depends on the total number of pool, which is
+    determined by the max number of VF at PF initialization stage and the number of queue specified
+    in config:
+
+    *   If the max number of VFs (max_vfs) is set in the range of 1 to 32:
+
+        If the number of Rx queues is specified as 4 (``--rxq=4`` in testpmd), then there are totally 32
+        pools (ETH_32_POOLS), and each VF could have 4 Rx queues;
+
+        If the number of Rx queues is specified as 2 (``--rxq=2`` in testpmd), then there are totally 32
+        pools (ETH_32_POOLS), and each VF could have 2 Rx queues;
+
+    *   If the max number of VFs (max_vfs) is in the range of 33 to 64:
+
+        If the number of Rx queues in specified as 4 (``--rxq=4`` in testpmd), then error message is expected
+        as ``rxq`` is not correct at this case;
+
+        If the number of rxq is 2 (``--rxq=2`` in testpmd), then there is totally 64 pools (ETH_64_POOLS),
+        and each VF have 2 Rx queues;
+
+    On host, to enable VF RSS functionality, rx mq mode should be set as ETH_MQ_RX_VMDQ_RSS
+    or ETH_MQ_RX_RSS mode, and SRIOV mode should be activated (max_vfs >= 1).
+    It also needs config VF RSS information like hash function, RSS key, RSS key length.
+
+.. note::
+
+    The limitation for VF RSS on Intel® 82599 10 Gigabit Ethernet Controller is:
+    The hash and key are shared among PF and all VF, the RETA table with 128 entries is also shared
+    among PF and all VF; So it could not to provide a method to query the hash and reta content per
+    VF on guest, while, if possible, please query them on host for the shared RETA information.
 
 Virtual Function enumeration is performed in the following sequence by the Linux* pci driver for a dual-port NIC.
 When you enable the four Virtual Functions with the above command, the four enabled functions have a Function#
@@ -278,14 +274,14 @@ For example,
         rmmod igb (To remove the igb module)
         insmod igb max_vfs=2,2 (To enable two Virtual Functions per port)
 
-*   Using Intel®  DPDK PMD PF igb driver:
+*   Using DPDK PMD PF igb driver:
 
     Kernel Params: iommu=pt, intel_iommu=on modprobe uio
 
     .. code-block:: console
 
         insmod igb_uio
-        ./dpdk_nic_bind.py -b igb_uio bb:ss.f
+        ./dpdk-devbind.py -b igb_uio bb:ss.f
         echo 2 > /sys/bus/pci/devices/0000\:bb\:ss.f/max_vfs (To enable two VFs on a specific pci device)
 
     Launch DPDK testpmd/example or your own host daemon application using the DPDK PMD library.
@@ -406,7 +402,7 @@ The setup procedure is as follows:
 
         modprobe uio
         insmod igb_uio
-        ./dpdk_nic_bind.py -b igb_uio 02:00.0 02:00.1 0e:00.0 0e:00.1
+        ./dpdk-devbind.py -b igb_uio 02:00.0 02:00.1 0e:00.0 0e:00.1
         echo 2 > /sys/bus/pci/devices/0000\:02\:00.0/max_vfs
         echo 2 > /sys/bus/pci/devices/0000\:02\:00.1/max_vfs
         echo 2 > /sys/bus/pci/devices/0000\:0e\:00.0/max_vfs
@@ -486,7 +482,7 @@ The setup procedure is as follows:
 
     .. note::
 
-        — The pci-assign,host=08:10.0 alue indicates that you want to attach a PCI device
+        — The pci-assign,host=08:10.0 value indicates that you want to attach a PCI device
         to a Virtual Machine and the respective (Bus:Device.Function)
         numbers should be passed for the Virtual Function to be attached.
 
@@ -508,23 +504,36 @@ The setup procedure is as follows:
 
         For more information, please refer to: `http://wiki.qemu.org/Features/CPUModels <http://wiki.qemu.org/Features/CPUModels>`_.
 
+#.  If use vfio-pci to pass through device instead of pci-assign, steps 8 and 9 need to be updated to bind device to vfio-pci and
+    replace pci-assign with vfio-pci when start virtual machine.
+
+    .. code-block:: console
+
+        sudo /sbin/modprobe vfio-pci
+
+        echo "8086 10ed" > /sys/bus/pci/drivers/vfio-pci/new_id
+        echo 0000:08:10.0 > /sys/bus/pci/devices/0000:08:10.0/driver/unbind
+        echo 0000:08:10.0 > /sys/bus/pci/drivers/vfio-pci/bind
+
+        /usr/local/kvm/bin/qemu-system-x86_64 -m 4096 -smp 4 -boot c -hda lucid.qcow2 -device vfio-pci,host=08:10.0
+
 #.  Install and run DPDK host app to take  over the Physical Function. Eg.
 
     .. code-block:: console
 
-        make install T=x86_64-native-linuxapp-gcc
-        ./x86_64-native-linuxapp-gcc/app/testpmd -c f -n 4 -- -i
+        make install T=x86_64-native-linux-gcc
+        ./x86_64-native-linux-gcc/app/testpmd -l 0-3 -n 4 -- -i
 
 #.  Finally, access the Guest OS using vncviewer with the localhost:5900 port and check the lspci command output in the Guest OS.
     The virtual functions will be listed as available for use.
 
-#.  Configure and install the DPDK with an x86_64-native-linuxapp-gcc configuration on the Guest OS as normal,
+#.  Configure and install the DPDK with an x86_64-native-linux-gcc configuration on the Guest OS as normal,
     that is, there is no change to the normal installation procedure.
 
     .. code-block:: console
 
-        make config T=x86_64-native-linuxapp-gcc O=x86_64-native-linuxapp-gcc
-        cd x86_64-native-linuxapp-gcc
+        make config T=x86_64-native-linux-gcc O=x86_64-native-linux-gcc
+        cd x86_64-native-linux-gcc
         make
 
 .. note::

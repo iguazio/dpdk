@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013 - 2015 Intel Corporation
+ */
 
 #ifndef _FM10K_MBX_H_
 #define _FM10K_MBX_H_
@@ -48,13 +19,14 @@ struct fm10k_mbx_info;
 /* XOR provides means of switching from Tx to Rx FIFO */
 #define FM10K_MBMEM_PF_XOR	(FM10K_MBMEM_SM(0) ^ FM10K_MBMEM_PF(0))
 #define FM10K_MBX(_n)		((_n) + 0x18800)
-#define FM10K_MBX_OWNER				0x00000001
 #define FM10K_MBX_REQ				0x00000002
 #define FM10K_MBX_ACK				0x00000004
 #define FM10K_MBX_REQ_INTERRUPT			0x00000008
 #define FM10K_MBX_ACK_INTERRUPT			0x00000010
 #define FM10K_MBX_INTERRUPT_ENABLE		0x00000020
 #define FM10K_MBX_INTERRUPT_DISABLE		0x00000040
+#define FM10K_MBX_GLOBAL_REQ_INTERRUPT		0x00000200
+#define FM10K_MBX_GLOBAL_ACK_INTERRUPT		0x00000400
 #define FM10K_MBICR(_n)		((_n) + 0x18840)
 #define FM10K_GMBX		0x18842
 
@@ -144,11 +116,11 @@ enum fm10k_mbx_state {
  *		The maximum message size is provided during connect to avoid
  *		jamming the mailbox with messages that do not fit.
  * Err_no: Error number - Applies only to error headers
- *		The error number provides a indication of the type of error
+ *		The error number provides an indication of the type of error
  *		experienced.
  */
 
-/* macros for retriving and setting header values */
+/* macros for retrieving and setting header values */
 #define FM10K_MSG_HDR_MASK(name) \
 	((0x1u << FM10K_MSG_##name##_SIZE) - 1)
 #define FM10K_MSG_HDR_FIELD_SET(value, name) \
@@ -213,7 +185,6 @@ enum fm10k_msg_type {
 /* version number for switch manager mailboxes */
 #define FM10K_SM_MBX_VERSION		1
 #define FM10K_SM_MBX_FIFO_LEN		(FM10K_MBMEM_PF_XOR - 1)
-#define FM10K_SM_MBX_FIFO_HDR_LEN	1
 
 /* offsets shared between all SM FIFO headers */
 #define FM10K_MSG_SM_TAIL_SHIFT			0
@@ -233,18 +204,13 @@ enum fm10k_msg_type {
  */
 #define FM10K_MBX_ERR(_n) ((_n) - 512)
 #define FM10K_MBX_ERR_NO_MBX		FM10K_MBX_ERR(0x01)
-#define FM10K_MBX_ERR_NO_MSG		FM10K_MBX_ERR(0x02)
 #define FM10K_MBX_ERR_NO_SPACE		FM10K_MBX_ERR(0x03)
-#define FM10K_MBX_ERR_LOCK		FM10K_MBX_ERR(0x04)
 #define FM10K_MBX_ERR_TAIL		FM10K_MBX_ERR(0x05)
 #define FM10K_MBX_ERR_HEAD		FM10K_MBX_ERR(0x06)
-#define FM10K_MBX_ERR_DST		FM10K_MBX_ERR(0x07)
 #define FM10K_MBX_ERR_SRC		FM10K_MBX_ERR(0x08)
 #define FM10K_MBX_ERR_TYPE		FM10K_MBX_ERR(0x09)
-#define FM10K_MBX_ERR_LEN		FM10K_MBX_ERR(0x0A)
 #define FM10K_MBX_ERR_SIZE		FM10K_MBX_ERR(0x0B)
 #define FM10K_MBX_ERR_BUSY		FM10K_MBX_ERR(0x0C)
-#define FM10K_MBX_ERR_VALUE		FM10K_MBX_ERR(0x0D)
 #define FM10K_MBX_ERR_RSVD0		FM10K_MBX_ERR(0x0E)
 #define FM10K_MBX_ERR_CRC		FM10K_MBX_ERR(0x0F)
 
@@ -313,8 +279,10 @@ struct fm10k_mbx_info {
 	u64 tx_dropped;
 	u64 tx_messages;
 	u64 tx_dwords;
+	u64 tx_mbmem_pulled;
 	u64 rx_messages;
 	u64 rx_dwords;
+	u64 rx_mbmem_pushed;
 	u64 rx_parse_err;
 
 	/* Buffer to store messages */

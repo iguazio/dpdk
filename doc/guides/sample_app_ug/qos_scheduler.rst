@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 QoS Scheduler Sample Application
 ================================
@@ -49,7 +22,7 @@ There are two flavors of the runtime execution for this application,
 with two or three threads per each packet flow configuration being used.
 The RX thread reads packets from the RX port,
 classifies the packets based on the double VLAN (outer and inner) and
-the lower two bytes of the IP destination address and puts them into the ring queue.
+the lower byte of the IP destination address and puts them into the ring queue.
 The worker thread dequeues the packets from the ring and calls the QoS scheduler enqueue/dequeue functions.
 If a separate TX core is used, these are sent to the TX ring.
 Otherwise, they are sent directly to the TX port.
@@ -58,29 +31,13 @@ The TX thread, if present, reads from the TX ring and write the packets to the T
 Compiling the Application
 -------------------------
 
-To compile the application:
+To compile the sample application see :doc:`compiling`.
 
-#.  Go to the sample application directory:
-
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk cd ${RTE_SDK}/examples/qos_sched
-
-#.  Set the target (a default target is used if not specified). For example:
+The application is located in the ``qos_sched`` sub-directory.
 
     .. note::
 
-        This application is intended as a linuxapp only.
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
+        This application is intended as a linux only.
 
 .. note::
 
@@ -172,18 +129,28 @@ The profile file has the following format:
 
     frame overhead = 24
     number of subports per port = 1
-    number of pipes per subport = 4096
-    queue sizes = 64 64 64 64
 
     ; Subport configuration
 
     [subport 0]
+    number of pipes per subport = 4096
+    queue sizes = 64 64 64 64 64 64 64 64 64 64 64 64 64
     tb rate = 1250000000; Bytes per second
     tb size = 1000000; Bytes
     tc 0 rate = 1250000000;     Bytes per second
     tc 1 rate = 1250000000;     Bytes per second
     tc 2 rate = 1250000000;     Bytes per second
     tc 3 rate = 1250000000;     Bytes per second
+    tc 4 rate = 1250000000;     Bytes per second
+    tc 5 rate = 1250000000;     Bytes per second
+    tc 6 rate = 1250000000;     Bytes per second
+    tc 7 rate = 1250000000;     Bytes per second
+    tc 8 rate = 1250000000;     Bytes per second
+    tc 9 rate = 1250000000;     Bytes per second
+    tc 10 rate = 1250000000;     Bytes per second
+    tc 11 rate = 1250000000;     Bytes per second
+    tc 12 rate = 1250000000;     Bytes per second
+
     tc period = 10;             Milliseconds
     tc oversubscription period = 10;     Milliseconds
 
@@ -199,17 +166,32 @@ The profile file has the following format:
     tc 1 rate = 305175; Bytes per second
     tc 2 rate = 305175; Bytes per second
     tc 3 rate = 305175; Bytes per second
+    tc 4 rate = 305175; Bytes per second
+    tc 5 rate = 305175; Bytes per second
+    tc 6 rate = 305175; Bytes per second
+    tc 7 rate = 305175; Bytes per second
+    tc 8 rate = 305175; Bytes per second
+    tc 9 rate = 305175; Bytes per second
+    tc 10 rate = 305175; Bytes per second
+    tc 11 rate = 305175; Bytes per second
+    tc 12 rate = 305175; Bytes per second
     tc period = 40; Milliseconds
 
     tc 0 oversubscription weight = 1
     tc 1 oversubscription weight = 1
     tc 2 oversubscription weight = 1
     tc 3 oversubscription weight = 1
+    tc 4 oversubscription weight = 1
+    tc 5 oversubscription weight = 1
+    tc 6 oversubscription weight = 1
+    tc 7 oversubscription weight = 1
+    tc 8 oversubscription weight = 1
+    tc 9 oversubscription weight = 1
+    tc 10 oversubscription weight = 1
+    tc 11 oversubscription weight = 1
+    tc 12 oversubscription weight = 1
 
-    tc 0 wrr weights = 1 1 1 1
-    tc 1 wrr weights = 1 1 1 1
-    tc 2 wrr weights = 1 1 1 1
-    tc 3 wrr weights = 1 1 1 1
+    tc 12 wrr weights = 1 1 1 1
 
     ; RED params per traffic class and color (Green / Yellow / Red)
 
@@ -233,6 +215,51 @@ The profile file has the following format:
     tc 3 wred max = 64 64 64
     tc 3 wred inv prob = 10 10 10
     tc 3 wred weight = 9 9 9
+
+    tc 4 wred min = 48 40 32
+    tc 4 wred max = 64 64 64
+    tc 4 wred inv prob = 10 10 10
+    tc 4 wred weight = 9 9 9
+
+    tc 5 wred min = 48 40 32
+    tc 5 wred max = 64 64 64
+    tc 5 wred inv prob = 10 10 10
+    tc 5 wred weight = 9 9 9
+
+    tc 6 wred min = 48 40 32
+    tc 6 wred max = 64 64 64
+    tc 6 wred inv prob = 10 10 10
+    tc 6 wred weight = 9 9 9
+
+    tc 7 wred min = 48 40 32
+    tc 7 wred max = 64 64 64
+    tc 7 wred inv prob = 10 10 10
+    tc 7 wred weight = 9 9 9
+
+    tc 8 wred min = 48 40 32
+    tc 8 wred max = 64 64 64
+    tc 8 wred inv prob = 10 10 10
+    tc 8 wred weight = 9 9 9
+
+    tc 9 wred min = 48 40 32
+    tc 9 wred max = 64 64 64
+    tc 9 wred inv prob = 10 10 10
+    tc 9 wred weight = 9 9 9
+
+    tc 10 wred min = 48 40 32
+    tc 10 wred max = 64 64 64
+    tc 10 wred inv prob = 10 10 10
+    tc 10 wred weight = 9 9 9
+
+    tc 11 wred min = 48 40 32
+    tc 11 wred max = 64 64 64
+    tc 11 wred inv prob = 10 10 10
+    tc 11 wred weight = 9 9 9
+
+    tc 12 wred min = 48 40 32
+    tc 12 wred max = 64 64 64
+    tc 12 wred inv prob = 10 10 10
+    tc 12 wred weight = 9 9 9
 
 Interactive mode
 ~~~~~~~~~~~~~~~~
@@ -288,7 +315,7 @@ The following is an example command with a single packet flow configuration:
 
 .. code-block:: console
 
-    ./qos_sched -c a2 -n 4 -- --pfc "3,2,5,7" --cfg ./profile.cfg
+    ./qos_sched -l 1,5,7 -n 4 -- --pfc "3,2,5,7" --cfg ./profile.cfg
 
 This example uses a single packet flow configuration which creates one RX thread on lcore 5 reading
 from port 3 and a worker thread on lcore 7 writing to port 2.
@@ -297,12 +324,12 @@ Another example with 2 packet flow configurations using different ports but shar
 
 .. code-block:: console
 
-   ./qos_sched -c c6 -n 4 -- --pfc "3,2,2,6,7" --pfc "1,0,2,6,7" --cfg ./profile.cfg
+   ./qos_sched -l 1,2,6,7 -n 4 -- --pfc "3,2,2,6,7" --pfc "1,0,2,6,7" --cfg ./profile.cfg
 
 Note that independent cores for the packet flow configurations for each of the RX, WT and TX thread are also supported,
 providing flexibility to balance the work.
 
-The EAL coremask is constrained to contain the default mastercore 1 and the RX, WT and TX cores only.
+The EAL coremask/corelist is constrained to contain the default mastercore 1 and the RX, WT and TX cores only.
 
 Explanation
 -----------
@@ -338,11 +365,11 @@ This application classifies based on the QinQ double VLAN tags and the IP destin
    | Pipe           | Config (4k)             | Traffic shaped (token bucket)                    | Inner VLAN tag                   |
    |                |                         |                                                  |                                  |
    +----------------+-------------------------+--------------------------------------------------+----------------------------------+
-   | Traffic Class  | 4                       | TCs of the same pipe services in strict priority | Destination IP address (0.0.X.0) |
+   | Traffic Class  | 13                      | TCs of the same pipe services in strict priority | Destination IP address (0.0.0.X) |
    |                |                         |                                                  |                                  |
    +----------------+-------------------------+--------------------------------------------------+----------------------------------+
-   | Queue          | 4                       | Queue of the same TC serviced in WRR             | Destination IP address (0.0.0.X) |
-   |                |                         |                                                  |                                  |
+   | Queue          | High Priority TC: 1,    | Queue of lowest priority traffic                 | Destination IP address (0.0.0.X) |
+   |                | Lowest Priority TC: 4   | class (Best effort) serviced in WRR              |                                  |
    +----------------+-------------------------+--------------------------------------------------+----------------------------------+
 
 Please refer to the "QoS Scheduler" chapter in the *DPDK Programmer's Guide* for more information about these parameters.

@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #include "i40e_osdep.h"
 #include "i40e_register.h"
@@ -136,14 +107,14 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 	obj->cnt = txq_num;
 	obj->base = 0;
 	size_exp = rd32(hw, I40E_GLHMC_LANTXOBJSZ);
-	obj->size = (u64)1 << size_exp;
+	obj->size = BIT_ULL(size_exp);
 
 	/* validate values requested by driver don't exceed HMC capacity */
 	if (txq_num > obj->max_cnt) {
 		ret_code = I40E_ERR_INVALID_HMC_OBJ_COUNT;
 		DEBUGOUT3("i40e_init_lan_hmc: Tx context: asks for 0x%x but max allowed is 0x%x, returns error %d\n",
 			  txq_num, obj->max_cnt, ret_code);
-		goto init_lan_hmc_out;
+		goto free_hmc_out;
 	}
 
 	/* aggregate values into the full LAN object for later */
@@ -159,14 +130,14 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 		     hw->hmc.hmc_obj[I40E_HMC_LAN_TX].size);
 	obj->base = i40e_align_l2obj_base(obj->base);
 	size_exp = rd32(hw, I40E_GLHMC_LANRXOBJSZ);
-	obj->size = (u64)1 << size_exp;
+	obj->size = BIT_ULL(size_exp);
 
 	/* validate values requested by driver don't exceed HMC capacity */
 	if (rxq_num > obj->max_cnt) {
 		ret_code = I40E_ERR_INVALID_HMC_OBJ_COUNT;
 		DEBUGOUT3("i40e_init_lan_hmc: Rx context: asks for 0x%x but max allowed is 0x%x, returns error %d\n",
 			  rxq_num, obj->max_cnt, ret_code);
-		goto init_lan_hmc_out;
+		goto free_hmc_out;
 	}
 
 	/* aggregate values into the full LAN object for later */
@@ -182,14 +153,14 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 		     hw->hmc.hmc_obj[I40E_HMC_LAN_RX].size);
 	obj->base = i40e_align_l2obj_base(obj->base);
 	size_exp = rd32(hw, I40E_GLHMC_FCOEDDPOBJSZ);
-	obj->size = (u64)1 << size_exp;
+	obj->size = BIT_ULL(size_exp);
 
 	/* validate values requested by driver don't exceed HMC capacity */
 	if (fcoe_cntx_num > obj->max_cnt) {
 		ret_code = I40E_ERR_INVALID_HMC_OBJ_COUNT;
 		DEBUGOUT3("i40e_init_lan_hmc: FCoE context: asks for 0x%x but max allowed is 0x%x, returns error %d\n",
 			  fcoe_cntx_num, obj->max_cnt, ret_code);
-		goto init_lan_hmc_out;
+		goto free_hmc_out;
 	}
 
 	/* aggregate values into the full LAN object for later */
@@ -205,14 +176,14 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 		     hw->hmc.hmc_obj[I40E_HMC_FCOE_CTX].size);
 	obj->base = i40e_align_l2obj_base(obj->base);
 	size_exp = rd32(hw, I40E_GLHMC_FCOEFOBJSZ);
-	obj->size = (u64)1 << size_exp;
+	obj->size = BIT_ULL(size_exp);
 
 	/* validate values requested by driver don't exceed HMC capacity */
 	if (fcoe_filt_num > obj->max_cnt) {
 		ret_code = I40E_ERR_INVALID_HMC_OBJ_COUNT;
 		DEBUGOUT3("i40e_init_lan_hmc: FCoE filter: asks for 0x%x but max allowed is 0x%x, returns error %d\n",
 			  fcoe_filt_num, obj->max_cnt, ret_code);
-		goto init_lan_hmc_out;
+		goto free_hmc_out;
 	}
 
 	/* aggregate values into the full LAN object for later */
@@ -233,7 +204,7 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 					  (sizeof(struct i40e_hmc_sd_entry) *
 					  hw->hmc.sd_table.sd_cnt));
 		if (ret_code)
-			goto init_lan_hmc_out;
+			goto free_hmc_out;
 		hw->hmc.sd_table.sd_entry =
 			(struct i40e_hmc_sd_entry *)hw->hmc.sd_table.addr.va;
 	}
@@ -241,6 +212,11 @@ enum i40e_status_code i40e_init_lan_hmc(struct i40e_hw *hw, u32 txq_num,
 	full_obj->size = l2fpm_size;
 
 init_lan_hmc_out:
+	return ret_code;
+free_hmc_out:
+	if (hw->hmc.hmc_obj_virt_mem.va)
+		i40e_free_virt_mem(hw, &hw->hmc.hmc_obj_virt_mem);
+
 	return ret_code;
 }
 
@@ -394,7 +370,7 @@ enum i40e_status_code i40e_create_lan_hmc_object(struct i40e_hw *hw,
 				/* update the pd table entry */
 				ret_code = i40e_add_pd_table_entry(hw,
 								info->hmc_info,
-								i);
+								i, NULL);
 				if (I40E_SUCCESS != ret_code) {
 					pd_error = true;
 					break;
@@ -438,9 +414,8 @@ exit_sd_error:
 			pd_idx1 = max(pd_idx,
 				      ((j - 1) * I40E_HMC_MAX_BP_COUNT));
 			pd_lmt1 = min(pd_lmt, (j * I40E_HMC_MAX_BP_COUNT));
-			for (i = pd_idx1; i < pd_lmt1; i++) {
+			for (i = pd_idx1; i < pd_lmt1; i++)
 				i40e_remove_pd_bp(hw, info->hmc_info, i);
-			}
 			i40e_remove_pd_page(hw, info->hmc_info, (j - 1));
 			break;
 		case I40E_SD_TYPE_DIRECT:
@@ -770,7 +745,7 @@ static void i40e_write_byte(u8 *hmc_bits,
 
 	/* prepare the bits and mask */
 	shift_width = ce_info->lsb % 8;
-	mask = ((u8)1 << ce_info->width) - 1;
+	mask = (u8)(BIT(ce_info->width) - 1);
 
 	src_byte = *from;
 	src_byte &= mask;
@@ -811,7 +786,7 @@ static void i40e_write_word(u8 *hmc_bits,
 
 	/* prepare the bits and mask */
 	shift_width = ce_info->lsb % 8;
-	mask = ((u16)1 << ce_info->width) - 1;
+	mask = BIT(ce_info->width) - 1;
 
 	/* don't swizzle the bits until after the mask because the mask bits
 	 * will be in a different bit position on big endian machines
@@ -861,7 +836,7 @@ static void i40e_write_dword(u8 *hmc_bits,
 	 * to 5 bits so the shift will do nothing
 	 */
 	if (ce_info->width < 32)
-		mask = ((u32)1 << ce_info->width) - 1;
+		mask = BIT(ce_info->width) - 1;
 	else
 		mask = ~(u32)0;
 
@@ -913,7 +888,7 @@ static void i40e_write_qword(u8 *hmc_bits,
 	 * to 6 bits so the shift will do nothing
 	 */
 	if (ce_info->width < 64)
-		mask = ((u64)1 << ce_info->width) - 1;
+		mask = BIT_ULL(ce_info->width) - 1;
 	else
 		mask = ~(u64)0;
 
@@ -955,7 +930,7 @@ static void i40e_read_byte(u8 *hmc_bits,
 
 	/* prepare the bits and mask */
 	shift_width = ce_info->lsb % 8;
-	mask = ((u8)1 << ce_info->width) - 1;
+	mask = (u8)(BIT(ce_info->width) - 1);
 
 	/* shift to correct alignment */
 	mask <<= shift_width;
@@ -993,7 +968,7 @@ static void i40e_read_word(u8 *hmc_bits,
 
 	/* prepare the bits and mask */
 	shift_width = ce_info->lsb % 8;
-	mask = ((u16)1 << ce_info->width) - 1;
+	mask = BIT(ce_info->width) - 1;
 
 	/* shift to correct alignment */
 	mask <<= shift_width;
@@ -1043,7 +1018,7 @@ static void i40e_read_dword(u8 *hmc_bits,
 	 * to 5 bits so the shift will do nothing
 	 */
 	if (ce_info->width < 32)
-		mask = ((u32)1 << ce_info->width) - 1;
+		mask = BIT(ce_info->width) - 1;
 	else
 		mask = ~(u32)0;
 
@@ -1096,7 +1071,7 @@ static void i40e_read_qword(u8 *hmc_bits,
 	 * to 6 bits so the shift will do nothing
 	 */
 	if (ce_info->width < 64)
-		mask = ((u64)1 << ce_info->width) - 1;
+		mask = BIT_ULL(ce_info->width) - 1;
 	else
 		mask = ~(u64)0;
 
@@ -1240,11 +1215,6 @@ enum i40e_status_code i40e_hmc_get_object_va(struct i40e_hw *hw,
 	u64 obj_offset_in_fpm;
 	u32 sd_idx, sd_lmt;
 
-	if (NULL == hmc_info) {
-		ret_code = I40E_ERR_BAD_PTR;
-		DEBUGOUT("i40e_hmc_get_object_va: bad hmc_info ptr\n");
-		goto exit;
-	}
 	if (NULL == hmc_info->hmc_obj) {
 		ret_code = I40E_ERR_BAD_PTR;
 		DEBUGOUT("i40e_hmc_get_object_va: bad hmc_info->hmc_obj ptr\n");

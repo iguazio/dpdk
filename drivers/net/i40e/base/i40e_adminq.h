@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #ifndef _I40E_ADMINQ_H_
 #define _I40E_ADMINQ_H_
@@ -76,6 +47,7 @@ struct i40e_asq_cmd_details {
 	u16 flags_dis;
 	bool async;
 	bool postpone;
+	struct i40e_aq_desc *wb_desc;
 };
 
 #define I40E_ADMINQ_DETAILS(R, i)   \
@@ -103,7 +75,6 @@ struct i40e_adminq_info {
 	u32 fw_build;                   /* firmware build number */
 	u16 api_maj_ver;                /* api major version */
 	u16 api_min_ver;                /* api minor version */
-	bool nvm_release_on_done;
 
 	struct i40e_spinlock asq_spinlock; /* Send queue spinlock */
 	struct i40e_spinlock arq_spinlock; /* Receive queue spinlock */
@@ -115,9 +86,10 @@ struct i40e_adminq_info {
 
 /**
  * i40e_aq_rc_to_posix - convert errors to user-land codes
- * aq_rc: AdminQ error code to convert
+ * aq_ret: AdminQ handler error code can override aq_rc
+ * aq_rc: AdminQ firmware error code to convert
  **/
-STATIC inline int i40e_aq_rc_to_posix(int aq_ret, u16 aq_rc)
+STATIC INLINE int i40e_aq_rc_to_posix(int aq_ret, int aq_rc)
 {
 	int aq_to_posix[] = {
 		0,           /* I40E_AQ_RC_OK */
@@ -149,14 +121,15 @@ STATIC inline int i40e_aq_rc_to_posix(int aq_ret, u16 aq_rc)
 	if (aq_ret == I40E_ERR_ADMIN_QUEUE_TIMEOUT)
 		return -EAGAIN;
 
-	if (aq_rc >= (sizeof(aq_to_posix) / sizeof((aq_to_posix)[0])))
+	if (!((u32)aq_rc < (sizeof(aq_to_posix) / sizeof((aq_to_posix)[0]))))
 		return -ERANGE;
+
 	return aq_to_posix[aq_rc];
 }
 
 /* general information */
-#define I40E_AQ_LARGE_BUF		512
-#define I40E_ASQ_CMD_TIMEOUT		250  /* msecs */
+#define I40E_AQ_LARGE_BUF	512
+#define I40E_ASQ_CMD_TIMEOUT	250000  /* usecs */
 
 void i40e_fill_default_direct_cmd_desc(struct i40e_aq_desc *desc,
 				       u16 opcode);

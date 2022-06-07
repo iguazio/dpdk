@@ -1,44 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
+#include <rte_ip.h>
+#include <rte_string_fns.h>
 #include <rte_hexdump.h>
 #include "test_table.h"
 #include "test_table_acl.h"
-
-#define IPv4(a, b, c, d) ((uint32_t)(((a) & 0xff) << 24) |		\
-	(((b) & 0xff) << 16) |						\
-	(((c) & 0xff) << 8) |						\
-	((d) & 0xff))
 
 /*
  * Rule and trace formats definitions.
@@ -144,7 +112,7 @@ parse_ipv4_net(const char *in, uint32_t *addr, uint32_t *mask_len)
 	GET_CB_FIELD(in, d, 0, UINT8_MAX, '/');
 	GET_CB_FIELD(in, m, 0, sizeof(uint32_t) * CHAR_BIT, 0);
 
-	addr[0] = IPv4(a, b, c, d);
+	addr[0] = RTE_IPV4(a, b, c, d);
 	mask_len[0] = m;
 
 	return 0;
@@ -253,6 +221,94 @@ parse_cb_ipv4_rule(char *str, struct rte_table_acl_rule_add_params *v)
 	return 0;
 }
 
+static int
+parse_cb_ipv4_rule_del(char *str, struct rte_table_acl_rule_delete_params *v)
+{
+	int i, rc;
+	char *s, *sp, *in[CB_FLD_NUM];
+	static const char *dlm = " \t\n";
+
+	/*
+	** Skip leading '@'
+	*/
+	if (strchr(str, '@') != str)
+		return -EINVAL;
+
+	s = str + 1;
+
+	/*
+	* Populate the 'in' array with the location of each
+	* field in the string we're parsing
+	*/
+	for (i = 0; i != DIM(in); i++) {
+		in[i] = strtok_r(s, dlm, &sp);
+		if (in[i] == NULL)
+			return -EINVAL;
+		s = NULL;
+	}
+
+	/* Parse x.x.x.x/x */
+	rc = parse_ipv4_net(in[CB_FLD_SRC_ADDR],
+		&v->field_value[SRC_FIELD_IPV4].value.u32,
+		&v->field_value[SRC_FIELD_IPV4].mask_range.u32);
+	if (rc != 0) {
+		RTE_LOG(ERR, PIPELINE, "failed to read src address/mask: %s\n",
+			in[CB_FLD_SRC_ADDR]);
+		return rc;
+	}
+
+	printf("V=%u, mask=%u\n", v->field_value[SRC_FIELD_IPV4].value.u32,
+		v->field_value[SRC_FIELD_IPV4].mask_range.u32);
+
+	/* Parse x.x.x.x/x */
+	rc = parse_ipv4_net(in[CB_FLD_DST_ADDR],
+		&v->field_value[DST_FIELD_IPV4].value.u32,
+		&v->field_value[DST_FIELD_IPV4].mask_range.u32);
+	if (rc != 0) {
+		RTE_LOG(ERR, PIPELINE, "failed to read dest address/mask: %s\n",
+			in[CB_FLD_DST_ADDR]);
+		return rc;
+	}
+
+	printf("V=%u, mask=%u\n", v->field_value[DST_FIELD_IPV4].value.u32,
+	v->field_value[DST_FIELD_IPV4].mask_range.u32);
+	/* Parse n:n */
+	rc = parse_port_range(in[CB_FLD_SRC_PORT_RANGE],
+		&v->field_value[SRCP_FIELD_IPV4].value.u16,
+		&v->field_value[SRCP_FIELD_IPV4].mask_range.u16);
+	if (rc != 0) {
+		RTE_LOG(ERR, PIPELINE, "failed to read source port range: %s\n",
+			in[CB_FLD_SRC_PORT_RANGE]);
+		return rc;
+	}
+
+	printf("V=%u, mask=%u\n", v->field_value[SRCP_FIELD_IPV4].value.u16,
+		v->field_value[SRCP_FIELD_IPV4].mask_range.u16);
+	/* Parse n:n */
+	rc = parse_port_range(in[CB_FLD_DST_PORT_RANGE],
+		&v->field_value[DSTP_FIELD_IPV4].value.u16,
+		&v->field_value[DSTP_FIELD_IPV4].mask_range.u16);
+	if (rc != 0) {
+		RTE_LOG(ERR, PIPELINE, "failed to read dest port range: %s\n",
+			in[CB_FLD_DST_PORT_RANGE]);
+		return rc;
+	}
+
+	printf("V=%u, mask=%u\n", v->field_value[DSTP_FIELD_IPV4].value.u16,
+		v->field_value[DSTP_FIELD_IPV4].mask_range.u16);
+	/* parse 0/0xnn */
+	GET_CB_FIELD(in[CB_FLD_PROTO],
+		v->field_value[PROTO_FIELD_IPV4].value.u8,
+		0, UINT8_MAX, '/');
+	GET_CB_FIELD(in[CB_FLD_PROTO],
+		v->field_value[PROTO_FIELD_IPV4].mask_range.u8,
+		0, UINT8_MAX, 0);
+
+	printf("V=%u, mask=%u\n",
+		(unsigned int)v->field_value[PROTO_FIELD_IPV4].value.u8,
+		v->field_value[PROTO_FIELD_IPV4].mask_range.u8);
+	return 0;
+}
 
 /*
  * The format for these rules DO NOT need the port ranges to be
@@ -393,6 +449,86 @@ setup_acl_pipeline(void)
 		}
 	}
 
+	/* Add bulk entries to tables */
+	for (i = 0; i < N_PORTS; i++) {
+		struct rte_table_acl_rule_add_params keys[5];
+		struct rte_pipeline_table_entry entries[5];
+		struct rte_table_acl_rule_add_params *key_array[5];
+		struct rte_pipeline_table_entry *table_entries[5];
+		int key_found[5];
+		struct rte_pipeline_table_entry *table_entries_ptr[5];
+		struct rte_pipeline_table_entry entries_ptr[5];
+
+		parser = parse_cb_ipv4_rule;
+		for (n = 0; n < 5; n++) {
+			memset(&keys[n], 0, sizeof(struct rte_table_acl_rule_add_params));
+			key_array[n] = &keys[n];
+
+			strlcpy(line, lines[n], sizeof(line));
+			printf("PARSING [%s]\n", line);
+
+			ret = parser(line, &keys[n]);
+			if (ret != 0) {
+				RTE_LOG(ERR, PIPELINE,
+					"line %u: parse_cb_ipv4vlan_rule"
+					" failed, error code: %d (%s)\n",
+					n, ret, strerror(-ret));
+				return ret;
+			}
+
+			keys[n].priority = RTE_ACL_MAX_PRIORITY - n - 1;
+
+			entries[n].action = RTE_PIPELINE_ACTION_PORT;
+			entries[n].port_id = port_out_id[i^1];
+			table_entries[n] = &entries[n];
+			table_entries_ptr[n] = &entries_ptr[n];
+		}
+
+		ret = rte_pipeline_table_entry_add_bulk(p, table_id[i],
+				(void **)key_array, table_entries, 5, key_found, table_entries_ptr);
+		if (ret < 0) {
+			rte_panic("Add entry bulk to table %u failed (%d)\n",
+				table_id[i], ret);
+			goto fail;
+		}
+	}
+
+	/* Delete bulk entries from tables */
+	for (i = 0; i < N_PORTS; i++) {
+		struct rte_table_acl_rule_delete_params keys[5];
+		struct rte_table_acl_rule_delete_params *key_array[5];
+		struct rte_pipeline_table_entry *table_entries[5];
+		int key_found[5];
+
+		memset(table_entries, 0, sizeof(table_entries));
+
+		for (n = 0; n < 5; n++) {
+			memset(&keys[n], 0, sizeof(struct rte_table_acl_rule_delete_params));
+			key_array[n] = &keys[n];
+
+			strlcpy(line, lines[n], sizeof(line));
+			printf("PARSING [%s]\n", line);
+
+			ret = parse_cb_ipv4_rule_del(line, &keys[n]);
+			if (ret != 0) {
+				RTE_LOG(ERR, PIPELINE,
+					"line %u: parse_cb_ipv4vlan_rule"
+					" failed, error code: %d (%s)\n",
+					n, ret, strerror(-ret));
+				return ret;
+			}
+		}
+
+		ret = rte_pipeline_table_entry_delete_bulk(p, table_id[i],
+			(void **)key_array, 5, key_found, table_entries);
+		if (ret < 0) {
+			rte_panic("Delete bulk entries from table %u failed (%d)\n",
+				table_id[i], ret);
+			goto fail;
+		} else
+			printf("Bulk deleted rules.\n");
+	}
+
 	/* Add entries to tables */
 	for (i = 0; i < N_PORTS; i++) {
 		struct rte_pipeline_table_entry table_entry = {
@@ -406,7 +542,7 @@ setup_acl_pipeline(void)
 		parser = parse_cb_ipv4_rule;
 
 		for (n = 1; n <= 5; n++) {
-			snprintf(line, sizeof(line), "%s", lines[n-1]);
+			strlcpy(line, lines[n - 1], sizeof(line));
 			printf("PARSING [%s]\n", line);
 
 			ret = parser(line, &rule_params);
@@ -432,7 +568,7 @@ setup_acl_pipeline(void)
 
 		/* delete a few rules */
 		for (n = 2; n <= 3; n++) {
-			snprintf(line, sizeof(line), "%s", lines[n-1]);
+			strlcpy(line, lines[n - 1], sizeof(line));
 			printf("PARSING [%s]\n", line);
 
 			ret = parser(line, &rule_params);
@@ -459,7 +595,7 @@ setup_acl_pipeline(void)
 
 		/* Try to add duplicates */
 		for (n = 1; n <= 5; n++) {
-			snprintf(line, sizeof(line), "%s", lines[n-1]);
+			strlcpy(line, lines[n - 1], sizeof(line));
 			printf("PARSING [%s]\n", line);
 
 			ret = parser(line, &rule_params);
@@ -522,8 +658,8 @@ test_pipeline_single_filter(int expected_count)
 				sizeof(struct ipv4_5tuple));
 
 			five_tuple.proto = j;
-			five_tuple.ip_src = rte_bswap32(IPv4(192, 168, j, 1));
-			five_tuple.ip_dst = rte_bswap32(IPv4(10, 4, j, 1));
+			five_tuple.ip_src = rte_bswap32(RTE_IPV4(192, 168, j, 1));
+			five_tuple.ip_dst = rte_bswap32(RTE_IPV4(10, 4, j, 1));
 			five_tuple.port_src = rte_bswap16(100 + j);
 			five_tuple.port_dst = rte_bswap16(200 + j);
 
@@ -536,7 +672,8 @@ test_pipeline_single_filter(int expected_count)
 	}
 
 	/* Run pipeline once */
-	rte_pipeline_run(p);
+	for (i = 0; i< N_PORTS; i++)
+		rte_pipeline_run(p);
 
 	rte_pipeline_flush(p);
 
@@ -546,14 +683,14 @@ test_pipeline_single_filter(int expected_count)
 		void *objs[RING_TX_SIZE];
 		struct rte_mbuf *mbuf;
 
-		ret = rte_ring_sc_dequeue_burst(rings_tx[i], objs, 10);
+		ret = rte_ring_sc_dequeue_burst(rings_tx[i], objs, 10, NULL);
 		if (ret <= 0) {
 			printf("Got no objects from ring %d - error code %d\n",
 				i, ret);
 		} else {
 			printf("Got %d object(s) from ring %d!\n", ret, i);
 			for (j = 0; j < ret; j++) {
-				mbuf = (struct rte_mbuf *)objs[j];
+				mbuf = objs[j];
 				rte_hexdump(stdout, "mbuf",
 					rte_pktmbuf_mtod(mbuf, char *), 64);
 				rte_pktmbuf_free(mbuf);
@@ -579,7 +716,7 @@ fail:
 }
 
 int
-test_table_ACL(void)
+test_table_acl(void)
 {
 
 

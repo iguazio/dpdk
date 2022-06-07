@@ -1,39 +1,8 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
-#include "test.h"
-#include "stdio.h"
-
+#include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -77,7 +46,6 @@ test_reorder_create(void)
 			"No error on create() with invalid buffer size param.");
 
 	b = rte_reorder_create("PKT_RO1", rte_socket_id(), REORDER_BUFFER_SIZE);
-	printf("DEBUG: b= %p, orig_b= %p\n", b, test_params->b);
 	TEST_ASSERT_EQUAL(b, test_params->b,
 			"New reorder instance created with already existing name");
 
@@ -165,7 +133,7 @@ test_reorder_insert(void)
 	struct rte_reorder_buffer *b = NULL;
 	struct rte_mempool *p = test_params->p;
 	const unsigned int size = 4;
-	const unsigned int num_bufs = 6;
+	const unsigned int num_bufs = 7;
 	struct rte_mbuf *bufs[num_bufs];
 	int ret = 0;
 	unsigned i;
@@ -178,21 +146,11 @@ test_reorder_insert(void)
 	b = rte_reorder_create("test_insert", rte_socket_id(), size);
 	TEST_ASSERT_NOT_NULL(b, "Failed to create reorder buffer");
 
-	ret = rte_mempool_get_bulk(p, (void *)bufs, num_bufs);
-	TEST_ASSERT_SUCCESS(ret, "Error getting mbuf from pool");
-
-	/* late packet */
-	bufs[0]->seqn = 3 * size;
-	ret = rte_reorder_insert(b, bufs[0]);
-	if (!((ret == -1) && (rte_errno == ERANGE))) {
-		printf("%s:%d: No error inserting late packet with seqn:"
-				" 3 * size\n", __func__, __LINE__);
-		ret = -1;
-		goto exit;
-	}
-
-	for (i = 0; i < num_bufs; i++)
+	for (i = 0; i < num_bufs; i++) {
+		bufs[i] = rte_pktmbuf_alloc(p);
+		TEST_ASSERT_NOT_NULL(bufs[i], "Packet allocation failed\n");
 		bufs[i]->seqn = i;
+	}
 
 	/* This should fill up order buffer:
 	 * reorder_seq = 0
@@ -207,6 +165,7 @@ test_reorder_insert(void)
 			ret = -1;
 			goto exit;
 		}
+		bufs[i] = NULL;
 	}
 
 	/* early packet - should move mbufs to ready buf and move sequence window
@@ -221,6 +180,7 @@ test_reorder_insert(void)
 		ret = -1;
 		goto exit;
 	}
+	bufs[4] = NULL;
 
 	/* early packet from current sequence window - full ready buffer */
 	bufs[5]->seqn = 2 * size;
@@ -231,11 +191,26 @@ test_reorder_insert(void)
 		ret = -1;
 		goto exit;
 	}
+	bufs[5] = NULL;
+
+	/* late packet */
+	bufs[6]->seqn = 3 * size;
+	ret = rte_reorder_insert(b, bufs[6]);
+	if (!((ret == -1) && (rte_errno == ERANGE))) {
+		printf("%s:%d: No error inserting late packet with seqn:"
+				" 3 * size\n", __func__, __LINE__);
+		ret = -1;
+		goto exit;
+	}
+	bufs[6] = NULL;
 
 	ret = 0;
 exit:
-	rte_mempool_put_bulk(p, (void *)bufs, num_bufs);
 	rte_reorder_free(b);
+	for (i = 0; i < num_bufs; i++) {
+		if (bufs[i] != NULL)
+			rte_pktmbuf_free(bufs[i]);
+	}
 	return ret;
 }
 
@@ -245,24 +220,26 @@ test_reorder_drain(void)
 	struct rte_reorder_buffer *b = NULL;
 	struct rte_mempool *p = test_params->p;
 	const unsigned int size = 4;
-	const unsigned int num_bufs = 10;
+	const unsigned int num_bufs = 8;
 	struct rte_mbuf *bufs[num_bufs];
+	struct rte_mbuf *robufs[num_bufs];
 	int ret = 0;
 	unsigned i, cnt;
+
+	/* initialize all robufs to NULL */
+	for (i = 0; i < num_bufs; i++)
+		robufs[i] = NULL;
 
 	/* This would create a reorder buffer instance consisting of:
 	 * reorder_seq = 0
 	 * ready_buf: RB[size] = {NULL, NULL, NULL, NULL}
 	 * order_buf: OB[size] = {NULL, NULL, NULL, NULL}
 	 */
-	b = rte_reorder_create("test_insert", rte_socket_id(), size);
+	b = rte_reorder_create("test_drain", rte_socket_id(), size);
 	TEST_ASSERT_NOT_NULL(b, "Failed to create reorder buffer");
 
-	ret = rte_mempool_get_bulk(p, (void *)bufs, num_bufs);
-	TEST_ASSERT_SUCCESS(ret, "Error getting mbuf from pool");
-
 	/* Check no drained packets if reorder is empty */
-	cnt = rte_reorder_drain(b, bufs, 1);
+	cnt = rte_reorder_drain(b, robufs, 1);
 	if (cnt != 0) {
 		printf("%s:%d: drained packets from empty reorder buffer\n",
 				__func__, __LINE__);
@@ -270,66 +247,86 @@ test_reorder_drain(void)
 		goto exit;
 	}
 
-	for (i = 0; i < num_bufs; i++)
+	for (i = 0; i < num_bufs; i++) {
+		bufs[i] = rte_pktmbuf_alloc(p);
+		TEST_ASSERT_NOT_NULL(bufs[i], "Packet allocation failed\n");
 		bufs[i]->seqn = i;
+	}
 
 	/* Insert packet with seqn 1:
 	 * reorder_seq = 0
 	 * RB[] = {NULL, NULL, NULL, NULL}
-	 * OB[] = {NULL, 1, NULL, NULL}
+	 * OB[] = {1, NULL, NULL, NULL}
 	 */
 	rte_reorder_insert(b, bufs[1]);
+	bufs[1] = NULL;
 
-	/* Check no drained packets if no ready/order packets */
-	cnt = rte_reorder_drain(b, bufs, 1);
-	if (cnt != 0) {
-		printf("%s:%d: drained packets from empty reorder buffer\n",
-				__func__, __LINE__);
+	cnt = rte_reorder_drain(b, robufs, 1);
+	if (cnt != 1) {
+		printf("%s:%d:%d: number of expected packets not drained\n",
+				__func__, __LINE__, cnt);
 		ret = -1;
 		goto exit;
 	}
+	if (robufs[0] != NULL)
+		rte_pktmbuf_free(robufs[0]);
 
 	/* Insert more packets
 	 * RB[] = {NULL, NULL, NULL, NULL}
-	 * OB[] = {0, 1, NULL, 3}
+	 * OB[] = {NULL, 2, 3, NULL}
 	 */
-	rte_reorder_insert(b, bufs[0]);
+	rte_reorder_insert(b, bufs[2]);
 	rte_reorder_insert(b, bufs[3]);
+	bufs[2] = NULL;
+	bufs[3] = NULL;
+
+	/* Insert more packets
+	 * RB[] = {NULL, NULL, NULL, NULL}
+	 * OB[] = {NULL, 2, 3, 4}
+	 */
+	rte_reorder_insert(b, bufs[4]);
+	bufs[4] = NULL;
+
+	/* Insert more packets
+	 * RB[] = {2, 3, 4, NULL}
+	 * OB[] = {NULL, NULL, 7, NULL}
+	 */
+	rte_reorder_insert(b, bufs[7]);
+	bufs[7] = NULL;
 
 	/* drained expected packets */
-	cnt = rte_reorder_drain(b, bufs, 4);
-	if (cnt != 2) {
+	cnt = rte_reorder_drain(b, robufs, 4);
+	if (cnt != 3) {
 		printf("%s:%d:%d: number of expected packets not drained\n",
 				__func__, __LINE__, cnt);
 		ret = -1;
 		goto exit;
+	}
+	for (i = 0; i < 3; i++) {
+		if (robufs[i] != NULL)
+			rte_pktmbuf_free(robufs[i]);
 	}
 
 	/*
 	 * RB[] = {NULL, NULL, NULL, NULL}
-	 * OB[] = {NULL, 3, NULL, NULL}
-	 */
-
-	rte_reorder_insert(b, bufs[4]);
-	rte_reorder_insert(b, bufs[7]);
-
-	/*
-	 * RB[] = {3, 4, NULL, NULL}
 	 * OB[] = {NULL, NULL, 7, NULL}
 	 */
-
-	cnt = rte_reorder_drain(b, bufs, 4);
-	if (cnt != 2) {
+	cnt = rte_reorder_drain(b, robufs, 1);
+	if (cnt != 0) {
 		printf("%s:%d:%d: number of expected packets not drained\n",
 				__func__, __LINE__, cnt);
 		ret = -1;
 		goto exit;
 	}
-
 	ret = 0;
 exit:
-	rte_mempool_put_bulk(p, (void *)bufs, num_bufs);
 	rte_reorder_free(b);
+	for (i = 0; i < num_bufs; i++) {
+		if (bufs[i] != NULL)
+			rte_pktmbuf_free(bufs[i]);
+		if (robufs[i] != NULL)
+			rte_pktmbuf_free(robufs[i]);
+	}
 	return ret;
 }
 
@@ -361,9 +358,20 @@ test_setup(void)
 	return 0;
 }
 
+static void
+test_teardown(void)
+{
+	rte_reorder_free(test_params->b);
+	test_params->b = NULL;
+	rte_mempool_free(test_params->p);
+	test_params->p = NULL;
+}
+
+
 static struct unit_test_suite reorder_test_suite  = {
 
 	.setup = test_setup,
+	.teardown = test_teardown,
 	.suite_name = "Reorder Unit Test Suite",
 	.unit_test_cases = {
 		TEST_CASE(test_reorder_create),
@@ -382,8 +390,4 @@ test_reorder(void)
 	return unit_test_suite_runner(&reorder_test_suite);
 }
 
-static struct test_command reorder_cmd = {
-	.command = "reorder_autotest",
-	.callback = test_reorder,
-};
-REGISTER_TEST_COMMAND(reorder_cmd);
+REGISTER_TEST_COMMAND(reorder_autotest, test_reorder);

@@ -1,67 +1,11 @@
-/*-
- *   BSD LICENSE
+/* SPDX-License-Identifier: BSD-3-Clause
  *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-/*
- * Derived from FreeBSD's bufring.c
- *
- **************************************************************************
- *
+ * Copyright (c) 2010-2015 Intel Corporation
  * Copyright (c) 2007,2008 Kip Macy kmacy@freebsd.org
  * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- *    this list of conditions and the following disclaimer.
- *
- * 2. The name of Kip Macy nor the names of other
- *    contributors may be used to endorse or promote products derived from
- *    this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- ***************************************************************************/
+ * Derived from FreeBSD's bufring.h
+ * Used as BSD-3 Licensed with permission from Kip Macy.
+ */
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -86,8 +30,10 @@
 #include <rte_errno.h>
 #include <rte_string_fns.h>
 #include <rte_spinlock.h>
+#include <rte_tailq.h>
 
 #include "rte_ring.h"
+#include "rte_ring_elem.h"
 
 TAILQ_HEAD(rte_ring_list, rte_tailq_entry);
 
@@ -96,67 +42,212 @@ static struct rte_tailq_elem rte_ring_tailq = {
 };
 EAL_REGISTER_TAILQ(rte_ring_tailq)
 
+/* mask of all valid flag values to ring_create() */
+#define RING_F_MASK (RING_F_SP_ENQ | RING_F_SC_DEQ | RING_F_EXACT_SZ | \
+		     RING_F_MP_RTS_ENQ | RING_F_MC_RTS_DEQ |	       \
+		     RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ)
+
 /* true if x is a power of 2 */
 #define POWEROF2(x) ((((x)-1) & (x)) == 0)
 
+/* by default set head/tail distance as 1/8 of ring capacity */
+#define HTD_MAX_DEF	8
+
 /* return the size of memory occupied by a ring */
 ssize_t
-rte_ring_get_memsize(unsigned count)
+rte_ring_get_memsize_elem(unsigned int esize, unsigned int count)
 {
 	ssize_t sz;
+
+	/* Check if element size is a multiple of 4B */
+	if (esize % 4 != 0) {
+		RTE_LOG(ERR, RING, "element size is not a multiple of 4\n");
+
+		return -EINVAL;
+	}
 
 	/* count must be a power of 2 */
 	if ((!POWEROF2(count)) || (count > RTE_RING_SZ_MASK )) {
 		RTE_LOG(ERR, RING,
-			"Requested size is invalid, must be power of 2, and "
-			"do not exceed the size limit %u\n", RTE_RING_SZ_MASK);
+			"Requested number of elements is invalid, must be power of 2, and not exceed %u\n",
+			RTE_RING_SZ_MASK);
+
 		return -EINVAL;
 	}
 
-	sz = sizeof(struct rte_ring) + count * sizeof(void *);
+	sz = sizeof(struct rte_ring) + count * esize;
 	sz = RTE_ALIGN(sz, RTE_CACHE_LINE_SIZE);
 	return sz;
 }
 
-int
-rte_ring_init(struct rte_ring *r, const char *name, unsigned count,
-	unsigned flags)
+/* return the size of memory occupied by a ring */
+ssize_t
+rte_ring_get_memsize(unsigned int count)
 {
-	/* compilation-time checks */
-	RTE_BUILD_BUG_ON((sizeof(struct rte_ring) &
-			  RTE_CACHE_LINE_MASK) != 0);
-#ifdef RTE_RING_SPLIT_PROD_CONS
-	RTE_BUILD_BUG_ON((offsetof(struct rte_ring, cons) &
-			  RTE_CACHE_LINE_MASK) != 0);
-#endif
-	RTE_BUILD_BUG_ON((offsetof(struct rte_ring, prod) &
-			  RTE_CACHE_LINE_MASK) != 0);
-#ifdef RTE_LIBRTE_RING_DEBUG
-	RTE_BUILD_BUG_ON((sizeof(struct rte_ring_debug_stats) &
-			  RTE_CACHE_LINE_MASK) != 0);
-	RTE_BUILD_BUG_ON((offsetof(struct rte_ring, stats) &
-			  RTE_CACHE_LINE_MASK) != 0);
-#endif
+	return rte_ring_get_memsize_elem(sizeof(void *), count);
+}
 
-	/* init the ring structure */
-	memset(r, 0, sizeof(*r));
-	snprintf(r->name, sizeof(r->name), "%s", name);
-	r->flags = flags;
-	r->prod.watermark = count;
-	r->prod.sp_enqueue = !!(flags & RING_F_SP_ENQ);
-	r->cons.sc_dequeue = !!(flags & RING_F_SC_DEQ);
-	r->prod.size = r->cons.size = count;
-	r->prod.mask = r->cons.mask = count-1;
-	r->prod.head = r->cons.head = 0;
-	r->prod.tail = r->cons.tail = 0;
+/*
+ * internal helper function to reset prod/cons head-tail values.
+ */
+static void
+reset_headtail(void *p)
+{
+	struct rte_ring_headtail *ht;
+	struct rte_ring_hts_headtail *ht_hts;
+	struct rte_ring_rts_headtail *ht_rts;
+
+	ht = p;
+	ht_hts = p;
+	ht_rts = p;
+
+	switch (ht->sync_type) {
+	case RTE_RING_SYNC_MT:
+	case RTE_RING_SYNC_ST:
+		ht->head = 0;
+		ht->tail = 0;
+		break;
+	case RTE_RING_SYNC_MT_RTS:
+		ht_rts->head.raw = 0;
+		ht_rts->tail.raw = 0;
+		break;
+	case RTE_RING_SYNC_MT_HTS:
+		ht_hts->ht.raw = 0;
+		break;
+	default:
+		/* unknown sync mode */
+		RTE_ASSERT(0);
+	}
+}
+
+void
+rte_ring_reset(struct rte_ring *r)
+{
+	reset_headtail(&r->prod);
+	reset_headtail(&r->cons);
+}
+
+/*
+ * helper function, calculates sync_type values for prod and cons
+ * based on input flags. Returns zero at success or negative
+ * errno value otherwise.
+ */
+static int
+get_sync_type(uint32_t flags, enum rte_ring_sync_type *prod_st,
+	enum rte_ring_sync_type *cons_st)
+{
+	static const uint32_t prod_st_flags =
+		(RING_F_SP_ENQ | RING_F_MP_RTS_ENQ | RING_F_MP_HTS_ENQ);
+	static const uint32_t cons_st_flags =
+		(RING_F_SC_DEQ | RING_F_MC_RTS_DEQ | RING_F_MC_HTS_DEQ);
+
+	switch (flags & prod_st_flags) {
+	case 0:
+		*prod_st = RTE_RING_SYNC_MT;
+		break;
+	case RING_F_SP_ENQ:
+		*prod_st = RTE_RING_SYNC_ST;
+		break;
+	case RING_F_MP_RTS_ENQ:
+		*prod_st = RTE_RING_SYNC_MT_RTS;
+		break;
+	case RING_F_MP_HTS_ENQ:
+		*prod_st = RTE_RING_SYNC_MT_HTS;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (flags & cons_st_flags) {
+	case 0:
+		*cons_st = RTE_RING_SYNC_MT;
+		break;
+	case RING_F_SC_DEQ:
+		*cons_st = RTE_RING_SYNC_ST;
+		break;
+	case RING_F_MC_RTS_DEQ:
+		*cons_st = RTE_RING_SYNC_MT_RTS;
+		break;
+	case RING_F_MC_HTS_DEQ:
+		*cons_st = RTE_RING_SYNC_MT_HTS;
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	return 0;
 }
 
-/* create the ring */
+int
+rte_ring_init(struct rte_ring *r, const char *name, unsigned int count,
+	unsigned int flags)
+{
+	int ret;
+
+	/* compilation-time checks */
+	RTE_BUILD_BUG_ON((sizeof(struct rte_ring) &
+			  RTE_CACHE_LINE_MASK) != 0);
+	RTE_BUILD_BUG_ON((offsetof(struct rte_ring, cons) &
+			  RTE_CACHE_LINE_MASK) != 0);
+	RTE_BUILD_BUG_ON((offsetof(struct rte_ring, prod) &
+			  RTE_CACHE_LINE_MASK) != 0);
+
+	RTE_BUILD_BUG_ON(offsetof(struct rte_ring_headtail, sync_type) !=
+		offsetof(struct rte_ring_hts_headtail, sync_type));
+	RTE_BUILD_BUG_ON(offsetof(struct rte_ring_headtail, tail) !=
+		offsetof(struct rte_ring_hts_headtail, ht.pos.tail));
+
+	RTE_BUILD_BUG_ON(offsetof(struct rte_ring_headtail, sync_type) !=
+		offsetof(struct rte_ring_rts_headtail, sync_type));
+	RTE_BUILD_BUG_ON(offsetof(struct rte_ring_headtail, tail) !=
+		offsetof(struct rte_ring_rts_headtail, tail.val.pos));
+
+	/* future proof flags, only allow supported values */
+	if (flags & ~RING_F_MASK) {
+		RTE_LOG(ERR, RING,
+			"Unsupported flags requested %#x\n", flags);
+		return -EINVAL;
+	}
+
+	/* init the ring structure */
+	memset(r, 0, sizeof(*r));
+	ret = strlcpy(r->name, name, sizeof(r->name));
+	if (ret < 0 || ret >= (int)sizeof(r->name))
+		return -ENAMETOOLONG;
+	r->flags = flags;
+	ret = get_sync_type(flags, &r->prod.sync_type, &r->cons.sync_type);
+	if (ret != 0)
+		return ret;
+
+	if (flags & RING_F_EXACT_SZ) {
+		r->size = rte_align32pow2(count + 1);
+		r->mask = r->size - 1;
+		r->capacity = count;
+	} else {
+		if ((!POWEROF2(count)) || (count > RTE_RING_SZ_MASK)) {
+			RTE_LOG(ERR, RING,
+				"Requested size is invalid, must be power of 2, and not exceed the size limit %u\n",
+				RTE_RING_SZ_MASK);
+			return -EINVAL;
+		}
+		r->size = count;
+		r->mask = count - 1;
+		r->capacity = r->mask;
+	}
+
+	/* set default values for head-tail distance */
+	if (flags & RING_F_MP_RTS_ENQ)
+		rte_ring_set_prod_htd_max(r, r->capacity / HTD_MAX_DEF);
+	if (flags & RING_F_MC_RTS_DEQ)
+		rte_ring_set_cons_htd_max(r, r->capacity / HTD_MAX_DEF);
+
+	return 0;
+}
+
+/* create the ring for a given element size */
 struct rte_ring *
-rte_ring_create(const char *name, unsigned count, int socket_id,
-		unsigned flags)
+rte_ring_create_elem(const char *name, unsigned int esize, unsigned int count,
+		int socket_id, unsigned int flags)
 {
 	char mz_name[RTE_MEMZONE_NAMESIZE];
 	struct rte_ring *r;
@@ -165,12 +256,25 @@ rte_ring_create(const char *name, unsigned count, int socket_id,
 	ssize_t ring_size;
 	int mz_flags = 0;
 	struct rte_ring_list* ring_list = NULL;
+	const unsigned int requested_count = count;
+	int ret;
 
 	ring_list = RTE_TAILQ_CAST(rte_ring_tailq.head, rte_ring_list);
 
-	ring_size = rte_ring_get_memsize(count);
+	/* for an exact size ring, round up from count to a power of two */
+	if (flags & RING_F_EXACT_SZ)
+		count = rte_align32pow2(count + 1);
+
+	ring_size = rte_ring_get_memsize_elem(esize, count);
 	if (ring_size < 0) {
 		rte_errno = ring_size;
+		return NULL;
+	}
+
+	ret = snprintf(mz_name, sizeof(mz_name), "%s%s",
+		RTE_RING_MZ_PREFIX, name);
+	if (ret < 0 || ret >= (int)sizeof(mz_name)) {
+		rte_errno = ENAMETOOLONG;
 		return NULL;
 	}
 
@@ -181,21 +285,21 @@ rte_ring_create(const char *name, unsigned count, int socket_id,
 		return NULL;
 	}
 
-	snprintf(mz_name, sizeof(mz_name), "%s%s", RTE_RING_MZ_PREFIX, name);
-
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	/* reserve a memory zone for this ring. If we can't get rte_config or
 	 * we are secondary process, the memzone_reserve function will set
 	 * rte_errno for us appropriately - hence no check in this this function */
-	mz = rte_memzone_reserve(mz_name, ring_size, socket_id, mz_flags);
+	mz = rte_memzone_reserve_aligned(mz_name, ring_size, socket_id,
+					 mz_flags, __alignof__(*r));
 	if (mz != NULL) {
 		r = mz->addr;
 		/* no need to check return value here, we already checked the
 		 * arguments above */
-		rte_ring_init(r, name, count, flags);
+		rte_ring_init(r, name, requested_count, flags);
 
 		te->data = (void *) r;
+		r->memzone = mz;
 
 		TAILQ_INSERT_TAIL(ring_list, te, next);
 	} else {
@@ -203,81 +307,80 @@ rte_ring_create(const char *name, unsigned count, int socket_id,
 		RTE_LOG(ERR, RING, "Cannot reserve memory\n");
 		rte_free(te);
 	}
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 
 	return r;
 }
 
-/*
- * change the high water mark. If *count* is 0, water marking is
- * disabled
- */
-int
-rte_ring_set_water_mark(struct rte_ring *r, unsigned count)
+/* create the ring */
+struct rte_ring *
+rte_ring_create(const char *name, unsigned int count, int socket_id,
+		unsigned int flags)
 {
-	if (count >= r->prod.size)
-		return -EINVAL;
+	return rte_ring_create_elem(name, sizeof(void *), count, socket_id,
+		flags);
+}
 
-	/* if count is 0, disable the watermarking */
-	if (count == 0)
-		count = r->prod.size;
+/* free the ring */
+void
+rte_ring_free(struct rte_ring *r)
+{
+	struct rte_ring_list *ring_list = NULL;
+	struct rte_tailq_entry *te;
 
-	r->prod.watermark = count;
-	return 0;
+	if (r == NULL)
+		return;
+
+	/*
+	 * Ring was not created with rte_ring_create,
+	 * therefore, there is no memzone to free.
+	 */
+	if (r->memzone == NULL) {
+		RTE_LOG(ERR, RING,
+			"Cannot free ring, not created with rte_ring_create()\n");
+		return;
+	}
+
+	if (rte_memzone_free(r->memzone) != 0) {
+		RTE_LOG(ERR, RING, "Cannot free memory\n");
+		return;
+	}
+
+	ring_list = RTE_TAILQ_CAST(rte_ring_tailq.head, rte_ring_list);
+	rte_mcfg_tailq_write_lock();
+
+	/* find out tailq entry */
+	TAILQ_FOREACH(te, ring_list, next) {
+		if (te->data == (void *) r)
+			break;
+	}
+
+	if (te == NULL) {
+		rte_mcfg_tailq_write_unlock();
+		return;
+	}
+
+	TAILQ_REMOVE(ring_list, te, next);
+
+	rte_mcfg_tailq_write_unlock();
+
+	rte_free(te);
 }
 
 /* dump the status of the ring on the console */
 void
 rte_ring_dump(FILE *f, const struct rte_ring *r)
 {
-#ifdef RTE_LIBRTE_RING_DEBUG
-	struct rte_ring_debug_stats sum;
-	unsigned lcore_id;
-#endif
-
 	fprintf(f, "ring <%s>@%p\n", r->name, r);
 	fprintf(f, "  flags=%x\n", r->flags);
-	fprintf(f, "  size=%"PRIu32"\n", r->prod.size);
+	fprintf(f, "  size=%"PRIu32"\n", r->size);
+	fprintf(f, "  capacity=%"PRIu32"\n", r->capacity);
 	fprintf(f, "  ct=%"PRIu32"\n", r->cons.tail);
 	fprintf(f, "  ch=%"PRIu32"\n", r->cons.head);
 	fprintf(f, "  pt=%"PRIu32"\n", r->prod.tail);
 	fprintf(f, "  ph=%"PRIu32"\n", r->prod.head);
 	fprintf(f, "  used=%u\n", rte_ring_count(r));
 	fprintf(f, "  avail=%u\n", rte_ring_free_count(r));
-	if (r->prod.watermark == r->prod.size)
-		fprintf(f, "  watermark=0\n");
-	else
-		fprintf(f, "  watermark=%"PRIu32"\n", r->prod.watermark);
-
-	/* sum and dump statistics */
-#ifdef RTE_LIBRTE_RING_DEBUG
-	memset(&sum, 0, sizeof(sum));
-	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
-		sum.enq_success_bulk += r->stats[lcore_id].enq_success_bulk;
-		sum.enq_success_objs += r->stats[lcore_id].enq_success_objs;
-		sum.enq_quota_bulk += r->stats[lcore_id].enq_quota_bulk;
-		sum.enq_quota_objs += r->stats[lcore_id].enq_quota_objs;
-		sum.enq_fail_bulk += r->stats[lcore_id].enq_fail_bulk;
-		sum.enq_fail_objs += r->stats[lcore_id].enq_fail_objs;
-		sum.deq_success_bulk += r->stats[lcore_id].deq_success_bulk;
-		sum.deq_success_objs += r->stats[lcore_id].deq_success_objs;
-		sum.deq_fail_bulk += r->stats[lcore_id].deq_fail_bulk;
-		sum.deq_fail_objs += r->stats[lcore_id].deq_fail_objs;
-	}
-	fprintf(f, "  size=%"PRIu32"\n", r->prod.size);
-	fprintf(f, "  enq_success_bulk=%"PRIu64"\n", sum.enq_success_bulk);
-	fprintf(f, "  enq_success_objs=%"PRIu64"\n", sum.enq_success_objs);
-	fprintf(f, "  enq_quota_bulk=%"PRIu64"\n", sum.enq_quota_bulk);
-	fprintf(f, "  enq_quota_objs=%"PRIu64"\n", sum.enq_quota_objs);
-	fprintf(f, "  enq_fail_bulk=%"PRIu64"\n", sum.enq_fail_bulk);
-	fprintf(f, "  enq_fail_objs=%"PRIu64"\n", sum.enq_fail_objs);
-	fprintf(f, "  deq_success_bulk=%"PRIu64"\n", sum.deq_success_bulk);
-	fprintf(f, "  deq_success_objs=%"PRIu64"\n", sum.deq_success_objs);
-	fprintf(f, "  deq_fail_bulk=%"PRIu64"\n", sum.deq_fail_bulk);
-	fprintf(f, "  deq_fail_objs=%"PRIu64"\n", sum.deq_fail_objs);
-#else
-	fprintf(f, "  no statistics available\n");
-#endif
 }
 
 /* dump the status of all rings on the console */
@@ -289,13 +392,13 @@ rte_ring_list_dump(FILE *f)
 
 	ring_list = RTE_TAILQ_CAST(rte_ring_tailq.head, rte_ring_list);
 
-	rte_rwlock_read_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_lock();
 
 	TAILQ_FOREACH(te, ring_list, next) {
 		rte_ring_dump(f, (struct rte_ring *) te->data);
 	}
 
-	rte_rwlock_read_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_unlock();
 }
 
 /* search a ring from its name */
@@ -308,7 +411,7 @@ rte_ring_lookup(const char *name)
 
 	ring_list = RTE_TAILQ_CAST(rte_ring_tailq.head, rte_ring_list);
 
-	rte_rwlock_read_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_lock();
 
 	TAILQ_FOREACH(te, ring_list, next) {
 		r = (struct rte_ring *) te->data;
@@ -316,7 +419,7 @@ rte_ring_lookup(const char *name)
 			break;
 	}
 
-	rte_rwlock_read_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_unlock();
 
 	if (te == NULL) {
 		rte_errno = ENOENT;

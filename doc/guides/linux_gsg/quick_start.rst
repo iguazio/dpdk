@@ -1,37 +1,12 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.. _linux_setup_script:
 
 Quick Start Setup Script
 ========================
 
-The setup.sh script, found in the tools subdirectory, allows the user to perform the following tasks:
+The dpdk-setup.sh script, found in the usertools subdirectory, allows the user to perform the following tasks:
 
 *   Build the DPDK libraries
 
@@ -51,7 +26,7 @@ The setup.sh script, found in the tools subdirectory, allows the user to perform
 
 *   Look at hugepages in the meminfo
 
-*   List hugepages in /mnt/huge
+*   List hugepages in ``/mnt/huge``
 
 *   Remove built DPDK libraries
 
@@ -61,7 +36,7 @@ the user may compile their own application that links in the EAL libraries to cr
 Script Organization
 -------------------
 
-The setup.sh script is logically organized into a series of steps that a user performs in sequence.
+The dpdk-setup.sh script is logically organized into a series of steps that a user performs in sequence.
 Each step provides a number of options that guide the user to completing the desired task.
 The following is a brief synopsis of each step.
 
@@ -96,17 +71,17 @@ The final step has options for restoring the system to its original state.
 Use Cases
 ---------
 
-The following are some example of how to use the setup.sh script.
+The following are some example of how to use the dpdk-setup.sh script.
 The script should be run using the source command.
 Some options in the script prompt the user for further data before proceeding.
 
 .. warning::
 
-    The setup.sh script should be run with root privileges.
+    The dpdk-setup.sh script should be run with root privileges.
 
 .. code-block:: console
 
-    user@host:~/rte$ source tools/setup.sh
+    source usertools/dpdk-setup.sh
 
     ------------------------------------------------------------------------
 
@@ -118,29 +93,25 @@ Some options in the script prompt the user for further data before proceeding.
 
     ------------------------------------------------------------------------
 
-    [1] i686-native-linuxapp-gcc
+    [1] i686-native-linux-gcc
 
-    [2] i686-native-linuxapp-icc
+    [2] i686-native-linux-icc
 
-    [3] ppc_64-power8-linuxapp-gcc
+    [3] ppc_64-power8-linux-gcc
 
-    [4] x86_64-ivshmem-linuxapp-gcc
+    [4] x86_64-native-freebsd-clang
 
-    [5] x86_64-ivshmem-linuxapp-icc
+    [5] x86_64-native-freebsd-gcc
 
-    [6] x86_64-native-bsdapp-clang
+    [6] x86_64-native-linux-clang
 
-    [7] x86_64-native-bsdapp-gcc
+    [7] x86_64-native-linux-gcc
 
-    [8] x86_64-native-linuxapp-clang
-
-    [9] x86_64-native-linuxapp-gcc
-
-    [10] x86_64-native-linuxapp-icc
+    [8] x86_64-native-linux-icc
 
     ------------------------------------------------------------------------
 
-    Step 2: Setup linuxapp environment
+    Step 2: Setup linux environment
 
     ------------------------------------------------------------------------
 
@@ -164,7 +135,7 @@ Some options in the script prompt the user for further data before proceeding.
 
     ------------------------------------------------------------------------
 
-    Step 3: Run test application for linuxapp environment
+    Step 3: Run test application for linux environment
 
     ------------------------------------------------------------------------
 
@@ -202,19 +173,19 @@ Some options in the script prompt the user for further data before proceeding.
 
 Option:
 
-The following selection demonstrates the creation of the x86_64-native-linuxapp-gcc DPDK library.
+The following selection demonstrates the creation of the ``x86_64-native-linux-gcc`` DPDK library.
 
 .. code-block:: console
 
     Option: 9
 
-    ================== Installing x86_64-native-linuxapp-gcc
+    ================== Installing x86_64-native-linux-gcc
 
     Configuration done
     == Build lib
     ...
     Build complete
-    RTE_TARGET exported as x86_64-native -linuxapp-gcc
+    RTE_TARGET exported as x86_64-native-linux-gcc
 
 The following selection demonstrates the starting of the DPDK UIO driver.
 
@@ -267,7 +238,7 @@ The following selection demonstrates the launch of the test application to run o
 Applications
 ------------
 
-Once the user has run the setup.sh script, built one of the EAL targets and set up hugepages (if using one of the Linux EAL targets),
+Once the user has run the dpdk-setup.sh script, built one of the EAL targets and set up hugepages (if using one of the Linux EAL targets),
 the user can then move on to building and running their application or one of the examples provided.
 
 The examples in the /examples directory provide a good starting point to gain an understanding of the operation of the DPDK.
@@ -277,15 +248,16 @@ the logical core layout of the platform should be determined when selecting a co
 
 .. code-block:: console
 
-    rte@rte-desktop:~/rte/examples$ cd helloworld/
-    rte@rte-desktop:~/rte/examples/helloworld$ make
-    CC main.o
-    LD helloworld
-    INSTALL-APP helloworld
-    INSTALL-MAP helloworld.map
+    cd helloworld/
+    make
+      CC main.o
+      LD helloworld
+      INSTALL-APP helloworld
+      INSTALL-MAP helloworld.map
 
-    rte@rte-desktop:~/rte/examples/helloworld$ sudo ./build/app/helloworld -c 0xf -n 3
+    sudo ./build/app/helloworld -l 0-3 -n 3
     [sudo] password for rte:
+
     EAL: coremask set to f
     EAL: Detected lcore 0 as core 0 on socket 0
     EAL: Detected lcore 1 as core 0 on socket 1

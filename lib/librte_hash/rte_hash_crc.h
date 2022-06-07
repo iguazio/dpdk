@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #ifndef _RTE_HASH_CRC_H_
@@ -45,6 +16,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <rte_config.h>
 #include <rte_cpuflags.h>
 #include <rte_branch_prediction.h>
 #include <rte_common.h>
@@ -328,6 +300,28 @@ static const uint32_t crc32c_tables[8][256] = {{
 	 crc32c_tables[(n)-1][((crc) >> 8) & 0xFF])
 
 static inline uint32_t
+crc32c_1byte(uint8_t data, uint32_t init_val)
+{
+	uint32_t crc;
+	crc = init_val;
+	crc ^= data;
+
+	return crc32c_tables[0][crc & 0xff] ^ (crc >> 8);
+}
+
+static inline uint32_t
+crc32c_2bytes(uint16_t data, uint32_t init_val)
+{
+	uint32_t crc;
+	crc = init_val;
+	crc ^= data;
+
+	crc = CRC32_UPD(crc, 1) ^ (crc >> 16);
+
+	return crc;
+}
+
+static inline uint32_t
 crc32c_1word(uint32_t data, uint32_t init_val)
 {
 	uint32_t crc, term1, term2;
@@ -344,13 +338,12 @@ crc32c_1word(uint32_t data, uint32_t init_val)
 static inline uint32_t
 crc32c_2words(uint64_t data, uint32_t init_val)
 {
+	uint32_t crc, term1, term2;
 	union {
 		uint64_t u64;
 		uint32_t u32[2];
 	} d;
 	d.u64 = data;
-
-	uint32_t crc, term1, term2;
 
 	crc = init_val;
 	crc ^= d.u32[0];
@@ -365,7 +358,27 @@ crc32c_2words(uint64_t data, uint32_t init_val)
 	return crc;
 }
 
-#if defined(RTE_ARCH_I686) || defined(RTE_ARCH_X86_64)
+#if defined(RTE_ARCH_X86)
+static inline uint32_t
+crc32c_sse42_u8(uint8_t data, uint32_t init_val)
+{
+	__asm__ volatile(
+			"crc32b %[data], %[init_val];"
+			: [init_val] "+r" (init_val)
+			: [data] "rm" (data));
+	return init_val;
+}
+
+static inline uint32_t
+crc32c_sse42_u16(uint16_t data, uint32_t init_val)
+{
+	__asm__ volatile(
+			"crc32w %[data], %[init_val];"
+			: [init_val] "+r" (init_val)
+			: [data] "rm" (data));
+	return init_val;
+}
+
 static inline uint32_t
 crc32c_sse42_u32(uint32_t data, uint32_t init_val)
 {
@@ -385,9 +398,9 @@ crc32c_sse42_u64_mimic(uint64_t data, uint64_t init_val)
 	} d;
 
 	d.u64 = data;
-	init_val = crc32c_sse42_u32(d.u32[0], init_val);
-	init_val = crc32c_sse42_u32(d.u32[1], init_val);
-	return init_val;
+	init_val = crc32c_sse42_u32(d.u32[0], (uint32_t)init_val);
+	init_val = crc32c_sse42_u32(d.u32[1], (uint32_t)init_val);
+	return (uint32_t)init_val;
 }
 #endif
 
@@ -399,7 +412,7 @@ crc32c_sse42_u64(uint64_t data, uint64_t init_val)
 			"crc32q %[data], %[init_val];"
 			: [init_val] "+r" (init_val)
 			: [data] "rm" (data));
-	return init_val;
+	return (uint32_t)init_val;
 }
 #endif
 
@@ -407,8 +420,13 @@ crc32c_sse42_u64(uint64_t data, uint64_t init_val)
 #define CRC32_SSE42         (1U << 1)
 #define CRC32_x64           (1U << 2)
 #define CRC32_SSE42_x64     (CRC32_x64|CRC32_SSE42)
+#define CRC32_ARM64         (1U << 3)
 
 static uint8_t crc32_alg = CRC32_SW;
+
+#if defined(RTE_ARCH_ARM64) && defined(RTE_MACHINE_CPUFLAG_CRC32)
+#include "rte_crc_arm64.h"
+#else
 
 /**
  * Allow or disallow use of SSE4.2 instrinsics for CRC32 hash
@@ -424,25 +442,64 @@ static uint8_t crc32_alg = CRC32_SW;
 static inline void
 rte_hash_crc_set_alg(uint8_t alg)
 {
-	switch (alg) {
-	case CRC32_SSE42_x64:
-		if (! rte_cpu_get_flag_enabled(RTE_CPUFLAG_EM64T))
-			alg = CRC32_SSE42;
-	case CRC32_SSE42:
-		if (! rte_cpu_get_flag_enabled(RTE_CPUFLAG_SSE4_2))
-			alg = CRC32_SW;
-	case CRC32_SW:
-		crc32_alg = alg;
-	default:
-		break;
-	}
+#if defined(RTE_ARCH_X86)
+	if (alg == CRC32_SSE42_x64 &&
+			!rte_cpu_get_flag_enabled(RTE_CPUFLAG_EM64T))
+		alg = CRC32_SSE42;
+#endif
+	crc32_alg = alg;
 }
 
 /* Setting the best available algorithm */
-static inline void __attribute__((constructor))
-rte_hash_crc_init_alg(void)
+RTE_INIT(rte_hash_crc_init_alg)
 {
 	rte_hash_crc_set_alg(CRC32_SSE42_x64);
+}
+
+/**
+ * Use single crc32 instruction to perform a hash on a byte value.
+ * Fall back to software crc32 implementation in case SSE4.2 is
+ * not supported
+ *
+ * @param data
+ *   Data to perform hash on.
+ * @param init_val
+ *   Value to initialise hash generator.
+ * @return
+ *   32bit calculated hash value.
+ */
+static inline uint32_t
+rte_hash_crc_1byte(uint8_t data, uint32_t init_val)
+{
+#if defined RTE_ARCH_X86
+	if (likely(crc32_alg & CRC32_SSE42))
+		return crc32c_sse42_u8(data, init_val);
+#endif
+
+	return crc32c_1byte(data, init_val);
+}
+
+/**
+ * Use single crc32 instruction to perform a hash on a 2 bytes value.
+ * Fall back to software crc32 implementation in case SSE4.2 is
+ * not supported
+ *
+ * @param data
+ *   Data to perform hash on.
+ * @param init_val
+ *   Value to initialise hash generator.
+ * @return
+ *   32bit calculated hash value.
+ */
+static inline uint32_t
+rte_hash_crc_2byte(uint16_t data, uint32_t init_val)
+{
+#if defined RTE_ARCH_X86
+	if (likely(crc32_alg & CRC32_SSE42))
+		return crc32c_sse42_u16(data, init_val);
+#endif
+
+	return crc32c_2bytes(data, init_val);
 }
 
 /**
@@ -460,7 +517,7 @@ rte_hash_crc_init_alg(void)
 static inline uint32_t
 rte_hash_crc_4byte(uint32_t data, uint32_t init_val)
 {
-#if defined RTE_ARCH_I686 || defined RTE_ARCH_X86_64
+#if defined RTE_ARCH_X86
 	if (likely(crc32_alg & CRC32_SSE42))
 		return crc32c_sse42_u32(data, init_val);
 #endif
@@ -488,13 +545,15 @@ rte_hash_crc_8byte(uint64_t data, uint32_t init_val)
 		return crc32c_sse42_u64(data, init_val);
 #endif
 
-#if defined RTE_ARCH_I686 || defined RTE_ARCH_X86_64
+#if defined RTE_ARCH_X86
 	if (likely(crc32_alg & CRC32_SSE42))
 		return crc32c_sse42_u64_mimic(data, init_val);
 #endif
 
 	return crc32c_2words(data, init_val);
 }
+
+#endif
 
 /**
  * Calculate CRC32 hash on user-supplied byte array.
@@ -512,7 +571,6 @@ static inline uint32_t
 rte_hash_crc(const void *data, uint32_t data_len, uint32_t init_val)
 {
 	unsigned i;
-	uint64_t temp = 0;
 	uintptr_t pd = (uintptr_t) data;
 
 	for (i = 0; i < data_len / 8; i++) {
@@ -520,34 +578,18 @@ rte_hash_crc(const void *data, uint32_t data_len, uint32_t init_val)
 		pd += 8;
 	}
 
-	switch (7 - (data_len & 0x07)) {
-	case 0:
-		temp |= (uint64_t) *((const uint8_t *)pd + 6) << 48;
-		/* Fallthrough */
-	case 1:
-		temp |= (uint64_t) *((const uint8_t *)pd + 5) << 40;
-		/* Fallthrough */
-	case 2:
-		temp |= (uint64_t) *((const uint8_t *)pd + 4) << 32;
-		temp |= *(const uint32_t *)pd;
-		init_val = rte_hash_crc_8byte(temp, init_val);
-		break;
-	case 3:
+	if (data_len & 0x4) {
 		init_val = rte_hash_crc_4byte(*(const uint32_t *)pd, init_val);
-		break;
-	case 4:
-		temp |= *((const uint8_t *)pd + 2) << 16;
-		/* Fallthrough */
-	case 5:
-		temp |= *((const uint8_t *)pd + 1) << 8;
-		/* Fallthrough */
-	case 6:
-		temp |= *(const uint8_t *)pd;
-		init_val = rte_hash_crc_4byte(temp, init_val);
-		/* Fallthrough */
-	default:
-		break;
+		pd += 4;
 	}
+
+	if (data_len & 0x2) {
+		init_val = rte_hash_crc_2byte(*(const uint16_t *)pd, init_val);
+		pd += 2;
+	}
+
+	if (data_len & 0x1)
+		init_val = rte_hash_crc_1byte(*(const uint8_t *)pd, init_val);
 
 	return init_val;
 }

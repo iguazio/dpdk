@@ -1,38 +1,13 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 Distributor Sample Application
 ==============================
 
 The distributor sample application is a simple example of packet distribution
-to cores using the Data Plane Development Kit (DPDK).
+to cores using the Data Plane Development Kit (DPDK). It also makes use of
+Intel Speed Select Technology - Base Frequency (Intel SST-BF) to pin the
+distributor to the higher frequency core if available.
 
 Overview
 --------
@@ -53,30 +28,12 @@ generator as shown in the figure below.
 
    Performance Benchmarking Setup (Basic Environment)
 
-
 Compiling the Application
 -------------------------
 
-#.  Go to the sample application directory:
+To compile the sample application see :doc:`compiling`.
 
-    ..  code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk
-        cd ${RTE_SDK}/examples/distributor
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    ..  code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-    See the DPDK Getting Started Guide for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    ..  code-block:: console
-
-        make
+The application is located in the ``distributor`` sub-directory.
 
 Running the Application
 -----------------------
@@ -91,12 +48,12 @@ Running the Application
 
    *   -p PORTMASK: Hexadecimal bitmask of ports to configure
 
-#. To run the application in linuxapp environment with 10 lcores, 4 ports,
+#. To run the application in linux environment with 10 lcores, 4 ports,
    issue the command:
 
    ..  code-block:: console
 
-       $ ./build/distributor_app -c 0x4003fe -n 4 -- -p f
+       $ ./build/distributor_app -l 1-9,22 -n 4 -- -p f
 
 #. Refer to the DPDK Getting Started Guide for general information on running
    applications and the Environment Abstraction Layer (EAL) options.
@@ -104,33 +61,35 @@ Running the Application
 Explanation
 -----------
 
-The distributor application consists of three types of threads: a receive
-thread (lcore_rx()), a set of worker threads(lcore_worker())
-and a transmit thread(lcore_tx()). How these threads work together is shown
-in :numref:`figure_dist_app` below. The main() function launches  threads of these three types.
-Each thread has a while loop which will be doing processing and which is
-terminated only upon SIGINT or ctrl+C. The receive and transmit threads
-communicate using a software ring (rte_ring structure).
+The distributor application consists of four types of threads: a receive
+thread (``lcore_rx()``), a distributor thread (``lcore_dist()``), a set of
+worker threads (``lcore_worker()``), and a transmit thread(``lcore_tx()``).
+How these threads work together is shown in :numref:`figure_dist_app` below.
+The ``main()`` function launches  threads of these four types.  Each thread
+has a while loop which will be doing processing and which is terminated
+only upon SIGINT or ctrl+C.
 
-The receive thread receives the packets using rte_eth_rx_burst() and gives
-them to  the distributor (using rte_distributor_process() API) which will
-be called in context of the receive thread itself. The distributor distributes
-the packets to workers threads based on the tagging of the packet -
-indicated by the hash field in the mbuf. For IP traffic, this field is
-automatically filled by the NIC with the "usr" hash value for the packet,
-which works as a per-flow tag.
+The receive thread receives the packets using ``rte_eth_rx_burst()`` and will
+enqueue them to an rte_ring. The distributor thread will dequeue the packets
+from the ring and assign them to workers (using ``rte_distributor_process()`` API).
+This assignment is based on the tag (or flow ID) of the packet - indicated by
+the hash field in the mbuf. For IP traffic, this field is automatically filled
+by the NIC with the "usr" hash value for the packet, which works as a per-flow
+tag.  The distributor thread communicates with the worker threads using a
+cache-line swapping mechanism, passing up to 8 mbuf pointers at a time
+(one cache line) to each worker.
 
 More than one worker thread can exist as part of the application, and these
 worker threads do simple packet processing by requesting packets from
 the distributor, doing a simple XOR operation on the input port mbuf field
 (to indicate the output port which will be used later for packet transmission)
-and then finally returning the packets back to the distributor in the RX thread.
+and then finally returning the packets back to the distributor thread.
 
-Meanwhile, the receive thread will call the distributor api
-rte_distributor_returned_pkts() to get the packets processed, and will enqueue
-them to a ring for transfer to the TX thread for transmission on the output port.
-The transmit thread will dequeue the packets from the ring and transmit them on
-the output port specified in packet mbuf.
+The distributor thread will then call the distributor api
+``rte_distributor_returned_pkts()`` to get the processed packets, and will enqueue
+them to another rte_ring for transfer to the TX thread for transmission on the
+output port. The transmit thread will dequeue the packets from the ring and
+transmit them on the output port specified in packet mbuf.
 
 Users who wish to terminate the running of the application have to press ctrl+C
 (or send SIGINT to the app). Upon this signal, a signal handler provided
@@ -144,6 +103,22 @@ final statistics to the user.
    Distributor Sample Application Layout
 
 
+Intel SST-BF Support
+--------------------
+
+In DPDK 19.05, support was added to the power management library for
+Intel-SST-BF, a technology that allows some cores to run at a higher
+frequency than others. An application note for Intel SST-BF is available,
+and is entitled
+`Intel Speed Select Technology – Base Frequency - Enhancing Performance <https://builders.intel.com/docs/networkbuilders/intel-speed-select-technology-base-frequency-enhancing-performance.pdf>`_
+
+The distributor application was also enhanced to be aware of these higher
+frequency SST-BF cores, and when starting the application, if high frequency
+SST-BF cores are present in the core mask, the application will identify these
+cores and pin the workloads appropriately. The distributor core is usually
+the bottleneck, so this is given first choice of the high frequency SST-BF
+cores, followed by the rx core and the tx core.
+
 Debug Logging Support
 ---------------------
 
@@ -153,23 +128,25 @@ the line "#define DEBUG" defined in start of the application in main.c to enable
 Statistics
 ----------
 
-Upon SIGINT (or) ctrl+C, the print_stats() function displays the count of packets
-processed at the different stages in the application.
+The main function will print statistics on the console every second. These
+statistics include the number of packets enqueued and dequeued at each stage
+in the application, and also key statistics per worker, including how many
+packets of each burst size (1-8) were sent to each worker thread.
 
 Application Initialization
 --------------------------
 
 Command line parsing is done in the same way as it is done in the L2 Forwarding Sample
-Application. See Section 9.4.1, "Command Line Arguments".
+Application. See :ref:`l2_fwd_app_cmd_arguments`.
 
 Mbuf pool initialization is done in the same way as it is done in the L2 Forwarding
-Sample Application. See Section 9.4.2, "Mbuf Pool Initialization".
+Sample Application. See :ref:`l2_fwd_app_mbuf_init`.
 
 Driver Initialization is done in same way as it is done in the L2 Forwarding Sample
-Application. See Section 9.4.3, "Driver Initialization".
+Application. See :ref:`l2_fwd_app_dvr_init`.
 
 RX queue initialization is done in the same way as it is done in the L2 Forwarding
-Sample Application. See Section 9.4.4, "RX Queue Initialization".
+Sample Application. See :ref:`l2_fwd_app_rx_init`.
 
 TX queue initialization is done in the same way as it is done in the L2 Forwarding
-Sample Application. See Section 9.4.5, "TX Queue Initialization".
+Sample Application. See :ref:`l2_fwd_app_tx_init`.

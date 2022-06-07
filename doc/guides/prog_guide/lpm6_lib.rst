@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 LPM6 Library
 ============
@@ -53,7 +26,7 @@ several thousand IPv6 rules, but the number can vary depending on the case.
 An LPM prefix is represented by a pair of parameters (128-bit key, depth), with depth in the range of 1 to 128.
 An LPM rule is represented by an LPM prefix and some user data associated with the prefix.
 The prefix serves as the unique identifier for the LPM rule.
-In this implementation, the user data is 1-byte long and is called "next hop",
+In this implementation, the user data is 21-bits long and is called "next hop",
 which corresponds to its main use of storing the ID of the next hop in a routing table entry.
 
 The main methods exported for the LPM component are:
@@ -75,7 +48,7 @@ The main methods exported for the LPM component are:
 Implementation Details
 ~~~~~~~~~~~~~~~~~~~~~~
 
-This is a modification of the algorithm used for IPv4 (see Section 19.2 "Implementation Details").
+This is a modification of the algorithm used for IPv4 (see :ref:`lpm4_details`).
 In this case, instead of using two levels, one with a tbl24 and a second with a tbl8, 14 levels are used.
 
 The implementation can be seen as a multi-bit trie where the *stride*

@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 .. _Mempool_Library:
 
@@ -34,13 +7,12 @@ Mempool Library
 ===============
 
 A memory pool is an allocator of a fixed-sized object.
-In the DPDK, it is identified by name and uses a ring to store free objects.
+In the DPDK, it is identified by name and uses a mempool handler to store free objects.
+The default mempool handler is ring based.
 It provides some other optional services such as a per-core object cache and
 an alignment helper to ensure that objects are padded to spread them equally on all DRAM or DDR3 channels.
 
-This library is used by the
-:ref:`Mbuf Library <Mbuf_Library>` and the
-:ref:`Environment Abstraction Layer <Environment_Abstraction_Layer>` (for logging history).
+This library is used by the :ref:`Mbuf Library <Mbuf_Library>`.
 
 Cookies
 -------
@@ -55,10 +27,10 @@ In debug mode (CONFIG_RTE_LIBRTE_MEMPOOL_DEBUG is enabled),
 statistics about get from/put in the pool are stored in the mempool structure.
 Statistics are per-lcore to avoid concurrent access to statistics counters.
 
-Memory Alignment Constraints
-----------------------------
+Memory Alignment Constraints on x86 architecture
+------------------------------------------------
 
-Depending on hardware memory configuration, performance can be greatly improved by adding a specific padding between objects.
+Depending on hardware memory configuration on X86 architecture, performance can be greatly improved by adding a specific padding between objects.
 The objective is to ensure that the beginning of each object starts on a different channel and rank in memory so that all channels are equally loaded.
 
 This is particularly true for packet buffers when doing L3 forwarding or flow classification.
@@ -98,6 +70,8 @@ no padding is required between objects (except for objects whose size are n x 3 
 
 When creating a new pool, the user can specify to use this feature or not.
 
+.. _mempool_local_cache:
+
 Local Cache
 -----------
 
@@ -114,7 +88,7 @@ While this may mean a number of buffers may sit idle on some core's cache,
 the speed at which a core can access its own cache for a specific memory pool without locks provides performance gains.
 
 The cache is composed of a small, per-core table of pointers and its length (used as a stack).
-This cache can be enabled or disabled at creation of the pool.
+This internal cache can be enabled or disabled at creation of the pool.
 
 The maximum size of the cache is static and is defined at compilation time (CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE).
 
@@ -125,6 +99,47 @@ The maximum size of the cache is static and is defined at compilation time (CONF
 .. figure:: img/mempool.*
 
    A mempool in Memory with its Associated Ring
+
+Alternatively to the internal default per-lcore local cache, an application can create and manage external caches through the ``rte_mempool_cache_create()``, ``rte_mempool_cache_free()`` and ``rte_mempool_cache_flush()`` calls.
+These user-owned caches can be explicitly passed to ``rte_mempool_generic_put()`` and ``rte_mempool_generic_get()``.
+The ``rte_mempool_default_cache()`` call returns the default internal cache if any.
+In contrast to the default caches, user-owned caches can be used by unregistered non-EAL threads too.
+
+Mempool Handlers
+------------------------
+
+This allows external memory subsystems, such as external hardware memory
+management systems and software based memory allocators, to be used with DPDK.
+
+There are two aspects to a mempool handler.
+
+* Adding the code for your new mempool operations (ops). This is achieved by
+  adding a new mempool ops code, and using the ``MEMPOOL_REGISTER_OPS`` macro.
+
+* Using the new API to call ``rte_mempool_create_empty()`` and
+  ``rte_mempool_set_ops_byname()`` to create a new mempool and specifying which
+  ops to use.
+
+Several different mempool handlers may be used in the same application. A new
+mempool can be created by using the ``rte_mempool_create_empty()`` function,
+then using ``rte_mempool_set_ops_byname()`` to point the mempool to the
+relevant mempool handler callback (ops) structure.
+
+Legacy applications may continue to use the old ``rte_mempool_create()`` API
+call, which uses a ring based mempool handler by default. These applications
+will need to be modified to use a new mempool handler.
+
+For applications that use ``rte_pktmbuf_create()``, there is a config setting
+(``RTE_MBUF_DEFAULT_MEMPOOL_OPS``) that allows the application to make use of
+an alternative mempool handler.
+
+  .. note::
+
+    When running a DPDK application with shared libraries, mempool handler
+    shared objects specified with the '-d' EAL command-line parameter are
+    dynamically loaded. When running a multi-process application with shared
+    libraries, the -d arguments for mempool handlers *must be specified in the
+    same order for all processes* to ensure correct operation.
 
 
 Use Cases

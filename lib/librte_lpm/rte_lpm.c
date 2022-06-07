@@ -1,34 +1,6 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
+ * Copyright(c) 2020 Arm Limited
  */
 
 #include <string.h>
@@ -36,7 +8,6 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <errno.h>
 #include <sys/queue.h>
 
 #include <rte_log.h>
@@ -44,7 +15,6 @@
 #include <rte_common.h>
 #include <rte_memory.h>        /* for definition of RTE_CACHE_LINE_SIZE */
 #include <rte_malloc.h>
-#include <rte_memzone.h>
 #include <rte_eal.h>
 #include <rte_eal_memconfig.h>
 #include <rte_per_lcore.h>
@@ -52,6 +22,7 @@
 #include <rte_errno.h>
 #include <rte_rwlock.h>
 #include <rte_spinlock.h>
+#include <rte_tailq.h>
 
 #include "rte_lpm.h"
 
@@ -67,6 +38,17 @@ EAL_REGISTER_TAILQ(rte_lpm_tailq)
 enum valid_flag {
 	INVALID = 0,
 	VALID
+};
+
+/** @internal LPM structure. */
+struct __rte_lpm {
+	/* LPM metadata. */
+	struct rte_lpm lpm;
+
+	/* RCU config. */
+	struct rte_rcu_qsbr *v;		/* RCU QSBR variable. */
+	enum rte_lpm_qsbr_mode rcu_mode;/* Blocking, defer queue. */
+	struct rte_rcu_qsbr_dq *dq;	/* RCU QSBR defer queue. */
 };
 
 /* Macro to enable/disable run-time checks. */
@@ -101,7 +83,7 @@ depth_to_mask(uint8_t depth)
 /*
  * Converts given depth value to its corresponding range value.
  */
-static inline uint32_t __attribute__((pure))
+static uint32_t __attribute__((pure))
 depth_to_range(uint8_t depth)
 {
 	VERIFY_DEPTH(depth);
@@ -113,7 +95,7 @@ depth_to_range(uint8_t depth)
 		return 1 << (MAX_DEPTH_TBL24 - depth);
 
 	/* Else if depth is greater than 24 */
-	return (1 << (RTE_LPM_MAX_DEPTH - depth));
+	return 1 << (RTE_LPM_MAX_DEPTH - depth);
 }
 
 /*
@@ -128,13 +110,13 @@ rte_lpm_find_existing(const char *name)
 
 	lpm_list = RTE_TAILQ_CAST(rte_lpm_tailq.head, rte_lpm_list);
 
-	rte_rwlock_read_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_lock();
 	TAILQ_FOREACH(te, lpm_list, next) {
-		l = (struct rte_lpm *) te->data;
+		l = te->data;
 		if (strncmp(name, l->name, RTE_LPM_NAMESIZE) == 0)
 			break;
 	}
-	rte_rwlock_read_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_unlock();
 
 	if (te == NULL) {
 		rte_errno = ENOENT;
@@ -148,68 +130,107 @@ rte_lpm_find_existing(const char *name)
  * Allocates memory for LPM object
  */
 struct rte_lpm *
-rte_lpm_create(const char *name, int socket_id, int max_rules,
-		__rte_unused int flags)
+rte_lpm_create(const char *name, int socket_id,
+		const struct rte_lpm_config *config)
 {
 	char mem_name[RTE_LPM_NAMESIZE];
+	struct __rte_lpm *internal_lpm;
 	struct rte_lpm *lpm = NULL;
 	struct rte_tailq_entry *te;
-	uint32_t mem_size;
+	uint32_t mem_size, rules_size, tbl8s_size;
 	struct rte_lpm_list *lpm_list;
 
 	lpm_list = RTE_TAILQ_CAST(rte_lpm_tailq.head, rte_lpm_list);
 
-	RTE_BUILD_BUG_ON(sizeof(struct rte_lpm_tbl24_entry) != 2);
-	RTE_BUILD_BUG_ON(sizeof(struct rte_lpm_tbl8_entry) != 2);
+	RTE_BUILD_BUG_ON(sizeof(struct rte_lpm_tbl_entry) != 4);
 
 	/* Check user arguments. */
-	if ((name == NULL) || (socket_id < -1) || (max_rules == 0)){
+	if ((name == NULL) || (socket_id < -1) || (config->max_rules == 0)
+			|| config->number_tbl8s > RTE_LPM_MAX_TBL8_NUM_GROUPS) {
 		rte_errno = EINVAL;
 		return NULL;
 	}
 
 	snprintf(mem_name, sizeof(mem_name), "LPM_%s", name);
 
-	/* Determine the amount of memory to allocate. */
-	mem_size = sizeof(*lpm) + (sizeof(lpm->rules_tbl[0]) * max_rules);
-
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	/* guarantee there's no existing */
 	TAILQ_FOREACH(te, lpm_list, next) {
-		lpm = (struct rte_lpm *) te->data;
+		lpm = te->data;
 		if (strncmp(name, lpm->name, RTE_LPM_NAMESIZE) == 0)
 			break;
 	}
-	if (te != NULL)
+
+	if (te != NULL) {
+		lpm = NULL;
+		rte_errno = EEXIST;
 		goto exit;
+	}
+
+	/* Determine the amount of memory to allocate. */
+	mem_size = sizeof(*internal_lpm);
+	rules_size = sizeof(struct rte_lpm_rule) * config->max_rules;
+	tbl8s_size = sizeof(struct rte_lpm_tbl_entry) *
+			RTE_LPM_TBL8_GROUP_NUM_ENTRIES * config->number_tbl8s;
 
 	/* allocate tailq entry */
 	te = rte_zmalloc("LPM_TAILQ_ENTRY", sizeof(*te), 0);
 	if (te == NULL) {
 		RTE_LOG(ERR, LPM, "Failed to allocate tailq entry\n");
+		rte_errno = ENOMEM;
 		goto exit;
 	}
 
 	/* Allocate memory to store the LPM data structures. */
-	lpm = (struct rte_lpm *)rte_zmalloc_socket(mem_name, mem_size,
+	internal_lpm = rte_zmalloc_socket(mem_name, mem_size,
 			RTE_CACHE_LINE_SIZE, socket_id);
-	if (lpm == NULL) {
+	if (internal_lpm == NULL) {
 		RTE_LOG(ERR, LPM, "LPM memory allocation failed\n");
 		rte_free(te);
+		rte_errno = ENOMEM;
+		goto exit;
+	}
+
+	lpm = &internal_lpm->lpm;
+	lpm->rules_tbl = rte_zmalloc_socket(NULL,
+			(size_t)rules_size, RTE_CACHE_LINE_SIZE, socket_id);
+
+	if (lpm->rules_tbl == NULL) {
+		RTE_LOG(ERR, LPM, "LPM rules_tbl memory allocation failed\n");
+		rte_free(internal_lpm);
+		internal_lpm = NULL;
+		lpm = NULL;
+		rte_free(te);
+		rte_errno = ENOMEM;
+		goto exit;
+	}
+
+	lpm->tbl8 = rte_zmalloc_socket(NULL,
+			(size_t)tbl8s_size, RTE_CACHE_LINE_SIZE, socket_id);
+
+	if (lpm->tbl8 == NULL) {
+		RTE_LOG(ERR, LPM, "LPM tbl8 memory allocation failed\n");
+		rte_free(lpm->rules_tbl);
+		rte_free(internal_lpm);
+		internal_lpm = NULL;
+		lpm = NULL;
+		rte_free(te);
+		rte_errno = ENOMEM;
 		goto exit;
 	}
 
 	/* Save user arguments. */
-	lpm->max_rules = max_rules;
-	snprintf(lpm->name, sizeof(lpm->name), "%s", name);
+	lpm->max_rules = config->max_rules;
+	lpm->number_tbl8s = config->number_tbl8s;
+	strlcpy(lpm->name, name, sizeof(lpm->name));
 
-	te->data = (void *) lpm;
+	te->data = lpm;
 
 	TAILQ_INSERT_TAIL(lpm_list, te, next);
 
 exit:
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 
 	return lpm;
 }
@@ -220,6 +241,7 @@ exit:
 void
 rte_lpm_free(struct rte_lpm *lpm)
 {
+	struct __rte_lpm *internal_lpm;
 	struct rte_lpm_list *lpm_list;
 	struct rte_tailq_entry *te;
 
@@ -229,24 +251,91 @@ rte_lpm_free(struct rte_lpm *lpm)
 
 	lpm_list = RTE_TAILQ_CAST(rte_lpm_tailq.head, rte_lpm_list);
 
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	/* find our tailq entry */
 	TAILQ_FOREACH(te, lpm_list, next) {
 		if (te->data == (void *) lpm)
 			break;
 	}
-	if (te == NULL) {
-		rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
-		return;
-	}
+	if (te != NULL)
+		TAILQ_REMOVE(lpm_list, te, next);
 
-	TAILQ_REMOVE(lpm_list, te, next);
+	rte_mcfg_tailq_write_unlock();
 
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
-
+	internal_lpm = container_of(lpm, struct __rte_lpm, lpm);
+	if (internal_lpm->dq != NULL)
+		rte_rcu_qsbr_dq_delete(internal_lpm->dq);
+	rte_free(lpm->tbl8);
+	rte_free(lpm->rules_tbl);
 	rte_free(lpm);
 	rte_free(te);
+}
+
+static void
+__lpm_rcu_qsbr_free_resource(void *p, void *data, unsigned int n)
+{
+	struct rte_lpm_tbl_entry *tbl8 = ((struct rte_lpm *)p)->tbl8;
+	struct rte_lpm_tbl_entry zero_tbl8_entry = {0};
+	uint32_t tbl8_group_index = *(uint32_t *)data;
+
+	RTE_SET_USED(n);
+	/* Set tbl8 group invalid */
+	__atomic_store(&tbl8[tbl8_group_index], &zero_tbl8_entry,
+		__ATOMIC_RELAXED);
+}
+
+/* Associate QSBR variable with an LPM object.
+ */
+int
+rte_lpm_rcu_qsbr_add(struct rte_lpm *lpm, struct rte_lpm_rcu_config *cfg)
+{
+	struct rte_rcu_qsbr_dq_parameters params = {0};
+	char rcu_dq_name[RTE_RCU_QSBR_DQ_NAMESIZE];
+	struct __rte_lpm *internal_lpm;
+
+	if (lpm == NULL || cfg == NULL) {
+		rte_errno = EINVAL;
+		return 1;
+	}
+
+	internal_lpm = container_of(lpm, struct __rte_lpm, lpm);
+	if (internal_lpm->v != NULL) {
+		rte_errno = EEXIST;
+		return 1;
+	}
+
+	if (cfg->mode == RTE_LPM_QSBR_MODE_SYNC) {
+		/* No other things to do. */
+	} else if (cfg->mode == RTE_LPM_QSBR_MODE_DQ) {
+		/* Init QSBR defer queue. */
+		snprintf(rcu_dq_name, sizeof(rcu_dq_name),
+				"LPM_RCU_%s", lpm->name);
+		params.name = rcu_dq_name;
+		params.size = cfg->dq_size;
+		if (params.size == 0)
+			params.size = lpm->number_tbl8s;
+		params.trigger_reclaim_limit = cfg->reclaim_thd;
+		params.max_reclaim_size = cfg->reclaim_max;
+		if (params.max_reclaim_size == 0)
+			params.max_reclaim_size = RTE_LPM_RCU_DQ_RECLAIM_MAX;
+		params.esize = sizeof(uint32_t);	/* tbl8 group index */
+		params.free_fn = __lpm_rcu_qsbr_free_resource;
+		params.p = lpm;
+		params.v = cfg->v;
+		internal_lpm->dq = rte_rcu_qsbr_dq_create(&params);
+		if (internal_lpm->dq == NULL) {
+			RTE_LOG(ERR, LPM, "LPM defer queue creation failed\n");
+			return 1;
+		}
+	} else {
+		rte_errno = EINVAL;
+		return 1;
+	}
+	internal_lpm->rcu_mode = cfg->mode;
+	internal_lpm->v = cfg->v;
+
+	return 0;
 }
 
 /*
@@ -259,9 +348,9 @@ rte_lpm_free(struct rte_lpm *lpm)
  * are stored in the rule table from 0 - 31.
  * NOTE: Valid range for depth parameter is 1 .. 32 inclusive.
  */
-static inline int32_t
+static int32_t
 rule_add(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
-	uint8_t next_hop)
+	uint32_t next_hop)
 {
 	uint32_t rule_gindex, rule_index, last_rule;
 	int i;
@@ -280,8 +369,12 @@ rule_add(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 		for (; rule_index < last_rule; rule_index++) {
 
-			/* If rule already exists update its next_hop and return. */
+			/* If rule already exists update next hop and return. */
 			if (lpm->rules_tbl[rule_index].ip == ip_masked) {
+
+				if (lpm->rules_tbl[rule_index].next_hop
+						== next_hop)
+					return -EEXIST;
 				lpm->rules_tbl[rule_index].next_hop = next_hop;
 
 				return rule_index;
@@ -296,7 +389,8 @@ rule_add(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 		for (i = depth - 1; i > 0; i--) {
 			if (lpm->rule_info[i - 1].used_rules > 0) {
-				rule_index = lpm->rule_info[i - 1].first_rule + lpm->rule_info[i - 1].used_rules;
+				rule_index = lpm->rule_info[i - 1].first_rule
+						+ lpm->rule_info[i - 1].used_rules;
 				break;
 			}
 		}
@@ -308,11 +402,13 @@ rule_add(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 	/* Make room for the new rule in the array. */
 	for (i = RTE_LPM_MAX_DEPTH; i > depth; i--) {
-		if (lpm->rule_info[i - 1].first_rule + lpm->rule_info[i - 1].used_rules == lpm->max_rules)
+		if (lpm->rule_info[i - 1].first_rule
+				+ lpm->rule_info[i - 1].used_rules == lpm->max_rules)
 			return -ENOSPC;
 
 		if (lpm->rule_info[i - 1].used_rules > 0) {
-			lpm->rules_tbl[lpm->rule_info[i - 1].first_rule + lpm->rule_info[i - 1].used_rules]
+			lpm->rules_tbl[lpm->rule_info[i - 1].first_rule
+				+ lpm->rule_info[i - 1].used_rules]
 					= lpm->rules_tbl[lpm->rule_info[i - 1].first_rule];
 			lpm->rule_info[i - 1].first_rule++;
 		}
@@ -332,20 +428,22 @@ rule_add(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
  * Delete a rule from the rule table.
  * NOTE: Valid range for depth parameter is 1 .. 32 inclusive.
  */
-static inline void
+static void
 rule_delete(struct rte_lpm *lpm, int32_t rule_index, uint8_t depth)
 {
 	int i;
 
 	VERIFY_DEPTH(depth);
 
-	lpm->rules_tbl[rule_index] = lpm->rules_tbl[lpm->rule_info[depth - 1].first_rule
+	lpm->rules_tbl[rule_index] =
+			lpm->rules_tbl[lpm->rule_info[depth - 1].first_rule
 			+ lpm->rule_info[depth - 1].used_rules - 1];
 
 	for (i = depth; i < RTE_LPM_MAX_DEPTH; i++) {
 		if (lpm->rule_info[i].used_rules > 0) {
 			lpm->rules_tbl[lpm->rule_info[i].first_rule - 1] =
-					lpm->rules_tbl[lpm->rule_info[i].first_rule + lpm->rule_info[i].used_rules - 1];
+					lpm->rules_tbl[lpm->rule_info[i].first_rule
+						+ lpm->rule_info[i].used_rules - 1];
 			lpm->rule_info[i].first_rule--;
 		}
 	}
@@ -357,7 +455,7 @@ rule_delete(struct rte_lpm *lpm, int32_t rule_index, uint8_t depth)
  * Finds a rule in rule table.
  * NOTE: Valid range for depth parameter is 1 .. 32 inclusive.
  */
-static inline int32_t
+static int32_t
 rule_find(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth)
 {
 	uint32_t rule_gindex, last_rule, rule_index;
@@ -381,27 +479,34 @@ rule_find(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth)
 /*
  * Find, clean and allocate a tbl8.
  */
-static inline int32_t
-tbl8_alloc(struct rte_lpm_tbl8_entry *tbl8)
+static int32_t
+_tbl8_alloc(struct rte_lpm *lpm)
 {
-	uint32_t tbl8_gindex; /* tbl8 group index. */
-	struct rte_lpm_tbl8_entry *tbl8_entry;
+	uint32_t group_idx; /* tbl8 group index. */
+	struct rte_lpm_tbl_entry *tbl8_entry;
 
 	/* Scan through tbl8 to find a free (i.e. INVALID) tbl8 group. */
-	for (tbl8_gindex = 0; tbl8_gindex < RTE_LPM_TBL8_NUM_GROUPS;
-			tbl8_gindex++) {
-		tbl8_entry = &tbl8[tbl8_gindex *
-		                   RTE_LPM_TBL8_GROUP_NUM_ENTRIES];
+	for (group_idx = 0; group_idx < lpm->number_tbl8s; group_idx++) {
+		tbl8_entry = &lpm->tbl8[group_idx *
+					RTE_LPM_TBL8_GROUP_NUM_ENTRIES];
 		/* If a free tbl8 group is found clean it and set as VALID. */
 		if (!tbl8_entry->valid_group) {
+			struct rte_lpm_tbl_entry new_tbl8_entry = {
+				.next_hop = 0,
+				.valid = INVALID,
+				.depth = 0,
+				.valid_group = VALID,
+			};
+
 			memset(&tbl8_entry[0], 0,
 					RTE_LPM_TBL8_GROUP_NUM_ENTRIES *
 					sizeof(tbl8_entry[0]));
 
-			tbl8_entry->valid_group = VALID;
+			__atomic_store(tbl8_entry, &new_tbl8_entry,
+					__ATOMIC_RELAXED);
 
 			/* Return group index for allocated tbl8 group. */
-			return tbl8_gindex;
+			return group_idx;
 		}
 	}
 
@@ -409,17 +514,61 @@ tbl8_alloc(struct rte_lpm_tbl8_entry *tbl8)
 	return -ENOSPC;
 }
 
-static inline void
-tbl8_free(struct rte_lpm_tbl8_entry *tbl8, uint32_t tbl8_group_start)
+static int32_t
+tbl8_alloc(struct rte_lpm *lpm)
 {
-	/* Set tbl8 group invalid*/
-	tbl8[tbl8_group_start].valid_group = INVALID;
+	int32_t group_idx; /* tbl8 group index. */
+	struct __rte_lpm *internal_lpm;
+
+	internal_lpm = container_of(lpm, struct __rte_lpm, lpm);
+	group_idx = _tbl8_alloc(lpm);
+	if (group_idx == -ENOSPC && internal_lpm->dq != NULL) {
+		/* If there are no tbl8 groups try to reclaim one. */
+		if (rte_rcu_qsbr_dq_reclaim(internal_lpm->dq, 1,
+				NULL, NULL, NULL) == 0)
+			group_idx = _tbl8_alloc(lpm);
+	}
+
+	return group_idx;
 }
 
-static inline int32_t
-add_depth_small(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
-		uint8_t next_hop)
+static int32_t
+tbl8_free(struct rte_lpm *lpm, uint32_t tbl8_group_start)
 {
+	struct rte_lpm_tbl_entry zero_tbl8_entry = {0};
+	struct __rte_lpm *internal_lpm;
+	int status;
+
+	internal_lpm = container_of(lpm, struct __rte_lpm, lpm);
+	if (internal_lpm->v == NULL) {
+		/* Set tbl8 group invalid*/
+		__atomic_store(&lpm->tbl8[tbl8_group_start], &zero_tbl8_entry,
+				__ATOMIC_RELAXED);
+	} else if (internal_lpm->rcu_mode == RTE_LPM_QSBR_MODE_SYNC) {
+		/* Wait for quiescent state change. */
+		rte_rcu_qsbr_synchronize(internal_lpm->v,
+			RTE_QSBR_THRID_INVALID);
+		/* Set tbl8 group invalid*/
+		__atomic_store(&lpm->tbl8[tbl8_group_start], &zero_tbl8_entry,
+				__ATOMIC_RELAXED);
+	} else if (internal_lpm->rcu_mode == RTE_LPM_QSBR_MODE_DQ) {
+		/* Push into QSBR defer queue. */
+		status = rte_rcu_qsbr_dq_enqueue(internal_lpm->dq,
+				(void *)&tbl8_group_start);
+		if (status == 1) {
+			RTE_LOG(ERR, LPM, "Failed to push QSBR FIFO\n");
+			return -rte_errno;
+		}
+	}
+
+	return 0;
+}
+
+static __rte_noinline int32_t
+add_depth_small(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
+		uint32_t next_hop)
+{
+#define group_idx next_hop
 	uint32_t tbl24_index, tbl24_range, tbl8_index, tbl8_group_end, i, j;
 
 	/* Calculate the index into Table24. */
@@ -431,57 +580,67 @@ add_depth_small(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
 		 * For invalid OR valid and non-extended tbl 24 entries set
 		 * entry.
 		 */
-		if (!lpm->tbl24[i].valid || (lpm->tbl24[i].ext_entry == 0 &&
+		if (!lpm->tbl24[i].valid || (lpm->tbl24[i].valid_group == 0 &&
 				lpm->tbl24[i].depth <= depth)) {
 
-			struct rte_lpm_tbl24_entry new_tbl24_entry = {
-				{ .next_hop = next_hop, },
+			struct rte_lpm_tbl_entry new_tbl24_entry = {
+				.next_hop = next_hop,
 				.valid = VALID,
-				.ext_entry = 0,
+				.valid_group = 0,
 				.depth = depth,
 			};
 
 			/* Setting tbl24 entry in one go to avoid race
-			 * conditions */
-			lpm->tbl24[i] = new_tbl24_entry;
+			 * conditions
+			 */
+			__atomic_store(&lpm->tbl24[i], &new_tbl24_entry,
+					__ATOMIC_RELEASE);
 
 			continue;
 		}
 
-		/* If tbl24 entry is valid and extended calculate the index
-		 * into tbl8. */
-		tbl8_index = lpm->tbl24[i].tbl8_gindex *
-				RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
-		tbl8_group_end = tbl8_index + RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
+		if (lpm->tbl24[i].valid_group == 1) {
+			/* If tbl24 entry is valid and extended calculate the
+			 *  index into tbl8.
+			 */
+			tbl8_index = lpm->tbl24[i].group_idx *
+					RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
+			tbl8_group_end = tbl8_index +
+					RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
 
-		for (j = tbl8_index; j < tbl8_group_end; j++) {
-			if (!lpm->tbl8[j].valid ||
-					lpm->tbl8[j].depth <= depth) {
-				struct rte_lpm_tbl8_entry new_tbl8_entry = {
-					.valid = VALID,
-					.valid_group = VALID,
-					.depth = depth,
-					.next_hop = next_hop,
-				};
+			for (j = tbl8_index; j < tbl8_group_end; j++) {
+				if (!lpm->tbl8[j].valid ||
+						lpm->tbl8[j].depth <= depth) {
+					struct rte_lpm_tbl_entry
+						new_tbl8_entry = {
+						.valid = VALID,
+						.valid_group = VALID,
+						.depth = depth,
+						.next_hop = next_hop,
+					};
 
-				/*
-				 * Setting tbl8 entry in one go to avoid race
-				 * conditions
-				 */
-				lpm->tbl8[j] = new_tbl8_entry;
+					/*
+					 * Setting tbl8 entry in one go to avoid
+					 * race conditions
+					 */
+					__atomic_store(&lpm->tbl8[j],
+						&new_tbl8_entry,
+						__ATOMIC_RELAXED);
 
-				continue;
+					continue;
+				}
 			}
 		}
 	}
-
+#undef group_idx
 	return 0;
 }
 
-static inline int32_t
+static __rte_noinline int32_t
 add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
-		uint8_t next_hop)
+		uint32_t next_hop)
 {
+#define group_idx next_hop
 	uint32_t tbl24_index;
 	int32_t tbl8_group_index, tbl8_group_start, tbl8_group_end, tbl8_index,
 		tbl8_range, i;
@@ -491,7 +650,7 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 	if (!lpm->tbl24[tbl24_index].valid) {
 		/* Search for a free tbl8 group. */
-		tbl8_group_index = tbl8_alloc(lpm->tbl8);
+		tbl8_group_index = tbl8_alloc(lpm);
 
 		/* Check tbl8 allocation was successful. */
 		if (tbl8_group_index < 0) {
@@ -505,9 +664,14 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 		/* Set tbl8 entry. */
 		for (i = tbl8_index; i < (tbl8_index + tbl8_range); i++) {
-			lpm->tbl8[i].depth = depth;
-			lpm->tbl8[i].next_hop = next_hop;
-			lpm->tbl8[i].valid = VALID;
+			struct rte_lpm_tbl_entry new_tbl8_entry = {
+				.valid = VALID,
+				.depth = depth,
+				.valid_group = lpm->tbl8[i].valid_group,
+				.next_hop = next_hop,
+			};
+			__atomic_store(&lpm->tbl8[i], &new_tbl8_entry,
+					__ATOMIC_RELAXED);
 		}
 
 		/*
@@ -516,19 +680,23 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 		 * so assign whole structure in one go
 		 */
 
-		struct rte_lpm_tbl24_entry new_tbl24_entry = {
-			{ .tbl8_gindex = (uint8_t)tbl8_group_index, },
+		struct rte_lpm_tbl_entry new_tbl24_entry = {
+			.group_idx = tbl8_group_index,
 			.valid = VALID,
-			.ext_entry = 1,
+			.valid_group = 1,
 			.depth = 0,
 		};
 
-		lpm->tbl24[tbl24_index] = new_tbl24_entry;
+		/* The tbl24 entry must be written only after the
+		 * tbl8 entries are written.
+		 */
+		__atomic_store(&lpm->tbl24[tbl24_index], &new_tbl24_entry,
+				__ATOMIC_RELEASE);
 
-	}/* If valid entry but not extended calculate the index into Table8. */
-	else if (lpm->tbl24[tbl24_index].ext_entry == 0) {
+	} /* If valid entry but not extended calculate the index into Table8. */
+	else if (lpm->tbl24[tbl24_index].valid_group == 0) {
 		/* Search for free tbl8 group. */
-		tbl8_group_index = tbl8_alloc(lpm->tbl8);
+		tbl8_group_index = tbl8_alloc(lpm);
 
 		if (tbl8_group_index < 0) {
 			return tbl8_group_index;
@@ -541,24 +709,28 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 		/* Populate new tbl8 with tbl24 value. */
 		for (i = tbl8_group_start; i < tbl8_group_end; i++) {
-			lpm->tbl8[i].valid = VALID;
-			lpm->tbl8[i].depth = lpm->tbl24[tbl24_index].depth;
-			lpm->tbl8[i].next_hop =
-					lpm->tbl24[tbl24_index].next_hop;
+			struct rte_lpm_tbl_entry new_tbl8_entry = {
+				.valid = VALID,
+				.depth = lpm->tbl24[tbl24_index].depth,
+				.valid_group = lpm->tbl8[i].valid_group,
+				.next_hop = lpm->tbl24[tbl24_index].next_hop,
+			};
+			__atomic_store(&lpm->tbl8[i], &new_tbl8_entry,
+					__ATOMIC_RELAXED);
 		}
 
 		tbl8_index = tbl8_group_start + (ip_masked & 0xFF);
 
 		/* Insert new rule into the tbl8 entry. */
 		for (i = tbl8_index; i < tbl8_index + tbl8_range; i++) {
-			if (!lpm->tbl8[i].valid ||
-					lpm->tbl8[i].depth <= depth) {
-				lpm->tbl8[i].valid = VALID;
-				lpm->tbl8[i].depth = depth;
-				lpm->tbl8[i].next_hop = next_hop;
-
-				continue;
-			}
+			struct rte_lpm_tbl_entry new_tbl8_entry = {
+				.valid = VALID,
+				.depth = depth,
+				.valid_group = lpm->tbl8[i].valid_group,
+				.next_hop = next_hop,
+			};
+			__atomic_store(&lpm->tbl8[i], &new_tbl8_entry,
+					__ATOMIC_RELAXED);
 		}
 
 		/*
@@ -567,20 +739,23 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 		 * so assign whole structure in one go.
 		 */
 
-		struct rte_lpm_tbl24_entry new_tbl24_entry = {
-				{ .tbl8_gindex = (uint8_t)tbl8_group_index, },
+		struct rte_lpm_tbl_entry new_tbl24_entry = {
+				.group_idx = tbl8_group_index,
 				.valid = VALID,
-				.ext_entry = 1,
+				.valid_group = 1,
 				.depth = 0,
 		};
 
-		lpm->tbl24[tbl24_index] = new_tbl24_entry;
+		/* The tbl24 entry must be written only after the
+		 * tbl8 entries are written.
+		 */
+		__atomic_store(&lpm->tbl24[tbl24_index], &new_tbl24_entry,
+				__ATOMIC_RELEASE);
 
-	}
-	else { /*
+	} else { /*
 		* If it is valid, extended entry calculate the index into tbl8.
 		*/
-		tbl8_group_index = lpm->tbl24[tbl24_index].tbl8_gindex;
+		tbl8_group_index = lpm->tbl24[tbl24_index].group_idx;
 		tbl8_group_start = tbl8_group_index *
 				RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
 		tbl8_index = tbl8_group_start + (ip_masked & 0xFF);
@@ -589,7 +764,7 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 
 			if (!lpm->tbl8[i].valid ||
 					lpm->tbl8[i].depth <= depth) {
-				struct rte_lpm_tbl8_entry new_tbl8_entry = {
+				struct rte_lpm_tbl_entry new_tbl8_entry = {
 					.valid = VALID,
 					.depth = depth,
 					.next_hop = next_hop,
@@ -600,13 +775,14 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
 				 * Setting tbl8 entry in one go to avoid race
 				 * condition
 				 */
-				lpm->tbl8[i] = new_tbl8_entry;
+				__atomic_store(&lpm->tbl8[i], &new_tbl8_entry,
+						__ATOMIC_RELAXED);
 
 				continue;
 			}
 		}
 	}
-
+#undef group_idx
 	return 0;
 }
 
@@ -615,7 +791,7 @@ add_depth_big(struct rte_lpm *lpm, uint32_t ip_masked, uint8_t depth,
  */
 int
 rte_lpm_add(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
-		uint8_t next_hop)
+		uint32_t next_hop)
 {
 	int32_t rule_index, status = 0;
 	uint32_t ip_masked;
@@ -629,6 +805,12 @@ rte_lpm_add(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
 	/* Add the rule to the rule table. */
 	rule_index = rule_add(lpm, ip_masked, depth, next_hop);
 
+	/* Skip table entries update if The rule is the same as
+	 * the rule in the rules table.
+	 */
+	if (rule_index == -EEXIST)
+		return 0;
+
 	/* If the is no space available for new rule return error. */
 	if (rule_index < 0) {
 		return rule_index;
@@ -636,8 +818,7 @@ rte_lpm_add(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
 
 	if (depth <= MAX_DEPTH_TBL24) {
 		status = add_depth_small(lpm, ip_masked, depth, next_hop);
-	}
-	else { /* If depth > RTE_LPM_MAX_DEPTH_TBL24 */
+	} else { /* If depth > RTE_LPM_MAX_DEPTH_TBL24 */
 		status = add_depth_big(lpm, ip_masked, depth, next_hop);
 
 		/*
@@ -659,7 +840,7 @@ rte_lpm_add(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
  */
 int
 rte_lpm_is_rule_present(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
-uint8_t *next_hop)
+uint32_t *next_hop)
 {
 	uint32_t ip_masked;
 	int32_t rule_index;
@@ -683,8 +864,9 @@ uint8_t *next_hop)
 	return 0;
 }
 
-static inline int32_t
-find_previous_rule(struct rte_lpm *lpm, uint32_t ip, uint8_t depth, uint8_t *sub_rule_depth)
+static int32_t
+find_previous_rule(struct rte_lpm *lpm, uint32_t ip, uint8_t depth,
+		uint8_t *sub_rule_depth)
 {
 	int32_t rule_index;
 	uint32_t ip_masked;
@@ -704,15 +886,17 @@ find_previous_rule(struct rte_lpm *lpm, uint32_t ip, uint8_t depth, uint8_t *sub
 	return -1;
 }
 
-static inline int32_t
+static int32_t
 delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
 	uint8_t depth, int32_t sub_rule_index, uint8_t sub_rule_depth)
 {
+#define group_idx next_hop
 	uint32_t tbl24_range, tbl24_index, tbl8_group_index, tbl8_index, i, j;
 
 	/* Calculate the range and index into Table24. */
 	tbl24_range = depth_to_range(depth);
 	tbl24_index = (ip_masked >> 8);
+	struct rte_lpm_tbl_entry zero_tbl24_entry = {0};
 
 	/*
 	 * Firstly check the sub_rule_index. A -1 indicates no replacement rule
@@ -725,18 +909,18 @@ delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
 		 */
 		for (i = tbl24_index; i < (tbl24_index + tbl24_range); i++) {
 
-			if (lpm->tbl24[i].ext_entry == 0 &&
-					lpm->tbl24[i].depth <= depth ) {
-				lpm->tbl24[i].valid = INVALID;
-			}
-			else {
+			if (lpm->tbl24[i].valid_group == 0 &&
+					lpm->tbl24[i].depth <= depth) {
+				__atomic_store(&lpm->tbl24[i],
+					&zero_tbl24_entry, __ATOMIC_RELEASE);
+			} else if (lpm->tbl24[i].valid_group == 1) {
 				/*
 				 * If TBL24 entry is extended, then there has
 				 * to be a rule with depth >= 25 in the
 				 * associated TBL8 group.
 				 */
 
-				tbl8_group_index = lpm->tbl24[i].tbl8_gindex;
+				tbl8_group_index = lpm->tbl24[i].group_idx;
 				tbl8_index = tbl8_group_index *
 						RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
 
@@ -748,22 +932,22 @@ delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
 				}
 			}
 		}
-	}
-	else {
+	} else {
 		/*
 		 * If a replacement rule exists then modify entries
 		 * associated with this rule.
 		 */
 
-		struct rte_lpm_tbl24_entry new_tbl24_entry = {
-			{.next_hop = lpm->rules_tbl[sub_rule_index].next_hop,},
+		struct rte_lpm_tbl_entry new_tbl24_entry = {
+			.next_hop = lpm->rules_tbl[sub_rule_index].next_hop,
 			.valid = VALID,
-			.ext_entry = 0,
+			.valid_group = 0,
 			.depth = sub_rule_depth,
 		};
 
-		struct rte_lpm_tbl8_entry new_tbl8_entry = {
+		struct rte_lpm_tbl_entry new_tbl8_entry = {
 			.valid = VALID,
+			.valid_group = VALID,
 			.depth = sub_rule_depth,
 			.next_hop = lpm->rules_tbl
 			[sub_rule_index].next_hop,
@@ -771,18 +955,18 @@ delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
 
 		for (i = tbl24_index; i < (tbl24_index + tbl24_range); i++) {
 
-			if (lpm->tbl24[i].ext_entry == 0 &&
-					lpm->tbl24[i].depth <= depth ) {
-				lpm->tbl24[i] = new_tbl24_entry;
-			}
-			else {
+			if (lpm->tbl24[i].valid_group == 0 &&
+					lpm->tbl24[i].depth <= depth) {
+				__atomic_store(&lpm->tbl24[i], &new_tbl24_entry,
+						__ATOMIC_RELEASE);
+			} else  if (lpm->tbl24[i].valid_group == 1) {
 				/*
 				 * If TBL24 entry is extended, then there has
 				 * to be a rule with depth >= 25 in the
 				 * associated TBL8 group.
 				 */
 
-				tbl8_group_index = lpm->tbl24[i].tbl8_gindex;
+				tbl8_group_index = lpm->tbl24[i].group_idx;
 				tbl8_index = tbl8_group_index *
 						RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
 
@@ -790,12 +974,14 @@ delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
 					RTE_LPM_TBL8_GROUP_NUM_ENTRIES); j++) {
 
 					if (lpm->tbl8[j].depth <= depth)
-						lpm->tbl8[j] = new_tbl8_entry;
+						__atomic_store(&lpm->tbl8[j],
+							&new_tbl8_entry,
+							__ATOMIC_RELAXED);
 				}
 			}
 		}
 	}
-
+#undef group_idx
 	return 0;
 }
 
@@ -807,8 +993,9 @@ delete_depth_small(struct rte_lpm *lpm, uint32_t ip_masked,
  * Return of value > -1 means tbl8 is in use but has all the same values and
  * thus can be recycled
  */
-static inline int32_t
-tbl8_recycle_check(struct rte_lpm_tbl8_entry *tbl8, uint32_t tbl8_group_start)
+static int32_t
+tbl8_recycle_check(struct rte_lpm_tbl_entry *tbl8,
+		uint32_t tbl8_group_start)
 {
 	uint32_t tbl8_group_end, i;
 	tbl8_group_end = tbl8_group_start + RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
@@ -825,7 +1012,7 @@ tbl8_recycle_check(struct rte_lpm_tbl8_entry *tbl8, uint32_t tbl8_group_start)
 		 * and if so check the rest of the entries to verify that they
 		 * are all of this depth.
 		 */
-		if (tbl8[tbl8_group_start].depth < MAX_DEPTH_TBL24) {
+		if (tbl8[tbl8_group_start].depth <= MAX_DEPTH_TBL24) {
 			for (i = (tbl8_group_start + 1); i < tbl8_group_end;
 					i++) {
 
@@ -853,13 +1040,14 @@ tbl8_recycle_check(struct rte_lpm_tbl8_entry *tbl8, uint32_t tbl8_group_start)
 	return -EINVAL;
 }
 
-static inline int32_t
+static int32_t
 delete_depth_big(struct rte_lpm *lpm, uint32_t ip_masked,
 	uint8_t depth, int32_t sub_rule_index, uint8_t sub_rule_depth)
 {
+#define group_idx next_hop
 	uint32_t tbl24_index, tbl8_group_index, tbl8_group_start, tbl8_index,
 			tbl8_range, i;
-	int32_t tbl8_recycle_index;
+	int32_t tbl8_recycle_index, status = 0;
 
 	/*
 	 * Calculate the index into tbl24 and range. Note: All depths larger
@@ -868,7 +1056,7 @@ delete_depth_big(struct rte_lpm *lpm, uint32_t ip_masked,
 	tbl24_index = ip_masked >> 8;
 
 	/* Calculate the index into tbl8 and range. */
-	tbl8_group_index = lpm->tbl24[tbl24_index].tbl8_gindex;
+	tbl8_group_index = lpm->tbl24[tbl24_index].group_idx;
 	tbl8_group_start = tbl8_group_index * RTE_LPM_TBL8_GROUP_NUM_ENTRIES;
 	tbl8_index = tbl8_group_start + (ip_masked & 0xFF);
 	tbl8_range = depth_to_range(depth);
@@ -882,10 +1070,9 @@ delete_depth_big(struct rte_lpm *lpm, uint32_t ip_masked,
 			if (lpm->tbl8[i].depth <= depth)
 				lpm->tbl8[i].valid = INVALID;
 		}
-	}
-	else {
+	} else {
 		/* Set new tbl8 entry. */
-		struct rte_lpm_tbl8_entry new_tbl8_entry = {
+		struct rte_lpm_tbl_entry new_tbl8_entry = {
 			.valid = VALID,
 			.depth = sub_rule_depth,
 			.valid_group = lpm->tbl8[tbl8_group_start].valid_group,
@@ -898,7 +1085,8 @@ delete_depth_big(struct rte_lpm *lpm, uint32_t ip_masked,
 		 */
 		for (i = tbl8_index; i < (tbl8_index + tbl8_range); i++) {
 			if (lpm->tbl8[i].depth <= depth)
-				lpm->tbl8[i] = new_tbl8_entry;
+				__atomic_store(&lpm->tbl8[i], &new_tbl8_entry,
+						__ATOMIC_RELAXED);
 		}
 	}
 
@@ -910,26 +1098,32 @@ delete_depth_big(struct rte_lpm *lpm, uint32_t ip_masked,
 
 	tbl8_recycle_index = tbl8_recycle_check(lpm->tbl8, tbl8_group_start);
 
-	if (tbl8_recycle_index == -EINVAL){
-		/* Set tbl24 before freeing tbl8 to avoid race condition. */
+	if (tbl8_recycle_index == -EINVAL) {
+		/* Set tbl24 before freeing tbl8 to avoid race condition.
+		 * Prevent the free of the tbl8 group from hoisting.
+		 */
 		lpm->tbl24[tbl24_index].valid = 0;
-		tbl8_free(lpm->tbl8, tbl8_group_start);
-	}
-	else if (tbl8_recycle_index > -1) {
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		status = tbl8_free(lpm, tbl8_group_start);
+	} else if (tbl8_recycle_index > -1) {
 		/* Update tbl24 entry. */
-		struct rte_lpm_tbl24_entry new_tbl24_entry = {
-			{ .next_hop = lpm->tbl8[tbl8_recycle_index].next_hop, },
+		struct rte_lpm_tbl_entry new_tbl24_entry = {
+			.next_hop = lpm->tbl8[tbl8_recycle_index].next_hop,
 			.valid = VALID,
-			.ext_entry = 0,
+			.valid_group = 0,
 			.depth = lpm->tbl8[tbl8_recycle_index].depth,
 		};
 
-		/* Set tbl24 before freeing tbl8 to avoid race condition. */
-		lpm->tbl24[tbl24_index] = new_tbl24_entry;
-		tbl8_free(lpm->tbl8, tbl8_group_start);
+		/* Set tbl24 before freeing tbl8 to avoid race condition.
+		 * Prevent the free of the tbl8 group from hoisting.
+		 */
+		__atomic_store(&lpm->tbl24[tbl24_index], &new_tbl24_entry,
+				__ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		status = tbl8_free(lpm, tbl8_group_start);
 	}
-
-	return 0;
+#undef group_idx
+	return status;
 }
 
 /*
@@ -982,9 +1176,9 @@ rte_lpm_delete(struct rte_lpm *lpm, uint32_t ip, uint8_t depth)
 	if (depth <= MAX_DEPTH_TBL24) {
 		return delete_depth_small(lpm, ip_masked, depth,
 				sub_rule_index, sub_rule_depth);
-	}
-	else { /* If depth > MAX_DEPTH_TBL24 */
-		return delete_depth_big(lpm, ip_masked, depth, sub_rule_index, sub_rule_depth);
+	} else { /* If depth > MAX_DEPTH_TBL24 */
+		return delete_depth_big(lpm, ip_masked, depth, sub_rule_index,
+				sub_rule_depth);
 	}
 }
 
@@ -1001,7 +1195,8 @@ rte_lpm_delete_all(struct rte_lpm *lpm)
 	memset(lpm->tbl24, 0, sizeof(lpm->tbl24));
 
 	/* Zero tbl8. */
-	memset(lpm->tbl8, 0, sizeof(lpm->tbl8));
+	memset(lpm->tbl8, 0, sizeof(lpm->tbl8[0])
+			* RTE_LPM_TBL8_GROUP_NUM_ENTRIES * lpm->number_tbl8s);
 
 	/* Delete all rules form the rules table. */
 	memset(lpm->rules_tbl, 0, sizeof(lpm->rules_tbl[0]) * lpm->max_rules);

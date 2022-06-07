@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 
 #include "e1000_api.h"
@@ -48,7 +19,7 @@ STATIC s32 e1000_get_link_up_info_vf(struct e1000_hw *hw, u16 *speed,
 STATIC s32 e1000_init_hw_vf(struct e1000_hw *hw);
 STATIC s32 e1000_reset_hw_vf(struct e1000_hw *hw);
 STATIC void e1000_update_mc_addr_list_vf(struct e1000_hw *hw, u8 *, u32);
-STATIC void e1000_rar_set_vf(struct e1000_hw *, u8 *, u32);
+STATIC int  e1000_rar_set_vf(struct e1000_hw *, u8 *, u32);
 STATIC s32 e1000_read_mac_addr_vf(struct e1000_hw *);
 
 /**
@@ -322,7 +293,7 @@ STATIC s32 e1000_init_hw_vf(struct e1000_hw *hw)
  *  @addr: pointer to the receive address
  *  @index receive address array register
  **/
-STATIC void e1000_rar_set_vf(struct e1000_hw *hw, u8 *addr,
+STATIC int e1000_rar_set_vf(struct e1000_hw *hw, u8 *addr,
 			     u32 E1000_UNUSEDARG index)
 {
 	struct e1000_mbx_info *mbx = &hw->mbx;
@@ -345,6 +316,8 @@ STATIC void e1000_rar_set_vf(struct e1000_hw *hw, u8 *addr,
 	if (!ret_val &&
 	    (msgbuf[0] == (E1000_VF_SET_MAC_ADDR | E1000_VT_MSGTYPE_NACK)))
 		e1000_read_mac_addr_vf(hw);
+
+	return E1000_SUCCESS;
 }
 
 /**
@@ -419,12 +392,13 @@ void e1000_update_mc_addr_list_vf(struct e1000_hw *hw,
 
 	DEBUGOUT1("MC Addr Count = %d\n", mc_addr_count);
 
+	msgbuf[0] = E1000_VF_SET_MULTICAST;
+
 	if (mc_addr_count > 30) {
 		msgbuf[0] |= E1000_VF_SET_MULTICAST_OVERFLOW;
 		mc_addr_count = 30;
 	}
 
-	msgbuf[0] = E1000_VF_SET_MULTICAST;
 	msgbuf[0] |= mc_addr_count << E1000_VT_MSGINFO_SHIFT;
 
 	for (i = 0; i < mc_addr_count; i++) {
@@ -488,8 +462,10 @@ s32 e1000_promisc_set_vf(struct e1000_hw *hw, enum e1000_promisc_type type)
 		break;
 	case e1000_promisc_enabled:
 		msgbuf |= E1000_VF_SET_PROMISC_MULTICAST;
+		/* fall-through */
 	case e1000_promisc_unicast:
 		msgbuf |= E1000_VF_SET_PROMISC_UNICAST;
+		/* fall-through */
 	case e1000_promisc_disabled:
 		break;
 	default:

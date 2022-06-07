@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -101,20 +72,11 @@ const char * ether_addr_invalid_strs[] = {
 		" ",
 };
 
-#define ETHERADDR_VALID_STRS_SIZE \
-	(sizeof(ether_addr_valid_strs) / sizeof(ether_addr_valid_strs[0]))
-#define ETHERADDR_GARBAGE_STRS_SIZE \
-	(sizeof(ether_addr_garbage_strs) / sizeof(ether_addr_garbage_strs[0]))
-#define ETHERADDR_INVALID_STRS_SIZE \
-	(sizeof(ether_addr_invalid_strs) / sizeof(ether_addr_invalid_strs[0]))
-
-
-
 static int
-is_addr_different(const struct ether_addr addr, uint64_t num)
+is_addr_different(const struct rte_ether_addr addr, uint64_t num)
 {
 	int i;
-	for (i = 0; i < ETHER_ADDR_LEN; i++, num >>= 8)
+	for (i = 0; i < RTE_ETHER_ADDR_LEN; i++, num >>= 8)
 		if (addr.addr_bytes[i] != (num & 0xFF)) {
 			return 1;
 		}
@@ -126,7 +88,7 @@ int
 test_parse_etheraddr_invalid_param(void)
 {
 	char buf[CMDLINE_TEST_BUFSIZE];
-	struct ether_addr result;
+	struct rte_ether_addr result;
 	int ret = 0;
 
 	/* try all null */
@@ -147,8 +109,7 @@ test_parse_etheraddr_invalid_param(void)
 	/* try null result */
 
 	/* copy string to buffer */
-	snprintf(buf, sizeof(buf), "%s",
-			ether_addr_valid_strs[0].str);
+	strlcpy(buf, ether_addr_valid_strs[0].str, sizeof(buf));
 
 	ret = cmdline_parse_etheraddr(NULL, buf, NULL, 0);
 	if (ret == -1) {
@@ -178,12 +139,12 @@ test_parse_etheraddr_invalid_data(void)
 {
 	int ret = 0;
 	unsigned i;
-	struct ether_addr result;
+	struct rte_ether_addr result;
 
 	/* test full strings */
-	for (i = 0; i < ETHERADDR_INVALID_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ether_addr_invalid_strs); i++) {
 
-		memset(&result, 0, sizeof(struct ether_addr));
+		memset(&result, 0, sizeof(struct rte_ether_addr));
 
 		ret = cmdline_parse_etheraddr(NULL, ether_addr_invalid_strs[i],
 			(void*)&result, sizeof(result));
@@ -203,12 +164,12 @@ test_parse_etheraddr_valid(void)
 {
 	int ret = 0;
 	unsigned i;
-	struct ether_addr result;
+	struct rte_ether_addr result;
 
 	/* test full strings */
-	for (i = 0; i < ETHERADDR_VALID_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ether_addr_valid_strs); i++) {
 
-		memset(&result, 0, sizeof(struct ether_addr));
+		memset(&result, 0, sizeof(struct rte_ether_addr));
 
 		ret = cmdline_parse_etheraddr(NULL, ether_addr_valid_strs[i].str,
 			(void*)&result, sizeof(result));
@@ -225,9 +186,9 @@ test_parse_etheraddr_valid(void)
 	}
 
 	/* test garbage strings */
-	for (i = 0; i < ETHERADDR_GARBAGE_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ether_addr_garbage_strs); i++) {
 
-		memset(&result, 0, sizeof(struct ether_addr));
+		memset(&result, 0, sizeof(struct rte_ether_addr));
 
 		ret = cmdline_parse_etheraddr(NULL, ether_addr_garbage_strs[i],
 			(void*)&result, sizeof(result));

@@ -1,41 +1,14 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
 #include <stdint.h>
 
+#include <rte_eal.h>
 #include <rte_memory.h>
 #include <rte_common.h>
+#include <rte_memzone.h>
 
 #include "test.h"
 
@@ -52,11 +25,55 @@
  */
 
 static int
+check_mem(const struct rte_memseg_list *msl __rte_unused,
+		const struct rte_memseg *ms, void *arg __rte_unused)
+{
+	volatile uint8_t *mem = (volatile uint8_t *) ms->addr;
+	size_t i, max = ms->len;
+
+	for (i = 0; i < max; i++, mem++)
+		*mem;
+	return 0;
+}
+
+static int
+check_seg_fds(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
+		void *arg __rte_unused)
+{
+	size_t offset;
+	int ret;
+
+	/* skip external segments */
+	if (msl->external)
+		return 0;
+
+	/* try segment fd first. we're in a callback, so thread-unsafe */
+	ret = rte_memseg_get_fd_thread_unsafe(ms);
+	if (ret < 0) {
+		/* ENOTSUP means segment is valid, but there is not support for
+		 * segment fd API (e.g. on FreeBSD).
+		 */
+		if (errno == ENOTSUP)
+			return 1;
+		/* all other errors are treated as failures */
+		return -1;
+	}
+
+	/* we're able to get memseg fd - try getting its offset */
+	ret = rte_memseg_get_fd_offset_thread_unsafe(ms, &offset);
+	if (ret < 0) {
+		if (errno == ENOTSUP)
+			return 1;
+		return -1;
+	}
+	return 0;
+}
+
+static int
 test_memory(void)
 {
 	uint64_t s;
-	unsigned i, j;
-	const struct rte_memseg *mem;
+	int ret;
 
 	/*
 	 * dump the mapped memory: the python-expect script checks
@@ -73,20 +90,18 @@ test_memory(void)
 	}
 
 	/* try to read memory (should not segfault) */
-	mem = rte_eal_get_physmem_layout();
-	for (i = 0; i < RTE_MAX_MEMSEG && mem[i].addr != NULL ; i++) {
+	rte_memseg_walk(check_mem, NULL);
 
-		/* check memory */
-		for (j = 0; j<mem[i].len; j++) {
-			*((volatile uint8_t *) mem[i].addr + j);
-		}
+	/* check segment fd support */
+	ret = rte_memseg_walk(check_seg_fds, NULL);
+	if (ret == 1) {
+		printf("Segment fd API is unsupported\n");
+	} else if (ret == -1) {
+		printf("Error getting segment fd's\n");
+		return -1;
 	}
 
 	return 0;
 }
 
-static struct test_command memory_cmd = {
-	.command = "memory_autotest",
-	.callback = test_memory,
-};
-REGISTER_TEST_COMMAND(memory_cmd);
+REGISTER_TEST_COMMAND(memory_autotest, test_memory);

@@ -1,65 +1,45 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2015 Intel Corporation
  */
 
 #include <stdint.h>
 #include <inttypes.h>
+#include <getopt.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
-#define RX_RING_SIZE 128
-#define TX_RING_SIZE 512
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 1024
 
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
-static const struct rte_eth_conf port_conf_default = {
-	.rxmode = { .max_rx_pkt_len = ETHER_MAX_LEN, },
-};
+static const char usage[] =
+	"%s EAL_ARGS -- [-t]\n";
 
-static unsigned nb_ports;
+static const struct rte_eth_conf port_conf_default = {
+	.rxmode = {
+		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+	},
+};
 
 static struct {
 	uint64_t total_cycles;
+	uint64_t total_queue_cycles;
 	uint64_t total_pkts;
 } latency_numbers;
 
+int hw_timestamping;
+
+#define TICKS_PER_CYCLE_SHIFT 16
+static uint64_t ticks_per_cycle_mult;
 
 static uint16_t
-add_timestamps(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
+add_timestamps(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
 		struct rte_mbuf **pkts, uint16_t nb_pkts,
 		uint16_t max_pkts __rte_unused, void *_ __rte_unused)
 {
@@ -72,22 +52,42 @@ add_timestamps(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
 }
 
 static uint16_t
-calc_latency(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
+calc_latency(uint16_t port, uint16_t qidx __rte_unused,
 		struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
 {
 	uint64_t cycles = 0;
+	uint64_t queue_ticks = 0;
 	uint64_t now = rte_rdtsc();
+	uint64_t ticks;
 	unsigned i;
 
-	for (i = 0; i < nb_pkts; i++)
+	if (hw_timestamping)
+		rte_eth_read_clock(port, &ticks);
+
+	for (i = 0; i < nb_pkts; i++) {
 		cycles += now - pkts[i]->udata64;
+		if (hw_timestamping)
+			queue_ticks += ticks - pkts[i]->timestamp;
+	}
+
 	latency_numbers.total_cycles += cycles;
+	if (hw_timestamping)
+		latency_numbers.total_queue_cycles += (queue_ticks
+			* ticks_per_cycle_mult) >> TICKS_PER_CYCLE_SHIFT;
+
 	latency_numbers.total_pkts += nb_pkts;
 
 	if (latency_numbers.total_pkts > (100 * 1000 * 1000ULL)) {
 		printf("Latency = %"PRIu64" cycles\n",
 		latency_numbers.total_cycles / latency_numbers.total_pkts);
-		latency_numbers.total_cycles = latency_numbers.total_pkts = 0;
+		if (hw_timestamping) {
+			printf("Latency from HW = %"PRIu64" cycles\n",
+			   latency_numbers.total_queue_cycles
+			   / latency_numbers.total_pkts);
+		}
+		latency_numbers.total_cycles = 0;
+		latency_numbers.total_queue_cycles = 0;
+		latency_numbers.total_pkts = 0;
 	}
 	return nb_pkts;
 }
@@ -97,30 +97,64 @@ calc_latency(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
  * coming from the mbuf_pool passed as parameter
  */
 static inline int
-port_init(uint8_t port, struct rte_mempool *mbuf_pool)
+port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
 	struct rte_eth_conf port_conf = port_conf_default;
 	const uint16_t rx_rings = 1, tx_rings = 1;
+	uint16_t nb_rxd = RX_RING_SIZE;
+	uint16_t nb_txd = TX_RING_SIZE;
 	int retval;
 	uint16_t q;
+	struct rte_eth_dev_info dev_info;
+	struct rte_eth_rxconf rxconf;
+	struct rte_eth_txconf txconf;
 
-	if (port >= rte_eth_dev_count())
+	if (!rte_eth_dev_is_valid_port(port))
 		return -1;
+
+	retval = rte_eth_dev_info_get(port, &dev_info);
+	if (retval != 0) {
+		printf("Error during getting device (port %u) info: %s\n",
+				port, strerror(-retval));
+
+		return retval;
+	}
+
+	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+		port_conf.txmode.offloads |=
+			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+
+	if (hw_timestamping) {
+		if (!(dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TIMESTAMP)) {
+			printf("\nERROR: Port %u does not support hardware timestamping\n"
+					, port);
+			return -1;
+		}
+		port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_TIMESTAMP;
+	}
 
 	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
 	if (retval != 0)
 		return retval;
 
+	retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
+	if (retval != 0)
+		return retval;
+
+	rxconf = dev_info.default_rxconf;
+
 	for (q = 0; q < rx_rings; q++) {
-		retval = rte_eth_rx_queue_setup(port, q, RX_RING_SIZE,
-				rte_eth_dev_socket_id(port), NULL, mbuf_pool);
+		retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
+			rte_eth_dev_socket_id(port), &rxconf, mbuf_pool);
 		if (retval < 0)
 			return retval;
 	}
 
+	txconf = dev_info.default_txconf;
+	txconf.offloads = port_conf.txmode.offloads;
 	for (q = 0; q < tx_rings; q++) {
-		retval = rte_eth_tx_queue_setup(port, q, TX_RING_SIZE,
-				rte_eth_dev_socket_id(port), NULL);
+		retval = rte_eth_tx_queue_setup(port, q, nb_txd,
+				rte_eth_dev_socket_id(port), &txconf);
 		if (retval < 0)
 			return retval;
 	}
@@ -129,9 +163,37 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 	if (retval < 0)
 		return retval;
 
-	struct ether_addr addr;
+	if (hw_timestamping && ticks_per_cycle_mult  == 0) {
+		uint64_t cycles_base = rte_rdtsc();
+		uint64_t ticks_base;
+		retval = rte_eth_read_clock(port, &ticks_base);
+		if (retval != 0)
+			return retval;
+		rte_delay_ms(100);
+		uint64_t cycles = rte_rdtsc();
+		uint64_t ticks;
+		rte_eth_read_clock(port, &ticks);
+		uint64_t c_freq = cycles - cycles_base;
+		uint64_t t_freq = ticks - ticks_base;
+		double freq_mult = (double)c_freq / t_freq;
+		printf("TSC Freq ~= %" PRIu64
+				"\nHW Freq ~= %" PRIu64
+				"\nRatio : %f\n",
+				c_freq * 10, t_freq * 10, freq_mult);
+		/* TSC will be faster than internal ticks so freq_mult is > 0
+		 * We convert the multiplication to an integer shift & mult
+		 */
+		ticks_per_cycle_mult = (1 << TICKS_PER_CYCLE_SHIFT) / freq_mult;
+	}
 
-	rte_eth_macaddr_get(port, &addr);
+	struct rte_ether_addr addr;
+
+	retval = rte_eth_macaddr_get(port, &addr);
+	if (retval < 0) {
+		printf("Failed to get MAC address on port %u: %s\n",
+			port, rte_strerror(-retval));
+		return retval;
+	}
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
 			(unsigned)port,
@@ -139,7 +201,10 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 			addr.addr_bytes[2], addr.addr_bytes[3],
 			addr.addr_bytes[4], addr.addr_bytes[5]);
 
-	rte_eth_promiscuous_enable(port);
+	retval = rte_eth_promiscuous_enable(port);
+	if (retval != 0)
+		return retval;
+
 	rte_eth_add_rx_callback(port, 0, add_timestamps, NULL);
 	rte_eth_add_tx_callback(port, 0, calc_latency, NULL);
 
@@ -150,12 +215,12 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
  * Main thread that does the work, reading from INPUT_PORT
  * and writing to OUTPUT_PORT
  */
-static  __attribute__((noreturn)) void
+static  __rte_noreturn void
 lcore_main(void)
 {
-	uint8_t port;
+	uint16_t port;
 
-	for (port = 0; port < nb_ports; port++)
+	RTE_ETH_FOREACH_DEV(port)
 		if (rte_eth_dev_socket_id(port) > 0 &&
 				rte_eth_dev_socket_id(port) !=
 						(int)rte_socket_id())
@@ -166,7 +231,7 @@ lcore_main(void)
 	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
 			rte_lcore_id());
 	for (;;) {
-		for (port = 0; port < nb_ports; port++) {
+		RTE_ETH_FOREACH_DEV(port) {
 			struct rte_mbuf *bufs[BURST_SIZE];
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0,
 					bufs, BURST_SIZE);
@@ -189,7 +254,13 @@ int
 main(int argc, char *argv[])
 {
 	struct rte_mempool *mbuf_pool;
-	uint8_t portid;
+	uint16_t nb_ports;
+	uint16_t portid;
+	struct option lgopts[] = {
+		{ NULL,  0, 0, 0 }
+	};
+	int opt, option_index;
+
 
 	/* init EAL */
 	int ret = rte_eal_init(argc, argv);
@@ -199,7 +270,19 @@ main(int argc, char *argv[])
 	argc -= ret;
 	argv += ret;
 
-	nb_ports = rte_eth_dev_count();
+	while ((opt = getopt_long(argc, argv, "t", lgopts, &option_index))
+			!= EOF)
+		switch (opt) {
+		case 't':
+			hw_timestamping = 1;
+			break;
+		default:
+			printf(usage, argv[0]);
+			return -1;
+		}
+	optind = 1; /* reset getopt lib */
+
+	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports < 2 || (nb_ports & 1))
 		rte_exit(EXIT_FAILURE, "Error: number of ports must be even\n");
 
@@ -210,7 +293,7 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
 	/* initialize all ports */
-	for (portid = 0; portid < nb_ports; portid++)
+	RTE_ETH_FOREACH_DEV(portid)
 		if (port_init(portid, mbuf_pool) != 0)
 			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8"\n",
 					portid);

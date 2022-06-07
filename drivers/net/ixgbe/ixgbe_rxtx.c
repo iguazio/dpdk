@@ -1,35 +1,6 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   Copyright 2014 6WIND S.A.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation.
+ * Copyright 2014 6WIND S.A.
  */
 
 #include <sys/queue.h>
@@ -58,12 +29,11 @@
 #include <rte_lcore.h>
 #include <rte_atomic.h>
 #include <rte_branch_prediction.h>
-#include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_ether.h>
-#include <rte_ethdev.h>
+#include <rte_ethdev_driver.h>
 #include <rte_prefetch.h>
 #include <rte_udp.h>
 #include <rte_tcp.h>
@@ -71,6 +41,7 @@
 #include <rte_string_fns.h>
 #include <rte_errno.h>
 #include <rte_ip.h>
+#include <rte_net.h>
 
 #include "ixgbe_logs.h"
 #include "base/ixgbe_api.h"
@@ -80,23 +51,28 @@
 #include "base/ixgbe_common.h"
 #include "ixgbe_rxtx.h"
 
+#ifdef RTE_LIBRTE_IEEE1588
+#define IXGBE_TX_IEEE1588_TMST PKT_TX_IEEE1588_TMST
+#else
+#define IXGBE_TX_IEEE1588_TMST 0
+#endif
 /* Bit Mask to indicate what bits required for building TX context */
 #define IXGBE_TX_OFFLOAD_MASK (			 \
+		PKT_TX_OUTER_IPV6 |		 \
+		PKT_TX_OUTER_IPV4 |		 \
+		PKT_TX_IPV6 |			 \
+		PKT_TX_IPV4 |			 \
 		PKT_TX_VLAN_PKT |		 \
 		PKT_TX_IP_CKSUM |		 \
 		PKT_TX_L4_MASK |		 \
-		PKT_TX_TCP_SEG)
+		PKT_TX_TCP_SEG |		 \
+		PKT_TX_MACSEC |			 \
+		PKT_TX_OUTER_IP_CKSUM |		 \
+		PKT_TX_SEC_OFFLOAD |	 \
+		IXGBE_TX_IEEE1588_TMST)
 
-static inline struct rte_mbuf *
-rte_rxmbuf_alloc(struct rte_mempool *mp)
-{
-	struct rte_mbuf *m;
-
-	m = __rte_mbuf_raw_alloc(mp);
-	__rte_mbuf_sanity_check_raw(m, 0);
-	return (m);
-}
-
+#define IXGBE_TX_OFFLOAD_NOTSUP_MASK \
+		(PKT_TX_OFFLOAD_MASK ^ IXGBE_TX_OFFLOAD_MASK)
 
 #if 1
 #define RTE_PMD_USE_PREFETCH
@@ -108,7 +84,7 @@ rte_rxmbuf_alloc(struct rte_mempool *mp)
  */
 #define rte_ixgbe_prefetch(p)   rte_prefetch0(p)
 #else
-#define rte_ixgbe_prefetch(p)   do {} while(0)
+#define rte_ixgbe_prefetch(p)   do {} while (0)
 #endif
 
 /*********************************************************************
@@ -121,16 +97,17 @@ rte_rxmbuf_alloc(struct rte_mempool *mp)
  * Check for descriptors with their DD bit set and free mbufs.
  * Return the total number of buffers freed.
  */
-static inline int __attribute__((always_inline))
+static __rte_always_inline int
 ixgbe_tx_free_bufs(struct ixgbe_tx_queue *txq)
 {
 	struct ixgbe_tx_entry *txep;
 	uint32_t status;
-	int i;
+	int i, nb_free = 0;
+	struct rte_mbuf *m, *free[RTE_IXGBE_TX_MAX_FREE_BUF_SZ];
 
 	/* check DD bit on threshold descriptor */
 	status = txq->tx_ring[txq->tx_next_dd].wb.status;
-	if (! (status & IXGBE_ADVTXD_STAT_DD))
+	if (!(status & rte_cpu_to_le_32(IXGBE_ADVTXD_STAT_DD)))
 		return 0;
 
 	/*
@@ -139,19 +116,26 @@ ixgbe_tx_free_bufs(struct ixgbe_tx_queue *txq)
 	 */
 	txep = &(txq->sw_ring[txq->tx_next_dd - (txq->tx_rs_thresh - 1)]);
 
-	/* free buffers one at a time */
-	if ((txq->txq_flags & (uint32_t)ETH_TXQ_FLAGS_NOREFCOUNT) != 0) {
-		for (i = 0; i < txq->tx_rs_thresh; ++i, ++txep) {
-			txep->mbuf->next = NULL;
-			rte_mempool_put(txep->mbuf->pool, txep->mbuf);
-			txep->mbuf = NULL;
+	for (i = 0; i < txq->tx_rs_thresh; ++i, ++txep) {
+		/* free buffers one at a time */
+		m = rte_pktmbuf_prefree_seg(txep->mbuf);
+		txep->mbuf = NULL;
+
+		if (unlikely(m == NULL))
+			continue;
+
+		if (nb_free >= RTE_IXGBE_TX_MAX_FREE_BUF_SZ ||
+		    (nb_free > 0 && m->pool != free[0]->pool)) {
+			rte_mempool_put_bulk(free[0]->pool,
+					     (void **)free, nb_free);
+			nb_free = 0;
 		}
-	} else {
-		for (i = 0; i < txq->tx_rs_thresh; ++i, ++txep) {
-			rte_pktmbuf_free_seg(txep->mbuf);
-			txep->mbuf = NULL;
-		}
+
+		free[nb_free++] = m;
 	}
+
+	if (nb_free > 0)
+		rte_mempool_put_bulk(free[0]->pool, (void **)free, nb_free);
 
 	/* buffers were freed, update counters */
 	txq->nb_tx_free = (uint16_t)(txq->nb_tx_free + txq->tx_rs_thresh);
@@ -171,15 +155,18 @@ tx4(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts)
 	int i;
 
 	for (i = 0; i < 4; ++i, ++txdp, ++pkts) {
-		buf_dma_addr = RTE_MBUF_DATA_DMA_ADDR(*pkts);
+		buf_dma_addr = rte_mbuf_data_iova(*pkts);
 		pkt_len = (*pkts)->data_len;
 
 		/* write data to descriptor */
-		txdp->read.buffer_addr = buf_dma_addr;
+		txdp->read.buffer_addr = rte_cpu_to_le_64(buf_dma_addr);
+
 		txdp->read.cmd_type_len =
-				((uint32_t)DCMD_DTYP_FLAGS | pkt_len);
+			rte_cpu_to_le_32((uint32_t)DCMD_DTYP_FLAGS | pkt_len);
+
 		txdp->read.olinfo_status =
-				(pkt_len << IXGBE_ADVTXD_PAYLEN_SHIFT);
+			rte_cpu_to_le_32(pkt_len << IXGBE_ADVTXD_PAYLEN_SHIFT);
+
 		rte_prefetch0(&(*pkts)->pool);
 	}
 }
@@ -191,15 +178,15 @@ tx1(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts)
 	uint64_t buf_dma_addr;
 	uint32_t pkt_len;
 
-	buf_dma_addr = RTE_MBUF_DATA_DMA_ADDR(*pkts);
+	buf_dma_addr = rte_mbuf_data_iova(*pkts);
 	pkt_len = (*pkts)->data_len;
 
 	/* write data to descriptor */
-	txdp->read.buffer_addr = buf_dma_addr;
+	txdp->read.buffer_addr = rte_cpu_to_le_64(buf_dma_addr);
 	txdp->read.cmd_type_len =
-			((uint32_t)DCMD_DTYP_FLAGS | pkt_len);
+			rte_cpu_to_le_32((uint32_t)DCMD_DTYP_FLAGS | pkt_len);
 	txdp->read.olinfo_status =
-			(pkt_len << IXGBE_ADVTXD_PAYLEN_SHIFT);
+			rte_cpu_to_le_32(pkt_len << IXGBE_ADVTXD_PAYLEN_SHIFT);
 	rte_prefetch0(&(*pkts)->pool);
 }
 
@@ -321,7 +308,7 @@ tx_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 
 	/* update tail pointer */
 	rte_wmb();
-	IXGBE_PCI_REG_WRITE(txq->tdt_reg_addr, txq->tx_tail);
+	IXGBE_PCI_REG_WRITE_RELAXED(txq->tdt_reg_addr, txq->tx_tail);
 
 	return nb_pkts;
 }
@@ -340,6 +327,7 @@ ixgbe_xmit_pkts_simple(void *tx_queue, struct rte_mbuf **tx_pkts,
 	nb_tx = 0;
 	while (nb_pkts) {
 		uint16_t ret, n;
+
 		n = (uint16_t)RTE_MIN(nb_pkts, RTE_PMD_IXGBE_TX_MAX_BURST);
 		ret = tx_xmit_pkts(tx_queue, &(tx_pkts[nb_tx]), n);
 		nb_tx = (uint16_t)(nb_tx + ret);
@@ -351,19 +339,44 @@ ixgbe_xmit_pkts_simple(void *tx_queue, struct rte_mbuf **tx_pkts,
 	return nb_tx;
 }
 
+static uint16_t
+ixgbe_xmit_pkts_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
+		    uint16_t nb_pkts)
+{
+	uint16_t nb_tx = 0;
+	struct ixgbe_tx_queue *txq = (struct ixgbe_tx_queue *)tx_queue;
+
+	while (nb_pkts) {
+		uint16_t ret, num;
+
+		num = (uint16_t)RTE_MIN(nb_pkts, txq->tx_rs_thresh);
+		ret = ixgbe_xmit_fixed_burst_vec(tx_queue, &tx_pkts[nb_tx],
+						 num);
+		nb_tx += ret;
+		nb_pkts -= ret;
+		if (ret < num)
+			break;
+	}
+
+	return nb_tx;
+}
+
 static inline void
 ixgbe_set_xmit_ctx(struct ixgbe_tx_queue *txq,
 		volatile struct ixgbe_adv_tx_context_desc *ctx_txd,
-		uint64_t ol_flags, union ixgbe_tx_offload tx_offload)
+		uint64_t ol_flags, union ixgbe_tx_offload tx_offload,
+		__rte_unused uint64_t *mdata)
 {
 	uint32_t type_tucmd_mlhl;
 	uint32_t mss_l4len_idx = 0;
 	uint32_t ctx_idx;
 	uint32_t vlan_macip_lens;
 	union ixgbe_tx_offload tx_offload_mask;
+	uint32_t seqnum_seed = 0;
 
 	ctx_idx = txq->ctx_curr;
-	tx_offload_mask.data = 0;
+	tx_offload_mask.data[0] = 0;
+	tx_offload_mask.data[1] = 0;
 	type_tucmd_mlhl = 0;
 
 	/* Specify which HW CTX to upload. */
@@ -402,22 +415,24 @@ ixgbe_set_xmit_ctx(struct ixgbe_tx_queue *txq,
 		case PKT_TX_UDP_CKSUM:
 			type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_L4T_UDP |
 				IXGBE_ADVTXD_DTYP_CTXT | IXGBE_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct udp_hdr) << IXGBE_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_udp_hdr)
+				<< IXGBE_ADVTXD_L4LEN_SHIFT;
 			tx_offload_mask.l2_len |= ~0;
 			tx_offload_mask.l3_len |= ~0;
 			break;
 		case PKT_TX_TCP_CKSUM:
 			type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_L4T_TCP |
 				IXGBE_ADVTXD_DTYP_CTXT | IXGBE_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct tcp_hdr) << IXGBE_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_tcp_hdr)
+				<< IXGBE_ADVTXD_L4LEN_SHIFT;
 			tx_offload_mask.l2_len |= ~0;
 			tx_offload_mask.l3_len |= ~0;
-			tx_offload_mask.l4_len |= ~0;
 			break;
 		case PKT_TX_SCTP_CKSUM:
 			type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_L4T_SCTP |
 				IXGBE_ADVTXD_DTYP_CTXT | IXGBE_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct sctp_hdr) << IXGBE_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_sctp_hdr)
+				<< IXGBE_ADVTXD_L4LEN_SHIFT;
 			tx_offload_mask.l2_len |= ~0;
 			tx_offload_mask.l3_len |= ~0;
 			break;
@@ -428,18 +443,50 @@ ixgbe_set_xmit_ctx(struct ixgbe_tx_queue *txq,
 		}
 	}
 
+	if (ol_flags & PKT_TX_OUTER_IP_CKSUM) {
+		tx_offload_mask.outer_l2_len |= ~0;
+		tx_offload_mask.outer_l3_len |= ~0;
+		tx_offload_mask.l2_len |= ~0;
+		seqnum_seed |= tx_offload.outer_l3_len
+			       << IXGBE_ADVTXD_OUTER_IPLEN;
+		seqnum_seed |= tx_offload.l2_len
+			       << IXGBE_ADVTXD_TUNNEL_LEN;
+	}
+#ifdef RTE_LIBRTE_SECURITY
+	if (ol_flags & PKT_TX_SEC_OFFLOAD) {
+		union ixgbe_crypto_tx_desc_md *md =
+				(union ixgbe_crypto_tx_desc_md *)mdata;
+		seqnum_seed |=
+			(IXGBE_ADVTXD_IPSEC_SA_INDEX_MASK & md->sa_idx);
+		type_tucmd_mlhl |= md->enc ?
+				(IXGBE_ADVTXD_TUCMD_IPSEC_TYPE_ESP |
+				IXGBE_ADVTXD_TUCMD_IPSEC_ENCRYPT_EN) : 0;
+		type_tucmd_mlhl |=
+			(md->pad_len & IXGBE_ADVTXD_IPSEC_ESP_LEN_MASK);
+		tx_offload_mask.sa_idx |= ~0;
+		tx_offload_mask.sec_pad_len |= ~0;
+	}
+#endif
+
 	txq->ctx_cache[ctx_idx].flags = ol_flags;
-	txq->ctx_cache[ctx_idx].tx_offload.data  =
-		tx_offload_mask.data & tx_offload.data;
+	txq->ctx_cache[ctx_idx].tx_offload.data[0]  =
+		tx_offload_mask.data[0] & tx_offload.data[0];
+	txq->ctx_cache[ctx_idx].tx_offload.data[1]  =
+		tx_offload_mask.data[1] & tx_offload.data[1];
 	txq->ctx_cache[ctx_idx].tx_offload_mask    = tx_offload_mask;
 
 	ctx_txd->type_tucmd_mlhl = rte_cpu_to_le_32(type_tucmd_mlhl);
 	vlan_macip_lens = tx_offload.l3_len;
-	vlan_macip_lens |= (tx_offload.l2_len << IXGBE_ADVTXD_MACLEN_SHIFT);
+	if (ol_flags & PKT_TX_OUTER_IP_CKSUM)
+		vlan_macip_lens |= (tx_offload.outer_l2_len <<
+				    IXGBE_ADVTXD_MACLEN_SHIFT);
+	else
+		vlan_macip_lens |= (tx_offload.l2_len <<
+				    IXGBE_ADVTXD_MACLEN_SHIFT);
 	vlan_macip_lens |= ((uint32_t)tx_offload.vlan_tci << IXGBE_ADVTXD_VLAN_SHIFT);
 	ctx_txd->vlan_macip_lens = rte_cpu_to_le_32(vlan_macip_lens);
 	ctx_txd->mss_l4len_idx   = rte_cpu_to_le_32(mss_l4len_idx);
-	ctx_txd->seqnum_seed     = 0;
+	ctx_txd->seqnum_seed     = seqnum_seed;
 }
 
 /*
@@ -448,31 +495,38 @@ ixgbe_set_xmit_ctx(struct ixgbe_tx_queue *txq,
  */
 static inline uint32_t
 what_advctx_update(struct ixgbe_tx_queue *txq, uint64_t flags,
-		union ixgbe_tx_offload tx_offload)
+		   union ixgbe_tx_offload tx_offload)
 {
 	/* If match with the current used context */
 	if (likely((txq->ctx_cache[txq->ctx_curr].flags == flags) &&
-		(txq->ctx_cache[txq->ctx_curr].tx_offload.data ==
-		(txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data & tx_offload.data)))) {
-			return txq->ctx_curr;
-	}
+		   (txq->ctx_cache[txq->ctx_curr].tx_offload.data[0] ==
+		    (txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data[0]
+		     & tx_offload.data[0])) &&
+		   (txq->ctx_cache[txq->ctx_curr].tx_offload.data[1] ==
+		    (txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data[1]
+		     & tx_offload.data[1]))))
+		return txq->ctx_curr;
 
 	/* What if match with the next context  */
 	txq->ctx_curr ^= 1;
 	if (likely((txq->ctx_cache[txq->ctx_curr].flags == flags) &&
-		(txq->ctx_cache[txq->ctx_curr].tx_offload.data ==
-		(txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data & tx_offload.data)))) {
-			return txq->ctx_curr;
-	}
+		   (txq->ctx_cache[txq->ctx_curr].tx_offload.data[0] ==
+		    (txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data[0]
+		     & tx_offload.data[0])) &&
+		   (txq->ctx_cache[txq->ctx_curr].tx_offload.data[1] ==
+		    (txq->ctx_cache[txq->ctx_curr].tx_offload_mask.data[1]
+		     & tx_offload.data[1]))))
+		return txq->ctx_curr;
 
 	/* Mismatch, use the previous context */
-	return (IXGBE_CTX_NUM);
+	return IXGBE_CTX_NUM;
 }
 
 static inline uint32_t
 tx_desc_cksum_flags_to_olinfo(uint64_t ol_flags)
 {
 	uint32_t tmp = 0;
+
 	if ((ol_flags & PKT_TX_L4_MASK) != PKT_TX_L4_NO_CKSUM)
 		tmp |= IXGBE_ADVTXD_POPTS_TXSM;
 	if (ol_flags & PKT_TX_IP_CKSUM)
@@ -486,10 +540,15 @@ static inline uint32_t
 tx_desc_ol_flags_to_cmdtype(uint64_t ol_flags)
 {
 	uint32_t cmdtype = 0;
+
 	if (ol_flags & PKT_TX_VLAN_PKT)
 		cmdtype |= IXGBE_ADVTXD_DCMD_VLE;
 	if (ol_flags & PKT_TX_TCP_SEG)
 		cmdtype |= IXGBE_ADVTXD_DCMD_TSE;
+	if (ol_flags & PKT_TX_OUTER_IP_CKSUM)
+		cmdtype |= (1 << IXGBE_ADVTXD_OUTERIPCS_SHIFT);
+	if (ol_flags & PKT_TX_MACSEC)
+		cmdtype |= IXGBE_ADVTXD_MAC_LINKSEC;
 	return cmdtype;
 }
 
@@ -511,6 +570,7 @@ ixgbe_xmit_cleanup(struct ixgbe_tx_queue *txq)
 	uint16_t nb_tx_desc = txq->nb_tx_desc;
 	uint16_t desc_to_clean_to;
 	uint16_t nb_tx_to_clean;
+	uint32_t status;
 
 	/* Determine the last descriptor needing to be cleaned */
 	desc_to_clean_to = (uint16_t)(last_desc_cleaned + txq->tx_rs_thresh);
@@ -519,8 +579,8 @@ ixgbe_xmit_cleanup(struct ixgbe_tx_queue *txq)
 
 	/* Check to make sure the last descriptor to clean is done */
 	desc_to_clean_to = sw_ring[desc_to_clean_to].last_id;
-	if (! (txr[desc_to_clean_to].wb.status & IXGBE_TXD_STAT_DD))
-	{
+	status = txr[desc_to_clean_to].wb.status;
+	if (!(status & rte_cpu_to_le_32(IXGBE_TXD_STAT_DD))) {
 		PMD_TX_FREE_LOG(DEBUG,
 				"TX descriptor %4u is not done"
 				"(port=%d queue=%d)",
@@ -557,7 +617,7 @@ ixgbe_xmit_cleanup(struct ixgbe_tx_queue *txq)
 	txq->nb_tx_free = (uint16_t)(txq->nb_tx_free + nb_tx_to_clean);
 
 	/* No Error */
-	return (0);
+	return 0;
 }
 
 uint16_t
@@ -568,7 +628,7 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	struct ixgbe_tx_entry *sw_ring;
 	struct ixgbe_tx_entry *txe, *txn;
 	volatile union ixgbe_adv_tx_desc *txr;
-	volatile union ixgbe_adv_tx_desc *txd;
+	volatile union ixgbe_adv_tx_desc *txd, *txp;
 	struct rte_mbuf     *tx_pkt;
 	struct rte_mbuf     *m_seg;
 	uint64_t buf_dma_addr;
@@ -584,13 +644,19 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint64_t tx_ol_req;
 	uint32_t ctx = 0;
 	uint32_t new_ctx;
-	union ixgbe_tx_offload tx_offload = {0};
+	union ixgbe_tx_offload tx_offload;
+#ifdef RTE_LIBRTE_SECURITY
+	uint8_t use_ipsec;
+#endif
 
+	tx_offload.data[0] = 0;
+	tx_offload.data[1] = 0;
 	txq = tx_queue;
 	sw_ring = txq->sw_ring;
 	txr     = txq->tx_ring;
 	tx_id   = txq->tx_tail;
 	txe = &sw_ring[tx_id];
+	txp = NULL;
 
 	/* Determine if the descriptor ring needs to be cleaned. */
 	if (txq->nb_tx_free < txq->tx_free_thresh)
@@ -609,6 +675,9 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		 * are needed for offload functionality.
 		 */
 		ol_flags = tx_pkt->ol_flags;
+#ifdef RTE_LIBRTE_SECURITY
+		use_ipsec = txq->using_ipsec && (ol_flags & PKT_TX_SEC_OFFLOAD);
+#endif
 
 		/* If hardware offload required */
 		tx_ol_req = ol_flags & IXGBE_TX_OFFLOAD_MASK;
@@ -618,6 +687,17 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			tx_offload.l4_len = tx_pkt->l4_len;
 			tx_offload.vlan_tci = tx_pkt->vlan_tci;
 			tx_offload.tso_segsz = tx_pkt->tso_segsz;
+			tx_offload.outer_l2_len = tx_pkt->outer_l2_len;
+			tx_offload.outer_l3_len = tx_pkt->outer_l3_len;
+#ifdef RTE_LIBRTE_SECURITY
+			if (use_ipsec) {
+				union ixgbe_crypto_tx_desc_md *ipsec_mdata =
+					(union ixgbe_crypto_tx_desc_md *)
+							&tx_pkt->udata64;
+				tx_offload.sa_idx = ipsec_mdata->sa_idx;
+				tx_offload.sec_pad_len = ipsec_mdata->pad_len;
+			}
+#endif
 
 			/* If new context need be built or reuse the exist ctx. */
 			ctx = what_advctx_update(txq, tx_ol_req,
@@ -633,6 +713,12 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		 * Context descriptors required to transmit the packet
 		 */
 		nb_used = (uint16_t)(tx_pkt->nb_segs + new_ctx);
+
+		if (txp != NULL &&
+				nb_used + txq->nb_tx_used >= txq->tx_rs_thresh)
+			/* set RS on the previous packet in the burst */
+			txp->read.cmd_type_len |=
+				rte_cpu_to_le_32(IXGBE_TXD_CMD_RS);
 
 		/*
 		 * The number of descriptors that must be allocated for a
@@ -672,7 +758,7 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			if (ixgbe_xmit_cleanup(txq) != 0) {
 				/* Could not clean any descriptors */
 				if (nb_tx == 0)
-					return (0);
+					return 0;
 				goto end_of_tx;
 			}
 
@@ -701,7 +787,7 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 						 * descriptors
 						 */
 						if (nb_tx == 0)
-							return (0);
+							return 0;
 						goto end_of_tx;
 					}
 				}
@@ -772,7 +858,7 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				}
 
 				ixgbe_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
-					tx_offload);
+					tx_offload, &tx_pkt->udata64);
 
 				txe->last_id = tx_last;
 				tx_id = txe->next_id;
@@ -790,6 +876,10 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		}
 
 		olinfo_status |= (pkt_len << IXGBE_ADVTXD_PAYLEN_SHIFT);
+#ifdef RTE_LIBRTE_SECURITY
+		if (use_ipsec)
+			olinfo_status |= IXGBE_ADVTXD_POPTS_IPSEC;
+#endif
 
 		m_seg = tx_pkt;
 		do {
@@ -805,7 +895,7 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			 * Set up Transmit Data Descriptor.
 			 */
 			slen = m_seg->data_len;
-			buf_dma_addr = RTE_MBUF_DATA_DMA_ADDR(m_seg);
+			buf_dma_addr = rte_mbuf_data_iova(m_seg);
 			txd->read.buffer_addr =
 				rte_cpu_to_le_64(buf_dma_addr);
 			txd->read.cmd_type_len =
@@ -836,10 +926,18 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 
 			/* Update txq RS bit counters */
 			txq->nb_tx_used = 0;
-		}
+			txp = NULL;
+		} else
+			txp = txd;
+
 		txd->read.cmd_type_len |= rte_cpu_to_le_32(cmd_type_len);
 	}
+
 end_of_tx:
+	/* set RS on last packet in the burst */
+	if (txp != NULL)
+		txp->read.cmd_type_len |= rte_cpu_to_le_32(IXGBE_TXD_CMD_RS);
+
 	rte_wmb();
 
 	/*
@@ -848,10 +946,67 @@ end_of_tx:
 	PMD_TX_LOG(DEBUG, "port_id=%u queue_id=%u tx_tail=%u nb_tx=%u",
 		   (unsigned) txq->port_id, (unsigned) txq->queue_id,
 		   (unsigned) tx_id, (unsigned) nb_tx);
-	IXGBE_PCI_REG_WRITE(txq->tdt_reg_addr, tx_id);
+	IXGBE_PCI_REG_WRITE_RELAXED(txq->tdt_reg_addr, tx_id);
 	txq->tx_tail = tx_id;
 
-	return (nb_tx);
+	return nb_tx;
+}
+
+/*********************************************************************
+ *
+ *  TX prep functions
+ *
+ **********************************************************************/
+uint16_t
+ixgbe_prep_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+{
+	int i, ret;
+	uint64_t ol_flags;
+	struct rte_mbuf *m;
+	struct ixgbe_tx_queue *txq = (struct ixgbe_tx_queue *)tx_queue;
+
+	for (i = 0; i < nb_pkts; i++) {
+		m = tx_pkts[i];
+		ol_flags = m->ol_flags;
+
+		/**
+		 * Check if packet meets requirements for number of segments
+		 *
+		 * NOTE: for ixgbe it's always (40 - WTHRESH) for both TSO and
+		 *       non-TSO
+		 */
+
+		if (m->nb_segs > IXGBE_TX_MAX_SEG - txq->wthresh) {
+			rte_errno = EINVAL;
+			return i;
+		}
+
+		if (ol_flags & IXGBE_TX_OFFLOAD_NOTSUP_MASK) {
+			rte_errno = ENOTSUP;
+			return i;
+		}
+
+		/* check the size of packet */
+		if (m->pkt_len < IXGBE_TX_MIN_PKT_LEN) {
+			rte_errno = EINVAL;
+			return i;
+		}
+
+#ifdef RTE_LIBRTE_ETHDEV_DEBUG
+		ret = rte_validate_tx_offload(m);
+		if (ret != 0) {
+			rte_errno = -ret;
+			return i;
+		}
+#endif
+		ret = rte_net_intel_cksum_prepare(m);
+		if (ret != 0) {
+			rte_errno = -ret;
+			return i;
+		}
+	}
+
+	return i;
 }
 
 /*********************************************************************
@@ -859,53 +1014,421 @@ end_of_tx:
  *  RX functions
  *
  **********************************************************************/
-static inline uint64_t
-rx_desc_hlen_type_rss_to_pkt_flags(uint32_t hl_tp_rs)
+
+#define IXGBE_PACKET_TYPE_ETHER				0X00
+#define IXGBE_PACKET_TYPE_IPV4				0X01
+#define IXGBE_PACKET_TYPE_IPV4_TCP			0X11
+#define IXGBE_PACKET_TYPE_IPV4_UDP			0X21
+#define IXGBE_PACKET_TYPE_IPV4_SCTP			0X41
+#define IXGBE_PACKET_TYPE_IPV4_EXT			0X03
+#define IXGBE_PACKET_TYPE_IPV4_EXT_TCP			0X13
+#define IXGBE_PACKET_TYPE_IPV4_EXT_UDP			0X23
+#define IXGBE_PACKET_TYPE_IPV4_EXT_SCTP			0X43
+#define IXGBE_PACKET_TYPE_IPV6				0X04
+#define IXGBE_PACKET_TYPE_IPV6_TCP			0X14
+#define IXGBE_PACKET_TYPE_IPV6_UDP			0X24
+#define IXGBE_PACKET_TYPE_IPV6_SCTP			0X44
+#define IXGBE_PACKET_TYPE_IPV6_EXT			0X0C
+#define IXGBE_PACKET_TYPE_IPV6_EXT_TCP			0X1C
+#define IXGBE_PACKET_TYPE_IPV6_EXT_UDP			0X2C
+#define IXGBE_PACKET_TYPE_IPV6_EXT_SCTP			0X4C
+#define IXGBE_PACKET_TYPE_IPV4_IPV6			0X05
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_TCP			0X15
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_UDP			0X25
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_SCTP		0X45
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6			0X07
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_TCP		0X17
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_UDP		0X27
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_SCTP		0X47
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_EXT			0X0D
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_TCP		0X1D
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_UDP		0X2D
+#define IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_SCTP		0X4D
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT		0X0F
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_TCP		0X1F
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_UDP		0X2F
+#define IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_SCTP	0X4F
+
+#define IXGBE_PACKET_TYPE_NVGRE                   0X00
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4              0X01
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_TCP          0X11
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_UDP          0X21
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_SCTP         0X41
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT          0X03
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_TCP      0X13
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_UDP      0X23
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_SCTP     0X43
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6              0X04
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_TCP          0X14
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_UDP          0X24
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_SCTP         0X44
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT          0X0C
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_TCP      0X1C
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_UDP      0X2C
+#define IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_SCTP     0X4C
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6         0X05
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_TCP     0X15
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_UDP     0X25
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT     0X0D
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT_TCP 0X1D
+#define IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT_UDP 0X2D
+
+#define IXGBE_PACKET_TYPE_VXLAN                   0X80
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4              0X81
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_TCP          0x91
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_UDP          0xA1
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_SCTP         0xC1
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT          0x83
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_TCP      0X93
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_UDP      0XA3
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_SCTP     0XC3
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6              0X84
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_TCP          0X94
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_UDP          0XA4
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_SCTP         0XC4
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT          0X8C
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_TCP      0X9C
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_UDP      0XAC
+#define IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_SCTP     0XCC
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6         0X85
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_TCP     0X95
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_UDP     0XA5
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT     0X8D
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT_TCP 0X9D
+#define IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT_UDP 0XAD
+
+/**
+ * Use 2 different table for normal packet and tunnel packet
+ * to save the space.
+ */
+const uint32_t
+	ptype_table[IXGBE_PACKET_TYPE_MAX] __rte_cache_aligned = {
+	[IXGBE_PACKET_TYPE_ETHER] = RTE_PTYPE_L2_ETHER,
+	[IXGBE_PACKET_TYPE_IPV4] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4,
+	[IXGBE_PACKET_TYPE_IPV4_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6,
+	[IXGBE_PACKET_TYPE_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV6_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6_EXT,
+	[IXGBE_PACKET_TYPE_IPV6_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6_EXT | RTE_PTYPE_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV6_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6_EXT | RTE_PTYPE_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV6_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV6_EXT | RTE_PTYPE_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+	RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_IPV6_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4 | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_IPV4_EXT_IPV6_EXT_SCTP] =
+		RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT | RTE_PTYPE_TUNNEL_IP |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_SCTP,
+};
+
+const uint32_t
+	ptype_table_tn[IXGBE_PACKET_TYPE_TN_MAX] __rte_cache_aligned = {
+	[IXGBE_PACKET_TYPE_NVGRE] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4_EXT,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6_EXT,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4 |
+		RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6 |
+		RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6_EXT |
+		RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT_TCP] =
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN |
+		RTE_PTYPE_TUNNEL_GRE | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4 |
+		RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6 |
+		RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6 |
+		RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6_EXT |
+		RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV6_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV6_EXT |
+		RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_IPV6_EXT_UDP] =
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN |
+		RTE_PTYPE_TUNNEL_GRE | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4 |
+		RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4_EXT |
+		RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4_EXT |
+		RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_NVGRE_IPV4_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_TUNNEL_GRE |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4_EXT |
+		RTE_PTYPE_INNER_L4_UDP,
+
+	[IXGBE_PACKET_TYPE_VXLAN] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4 | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT_TCP] =
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN |
+		RTE_PTYPE_L4_UDP | RTE_PTYPE_TUNNEL_VXLAN |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4 | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6 | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_UDP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV6_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV6_EXT | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_IPV6_EXT_UDP] =
+		RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4_EXT_UNKNOWN |
+		RTE_PTYPE_L4_UDP | RTE_PTYPE_TUNNEL_VXLAN |
+		RTE_PTYPE_INNER_L2_ETHER | RTE_PTYPE_INNER_L3_IPV4,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4 | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_SCTP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT | RTE_PTYPE_INNER_L4_SCTP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_TCP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT | RTE_PTYPE_INNER_L4_TCP,
+	[IXGBE_PACKET_TYPE_VXLAN_IPV4_EXT_UDP] = RTE_PTYPE_L2_ETHER |
+		RTE_PTYPE_L3_IPV4_EXT_UNKNOWN | RTE_PTYPE_L4_UDP |
+		RTE_PTYPE_TUNNEL_VXLAN | RTE_PTYPE_INNER_L2_ETHER |
+		RTE_PTYPE_INNER_L3_IPV4_EXT | RTE_PTYPE_INNER_L4_UDP,
+};
+
+/* @note: fix ixgbe_dev_supported_ptypes_get() if any change here. */
+static inline uint32_t
+ixgbe_rxd_pkt_info_to_pkt_type(uint32_t pkt_info, uint16_t ptype_mask)
 {
-	uint64_t pkt_flags;
 
-	static const uint64_t ip_pkt_types_map[16] = {
-		0, PKT_RX_IPV4_HDR, PKT_RX_IPV4_HDR_EXT, PKT_RX_IPV4_HDR_EXT,
-		PKT_RX_IPV6_HDR, 0, 0, 0,
-		PKT_RX_IPV6_HDR_EXT, 0, 0, 0,
-		PKT_RX_IPV6_HDR_EXT, 0, 0, 0,
-	};
+	if (unlikely(pkt_info & IXGBE_RXDADV_PKTTYPE_ETQF))
+		return RTE_PTYPE_UNKNOWN;
 
-	static const uint64_t ip_rss_types_map[16] = {
+	pkt_info = (pkt_info >> IXGBE_PACKET_TYPE_SHIFT) & ptype_mask;
+
+	/* For tunnel packet */
+	if (pkt_info & IXGBE_PACKET_TYPE_TUNNEL_BIT) {
+		/* Remove the tunnel bit to save the space. */
+		pkt_info &= IXGBE_PACKET_TYPE_MASK_TUNNEL;
+		return ptype_table_tn[pkt_info];
+	}
+
+	/**
+	 * For x550, if it's not tunnel,
+	 * tunnel type bit should be set to 0.
+	 * Reuse 82599's mask.
+	 */
+	pkt_info &= IXGBE_PACKET_TYPE_MASK_82599;
+
+	return ptype_table[pkt_info];
+}
+
+static inline uint64_t
+ixgbe_rxd_pkt_info_to_pkt_flags(uint16_t pkt_info)
+{
+	static uint64_t ip_rss_types_map[16] __rte_cache_aligned = {
 		0, PKT_RX_RSS_HASH, PKT_RX_RSS_HASH, PKT_RX_RSS_HASH,
 		0, PKT_RX_RSS_HASH, 0, PKT_RX_RSS_HASH,
 		PKT_RX_RSS_HASH, 0, 0, 0,
 		0, 0, 0,  PKT_RX_FDIR,
 	};
-
 #ifdef RTE_LIBRTE_IEEE1588
 	static uint64_t ip_pkt_etqf_map[8] = {
 		0, 0, 0, PKT_RX_IEEE1588_PTP,
 		0, 0, 0, 0,
 	};
 
-	pkt_flags = (hl_tp_rs & IXGBE_RXDADV_PKTTYPE_ETQF) ?
-			ip_pkt_etqf_map[(hl_tp_rs >> 4) & 0x07] :
-			ip_pkt_types_map[(hl_tp_rs >> 4) & 0x0F];
+	if (likely(pkt_info & IXGBE_RXDADV_PKTTYPE_ETQF))
+		return ip_pkt_etqf_map[(pkt_info >> 4) & 0X07] |
+				ip_rss_types_map[pkt_info & 0XF];
+	else
+		return ip_rss_types_map[pkt_info & 0XF];
 #else
-	pkt_flags = (hl_tp_rs & IXGBE_RXDADV_PKTTYPE_ETQF) ? 0 :
-			ip_pkt_types_map[(hl_tp_rs >> 4) & 0x0F];
-
+	return ip_rss_types_map[pkt_info & 0XF];
 #endif
-	return pkt_flags | ip_rss_types_map[hl_tp_rs & 0xF];
 }
 
 static inline uint64_t
-rx_desc_status_to_pkt_flags(uint32_t rx_status)
+rx_desc_status_to_pkt_flags(uint32_t rx_status, uint64_t vlan_flags)
 {
 	uint64_t pkt_flags;
 
 	/*
 	 * Check if VLAN present only.
 	 * Do not check whether L3/L4 rx checksum done by NIC or not,
-	 * That can be found from rte_eth_rxmode.hw_ip_checksum flag
+	 * That can be found from rte_eth_rxmode.offloads flag
 	 */
-	pkt_flags = (rx_status & IXGBE_RXD_STAT_VP) ?  PKT_RX_VLAN_PKT : 0;
+	pkt_flags = (rx_status & IXGBE_RXD_STAT_VP) ?  vlan_flags : 0;
 
 #ifdef RTE_LIBRTE_IEEE1588
 	if (rx_status & IXGBE_RXD_STAT_TMST)
@@ -917,19 +1440,37 @@ rx_desc_status_to_pkt_flags(uint32_t rx_status)
 static inline uint64_t
 rx_desc_error_to_pkt_flags(uint32_t rx_status)
 {
+	uint64_t pkt_flags;
+
 	/*
 	 * Bit 31: IPE, IPv4 checksum error
 	 * Bit 30: L4I, L4I integrity error
 	 */
 	static uint64_t error_to_pkt_flags_map[4] = {
-		0,  PKT_RX_L4_CKSUM_BAD, PKT_RX_IP_CKSUM_BAD,
+		PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_GOOD,
+		PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_BAD,
+		PKT_RX_IP_CKSUM_BAD | PKT_RX_L4_CKSUM_GOOD,
 		PKT_RX_IP_CKSUM_BAD | PKT_RX_L4_CKSUM_BAD
 	};
-	return error_to_pkt_flags_map[(rx_status >>
+	pkt_flags = error_to_pkt_flags_map[(rx_status >>
 		IXGBE_RXDADV_ERR_CKSUM_BIT) & IXGBE_RXDADV_ERR_CKSUM_MSK];
+
+	if ((rx_status & IXGBE_RXD_STAT_OUTERIPCS) &&
+	    (rx_status & IXGBE_RXDADV_ERR_OUTERIPER)) {
+		pkt_flags |= PKT_RX_EIP_CKSUM_BAD;
+	}
+
+#ifdef RTE_LIBRTE_SECURITY
+	if (rx_status & IXGBE_RXD_STAT_SECP) {
+		pkt_flags |= PKT_RX_SEC_OFFLOAD;
+		if (rx_status & IXGBE_RXDADV_LNKSEC_ERROR_BAD_SIG)
+			pkt_flags |= PKT_RX_SEC_OFFLOAD_FAILED;
+	}
+#endif
+
+	return pkt_flags;
 }
 
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
 /*
  * LOOK_AHEAD defines how many desc statuses to check beyond the
  * current descriptor.
@@ -949,16 +1490,20 @@ ixgbe_rx_scan_hw_ring(struct ixgbe_rx_queue *rxq)
 	struct rte_mbuf *mb;
 	uint16_t pkt_len;
 	uint64_t pkt_flags;
-	int s[LOOK_AHEAD], nb_dd;
+	int nb_dd;
+	uint32_t s[LOOK_AHEAD];
+	uint32_t pkt_info[LOOK_AHEAD];
 	int i, j, nb_rx = 0;
-
+	uint32_t status;
+	uint64_t vlan_flags = rxq->vlan_flags;
 
 	/* get references to current descriptor and S/W ring entry */
 	rxdp = &rxq->rx_ring[rxq->rx_tail];
 	rxep = &rxq->sw_ring[rxq->rx_tail];
 
+	status = rxdp->wb.upper.status_error;
 	/* check to make sure there is at least 1 packet to receive */
-	if (! (rxdp->wb.upper.status_error & IXGBE_RXDADV_STAT_DD))
+	if (!(status & rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD)))
 		return 0;
 
 	/*
@@ -966,42 +1511,53 @@ ixgbe_rx_scan_hw_ring(struct ixgbe_rx_queue *rxq)
 	 * reference packets that are ready to be received.
 	 */
 	for (i = 0; i < RTE_PMD_IXGBE_RX_MAX_BURST;
-	     i += LOOK_AHEAD, rxdp += LOOK_AHEAD, rxep += LOOK_AHEAD)
-	{
+	     i += LOOK_AHEAD, rxdp += LOOK_AHEAD, rxep += LOOK_AHEAD) {
 		/* Read desc statuses backwards to avoid race condition */
-		for (j = LOOK_AHEAD-1; j >= 0; --j)
-			s[j] = rxdp[j].wb.upper.status_error;
+		for (j = 0; j < LOOK_AHEAD; j++)
+			s[j] = rte_le_to_cpu_32(rxdp[j].wb.upper.status_error);
+
+		rte_smp_rmb();
 
 		/* Compute how many status bits were set */
-		nb_dd = 0;
-		for (j = 0; j < LOOK_AHEAD; ++j)
-			nb_dd += s[j] & IXGBE_RXDADV_STAT_DD;
+		for (nb_dd = 0; nb_dd < LOOK_AHEAD &&
+				(s[nb_dd] & IXGBE_RXDADV_STAT_DD); nb_dd++)
+			;
+
+		for (j = 0; j < nb_dd; j++)
+			pkt_info[j] = rte_le_to_cpu_32(rxdp[j].wb.lower.
+						       lo_dword.data);
 
 		nb_rx += nb_dd;
 
 		/* Translate descriptor info to mbuf format */
 		for (j = 0; j < nb_dd; ++j) {
 			mb = rxep[j].mbuf;
-			pkt_len = (uint16_t)(rxdp[j].wb.upper.length - rxq->crc_len);
+			pkt_len = rte_le_to_cpu_16(rxdp[j].wb.upper.length) -
+				  rxq->crc_len;
 			mb->data_len = pkt_len;
 			mb->pkt_len = pkt_len;
 			mb->vlan_tci = rte_le_to_cpu_16(rxdp[j].wb.upper.vlan);
 
 			/* convert descriptor fields to rte mbuf flags */
-			pkt_flags  = rx_desc_hlen_type_rss_to_pkt_flags(
-					rxdp[j].wb.lower.lo_dword.data);
-			/* reuse status field from scan list */
-			pkt_flags |= rx_desc_status_to_pkt_flags(s[j]);
+			pkt_flags = rx_desc_status_to_pkt_flags(s[j],
+				vlan_flags);
 			pkt_flags |= rx_desc_error_to_pkt_flags(s[j]);
+			pkt_flags |= ixgbe_rxd_pkt_info_to_pkt_flags
+					((uint16_t)pkt_info[j]);
 			mb->ol_flags = pkt_flags;
+			mb->packet_type =
+				ixgbe_rxd_pkt_info_to_pkt_type
+					(pkt_info[j], rxq->pkt_type_mask);
 
 			if (likely(pkt_flags & PKT_RX_RSS_HASH))
-				mb->hash.rss = rxdp[j].wb.lower.hi_dword.rss;
+				mb->hash.rss = rte_le_to_cpu_32(
+				    rxdp[j].wb.lower.hi_dword.rss);
 			else if (pkt_flags & PKT_RX_FDIR) {
-				mb->hash.fdir.hash =
-					(uint16_t)((rxdp[j].wb.lower.hi_dword.csum_ip.csum)
-						& IXGBE_ATR_HASH_MASK);
-				mb->hash.fdir.id = rxdp[j].wb.lower.hi_dword.csum_ip.ip_id;
+				mb->hash.fdir.hash = rte_le_to_cpu_16(
+				    rxdp[j].wb.lower.hi_dword.csum_ip.csum) &
+				    IXGBE_ATR_HASH_MASK;
+				mb->hash.fdir.id = rte_le_to_cpu_16(
+				    rxdp[j].wb.lower.hi_dword.csum_ip.ip_id);
 			}
 		}
 
@@ -1040,15 +1596,13 @@ ixgbe_rx_alloc_bufs(struct ixgbe_rx_queue *rxq, bool reset_mbuf)
 	diag = rte_mempool_get_bulk(rxq->mb_pool, (void *)rxep,
 				    rxq->rx_free_thresh);
 	if (unlikely(diag != 0))
-		return (-ENOMEM);
+		return -ENOMEM;
 
 	rxdp = &rxq->rx_ring[alloc_idx];
 	for (i = 0; i < rxq->rx_free_thresh; ++i) {
 		/* populate the static rte mbuf fields */
 		mb = rxep[i].mbuf;
 		if (reset_mbuf) {
-			mb->next = NULL;
-			mb->nb_segs = 1;
 			mb->port = rxq->port_id;
 		}
 
@@ -1056,8 +1610,8 @@ ixgbe_rx_alloc_bufs(struct ixgbe_rx_queue *rxq, bool reset_mbuf)
 		mb->data_off = RTE_PKTMBUF_HEADROOM;
 
 		/* populate the descriptors */
-		dma_addr = rte_cpu_to_le_64(RTE_MBUF_DATA_DMA_ADDR_DEFAULT(mb));
-		rxdp[i].read.hdr_addr = dma_addr;
+		dma_addr = rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb));
+		rxdp[i].read.hdr_addr = 0;
 		rxdp[i].read.pkt_addr = dma_addr;
 	}
 
@@ -1116,6 +1670,7 @@ rx_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		if (ixgbe_rx_alloc_bufs(rxq, true) != 0) {
 			int i, j;
+
 			PMD_RX_LOG(DEBUG, "RX mbuf alloc failed port_id=%u "
 				   "queue_id=%u", (unsigned) rxq->port_id,
 				   (unsigned) rxq->queue_id);
@@ -1137,7 +1692,8 @@ rx_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		/* update tail pointer */
 		rte_wmb();
-		IXGBE_PCI_REG_WRITE(rxq->rdt_reg_addr, cur_free_trigger);
+		IXGBE_PCI_REG_WRITE_RELAXED(rxq->rdt_reg_addr,
+					    cur_free_trigger);
 	}
 
 	if (rxq->rx_tail >= rxq->nb_rx_desc)
@@ -1151,7 +1707,7 @@ rx_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 }
 
 /* split requests into chunks of size RTE_PMD_IXGBE_RX_MAX_BURST */
-static uint16_t
+uint16_t
 ixgbe_recv_pkts_bulk_alloc(void *rx_queue, struct rte_mbuf **rx_pkts,
 			   uint16_t nb_pkts)
 {
@@ -1167,6 +1723,7 @@ ixgbe_recv_pkts_bulk_alloc(void *rx_queue, struct rte_mbuf **rx_pkts,
 	nb_rx = 0;
 	while (nb_pkts) {
 		uint16_t ret, n;
+
 		n = (uint16_t)RTE_MIN(nb_pkts, RTE_PMD_IXGBE_RX_MAX_BURST);
 		ret = rx_recv_pkts(rx_queue, &rx_pkts[nb_rx], n);
 		nb_rx = (uint16_t)(nb_rx + ret);
@@ -1177,24 +1734,6 @@ ixgbe_recv_pkts_bulk_alloc(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 	return nb_rx;
 }
-
-#else
-
-/* Stub to avoid extra ifdefs */
-static uint16_t
-ixgbe_recv_pkts_bulk_alloc(__rte_unused void *rx_queue,
-	__rte_unused struct rte_mbuf **rx_pkts, __rte_unused uint16_t nb_pkts)
-{
-	return 0;
-}
-
-static inline int
-ixgbe_rx_alloc_bufs(__rte_unused struct ixgbe_rx_queue *rxq,
-		    __rte_unused bool reset_mbuf)
-{
-	return -ENOMEM;
-}
-#endif /* RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC */
 
 uint16_t
 ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
@@ -1210,12 +1749,13 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 	union ixgbe_adv_rx_desc rxd;
 	uint64_t dma_addr;
 	uint32_t staterr;
-	uint32_t hlen_type_rss;
+	uint32_t pkt_info;
 	uint16_t pkt_len;
 	uint16_t rx_id;
 	uint16_t nb_rx;
 	uint16_t nb_hold;
 	uint64_t pkt_flags;
+	uint64_t vlan_flags;
 
 	nb_rx = 0;
 	nb_hold = 0;
@@ -1223,6 +1763,7 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 	rx_id = rxq->rx_tail;
 	rx_ring = rxq->rx_ring;
 	sw_ring = rxq->sw_ring;
+	vlan_flags = rxq->vlan_flags;
 	while (nb_rx < nb_pkts) {
 		/*
 		 * The order of operations here is important as the DD status
@@ -1234,7 +1775,7 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		 */
 		rxdp = &rx_ring[rx_id];
 		staterr = rxdp->wb.upper.status_error;
-		if (! (staterr & rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD)))
+		if (!(staterr & rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD)))
 			break;
 		rxd = *rxdp;
 
@@ -1270,7 +1811,7 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 			   (unsigned) rx_id, (unsigned) staterr,
 			   (unsigned) rte_le_to_cpu_16(rxd.wb.upper.length));
 
-		nmb = rte_rxmbuf_alloc(rxq->mb_pool);
+		nmb = rte_mbuf_raw_alloc(rxq->mb_pool);
 		if (nmb == NULL) {
 			PMD_RX_LOG(DEBUG, "RX mbuf alloc failed port_id=%u "
 				   "queue_id=%u", (unsigned) rxq->port_id,
@@ -1301,8 +1842,8 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
 		dma_addr =
-			rte_cpu_to_le_64(RTE_MBUF_DATA_DMA_ADDR_DEFAULT(nmb));
-		rxdp->read.hdr_addr = dma_addr;
+			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
+		rxdp->read.hdr_addr = 0;
 		rxdp->read.pkt_addr = dma_addr;
 
 		/*
@@ -1328,22 +1869,28 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxm->data_len = pkt_len;
 		rxm->port = rxq->port_id;
 
-		hlen_type_rss = rte_le_to_cpu_32(rxd.wb.lower.lo_dword.data);
-		/* Only valid if PKT_RX_VLAN_PKT set in pkt_flags */
+		pkt_info = rte_le_to_cpu_32(rxd.wb.lower.lo_dword.data);
+		/* Only valid if PKT_RX_VLAN set in pkt_flags */
 		rxm->vlan_tci = rte_le_to_cpu_16(rxd.wb.upper.vlan);
 
-		pkt_flags = rx_desc_hlen_type_rss_to_pkt_flags(hlen_type_rss);
-		pkt_flags = pkt_flags | rx_desc_status_to_pkt_flags(staterr);
+		pkt_flags = rx_desc_status_to_pkt_flags(staterr, vlan_flags);
 		pkt_flags = pkt_flags | rx_desc_error_to_pkt_flags(staterr);
+		pkt_flags = pkt_flags |
+			ixgbe_rxd_pkt_info_to_pkt_flags((uint16_t)pkt_info);
 		rxm->ol_flags = pkt_flags;
+		rxm->packet_type =
+			ixgbe_rxd_pkt_info_to_pkt_type(pkt_info,
+						       rxq->pkt_type_mask);
 
 		if (likely(pkt_flags & PKT_RX_RSS_HASH))
-			rxm->hash.rss = rxd.wb.lower.hi_dword.rss;
+			rxm->hash.rss = rte_le_to_cpu_32(
+						rxd.wb.lower.hi_dword.rss);
 		else if (pkt_flags & PKT_RX_FDIR) {
-			rxm->hash.fdir.hash =
-				(uint16_t)((rxd.wb.lower.hi_dword.csum_ip.csum)
-					   & IXGBE_ATR_HASH_MASK);
-			rxm->hash.fdir.id = rxd.wb.lower.hi_dword.csum_ip.ip_id;
+			rxm->hash.fdir.hash = rte_le_to_cpu_16(
+					rxd.wb.lower.hi_dword.csum_ip.csum) &
+					IXGBE_ATR_HASH_MASK;
+			rxm->hash.fdir.id = rte_le_to_cpu_16(
+					rxd.wb.lower.hi_dword.csum_ip.ip_id);
 		}
 		/*
 		 * Store the mbuf address into the next entry of the array
@@ -1375,7 +1922,7 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		nb_hold = 0;
 	}
 	rxq->nb_rx_hold = nb_hold;
-	return (nb_rx);
+	return nb_rx;
 }
 
 /**
@@ -1400,30 +1947,31 @@ ixgbe_rsc_count(union ixgbe_adv_rx_desc *rx)
  *      - error flags
  * @head HEAD of the packet cluster
  * @desc HW descriptor to get data from
- * @port_id Port ID of the Rx queue
+ * @rxq Pointer to the Rx queue
  */
 static inline void
 ixgbe_fill_cluster_head_buf(
 	struct rte_mbuf *head,
 	union ixgbe_adv_rx_desc *desc,
-	uint8_t port_id,
+	struct ixgbe_rx_queue *rxq,
 	uint32_t staterr)
 {
-	uint32_t hlen_type_rss;
+	uint32_t pkt_info;
 	uint64_t pkt_flags;
 
-	head->port = port_id;
+	head->port = rxq->port_id;
 
-	/*
-	 * The vlan_tci field is only valid when PKT_RX_VLAN_PKT is
+	/* The vlan_tci field is only valid when PKT_RX_VLAN is
 	 * set in the pkt_flags field.
 	 */
 	head->vlan_tci = rte_le_to_cpu_16(desc->wb.upper.vlan);
-	hlen_type_rss = rte_le_to_cpu_32(desc->wb.lower.lo_dword.data);
-	pkt_flags = rx_desc_hlen_type_rss_to_pkt_flags(hlen_type_rss);
-	pkt_flags |= rx_desc_status_to_pkt_flags(staterr);
+	pkt_info = rte_le_to_cpu_32(desc->wb.lower.lo_dword.data);
+	pkt_flags = rx_desc_status_to_pkt_flags(staterr, rxq->vlan_flags);
 	pkt_flags |= rx_desc_error_to_pkt_flags(staterr);
+	pkt_flags |= ixgbe_rxd_pkt_info_to_pkt_flags((uint16_t)pkt_info);
 	head->ol_flags = pkt_flags;
+	head->packet_type =
+		ixgbe_rxd_pkt_info_to_pkt_type(pkt_info, rxq->pkt_type_mask);
 
 	if (likely(pkt_flags & PKT_RX_RSS_HASH))
 		head->hash.rss = rte_le_to_cpu_32(desc->wb.lower.hi_dword.rss);
@@ -1479,11 +2027,11 @@ ixgbe_recv_pkts_lro(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts,
 		bool eop;
 		struct ixgbe_rx_entry *rxe;
 		struct ixgbe_scattered_rx_entry *sc_entry;
-		struct ixgbe_scattered_rx_entry *next_sc_entry;
-		struct ixgbe_rx_entry *next_rxe;
+		struct ixgbe_scattered_rx_entry *next_sc_entry = NULL;
+		struct ixgbe_rx_entry *next_rxe = NULL;
 		struct rte_mbuf *first_seg;
 		struct rte_mbuf *rxm;
-		struct rte_mbuf *nmb;
+		struct rte_mbuf *nmb = NULL;
 		union ixgbe_adv_rx_desc rxd;
 		uint16_t data_len;
 		uint16_t next_id;
@@ -1515,8 +2063,7 @@ next_desc:
 		 * of the ixgbe PMD.
 		 *
 		 * TODO:
-		 *    - Get rid of "volatile" crap and let the compiler do its
-		 *      job.
+		 *    - Get rid of "volatile" and let the compiler do its job.
 		 *    - Use the proper memory barrier (rte_rmb()) to ensure the
 		 *      memory ordering below.
 		 */
@@ -1534,7 +2081,7 @@ next_desc:
 			   rte_le_to_cpu_16(rxd.wb.upper.length));
 
 		if (!bulk_alloc) {
-			nmb = rte_rxmbuf_alloc(rxq->mb_pool);
+			nmb = rte_mbuf_raw_alloc(rxq->mb_pool);
 			if (nmb == NULL) {
 				PMD_RX_LOG(DEBUG, "RX mbuf alloc failed "
 						  "port_id=%u queue_id=%u",
@@ -1549,8 +2096,8 @@ next_desc:
 
 			if (!ixgbe_rx_alloc_bufs(rxq, false)) {
 				rte_wmb();
-				IXGBE_PCI_REG_WRITE(rxq->rdt_reg_addr,
-						    next_rdt);
+				IXGBE_PCI_REG_WRITE_RELAXED(rxq->rdt_reg_addr,
+							    next_rdt);
 				nb_hold -= rxq->rx_free_thresh;
 			} else {
 				PMD_RX_LOG(DEBUG, "RX bulk alloc failed "
@@ -1588,7 +2135,7 @@ next_desc:
 
 		if (!bulk_alloc) {
 			__le64 dma =
-			  rte_cpu_to_le_64(RTE_MBUF_DATA_DMA_ADDR_DEFAULT(nmb));
+			  rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
 			/*
 			 * Update RX descriptor with the physical address of the
 			 * new data buffer of the new allocated mbuf.
@@ -1596,7 +2143,7 @@ next_desc:
 			rxe->mbuf = nmb;
 
 			rxm->data_off = RTE_PKTMBUF_HEADROOM;
-			rxdp->read.hdr_addr = dma;
+			rxdp->read.hdr_addr = 0;
 			rxdp->read.pkt_addr = dma;
 		} else
 			rxe->mbuf = NULL;
@@ -1656,21 +2203,33 @@ next_desc:
 		 * the pointer to the first mbuf at the NEXTP entry in the
 		 * sw_sc_ring and continue to parse the RX ring.
 		 */
-		if (!eop) {
+		if (!eop && next_rxe) {
 			rxm->next = next_rxe->mbuf;
 			next_sc_entry->fbuf = first_seg;
 			goto next_desc;
 		}
 
-		/*
-		 * This is the last buffer of the received packet - return
-		 * the current cluster to the user.
-		 */
-		rxm->next = NULL;
-
 		/* Initialize the first mbuf of the returned packet */
-		ixgbe_fill_cluster_head_buf(first_seg, &rxd, rxq->port_id,
-					    staterr);
+		ixgbe_fill_cluster_head_buf(first_seg, &rxd, rxq, staterr);
+
+		/*
+		 * Deal with the case, when HW CRC srip is disabled.
+		 * That can't happen when LRO is enabled, but still could
+		 * happen for scattered RX mode.
+		 */
+		first_seg->pkt_len -= rxq->crc_len;
+		if (unlikely(rxm->data_len <= rxq->crc_len)) {
+			struct rte_mbuf *lp;
+
+			for (lp = first_seg; lp->next != rxm; lp = lp->next)
+				;
+
+			first_seg->nb_segs--;
+			lp->data_len -= rxq->crc_len - rxm->data_len;
+			lp->next = NULL;
+			rte_pktmbuf_free_seg(rxm);
+		} else
+			rxm->data_len -= rxq->crc_len;
 
 		/* Prefetch data of first segment, if configured to do so. */
 		rte_packet_prefetch((char *)first_seg->buf_addr +
@@ -1703,7 +2262,7 @@ next_desc:
 			   rxq->port_id, rxq->queue_id, rx_id, nb_hold, nb_rx);
 
 		rte_wmb();
-		IXGBE_PCI_REG_WRITE(rxq->rdt_reg_addr, prev_id);
+		IXGBE_PCI_REG_WRITE_RELAXED(rxq->rdt_reg_addr, prev_id);
 		nb_hold = 0;
 	}
 
@@ -1731,55 +2290,7 @@ ixgbe_recv_pkts_lro_bulk_alloc(void *rx_queue, struct rte_mbuf **rx_pkts,
  *
  **********************************************************************/
 
-/*
- * Rings setup and release.
- *
- * TDBA/RDBA should be aligned on 16 byte boundary. But TDLEN/RDLEN should be
- * multiple of 128 bytes. So we align TDBA/RDBA on 128 byte boundary. This will
- * also optimize cache line size effect. H/W supports up to cache line size 128.
- */
-#define IXGBE_ALIGN 128
-
-/*
- * Maximum number of Ring Descriptors.
- *
- * Since RDLEN/TDLEN should be multiple of 128 bytes, the number of ring
- * descriptors should meet the following condition:
- *      (num_ring_desc * sizeof(rx/tx descriptor)) % 128 == 0
- */
-#define IXGBE_MIN_RING_DESC 32
-#define IXGBE_MAX_RING_DESC 4096
-
-/*
- * Create memzone for HW rings. malloc can't be used as the physical address is
- * needed. If the memzone is already created, then this function returns a ptr
- * to the old one.
- */
-static const struct rte_memzone * __attribute__((cold))
-ring_dma_zone_reserve(struct rte_eth_dev *dev, const char *ring_name,
-		      uint16_t queue_id, uint32_t ring_size, int socket_id)
-{
-	char z_name[RTE_MEMZONE_NAMESIZE];
-	const struct rte_memzone *mz;
-
-	snprintf(z_name, sizeof(z_name), "%s_%s_%d_%d",
-			dev->driver->pci_drv.name, ring_name,
-			dev->data->port_id, queue_id);
-
-	mz = rte_memzone_lookup(z_name);
-	if (mz)
-		return mz;
-
-#ifdef RTE_LIBRTE_XEN_DOM0
-	return rte_memzone_reserve_bounded(z_name, ring_size,
-		socket_id, 0, IXGBE_ALIGN, RTE_PGSIZE_2M);
-#else
-	return rte_memzone_reserve_aligned(z_name, ring_size,
-		socket_id, 0, IXGBE_ALIGN);
-#endif
-}
-
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_tx_queue_release_mbufs(struct ixgbe_tx_queue *txq)
 {
 	unsigned i;
@@ -1794,7 +2305,117 @@ ixgbe_tx_queue_release_mbufs(struct ixgbe_tx_queue *txq)
 	}
 }
 
-static void __attribute__((cold))
+static int
+ixgbe_tx_done_cleanup_full(struct ixgbe_tx_queue *txq, uint32_t free_cnt)
+{
+	struct ixgbe_tx_entry *swr_ring = txq->sw_ring;
+	uint16_t i, tx_last, tx_id;
+	uint16_t nb_tx_free_last;
+	uint16_t nb_tx_to_clean;
+	uint32_t pkt_cnt;
+
+	/* Start free mbuf from the next of tx_tail */
+	tx_last = txq->tx_tail;
+	tx_id  = swr_ring[tx_last].next_id;
+
+	if (txq->nb_tx_free == 0 && ixgbe_xmit_cleanup(txq))
+		return 0;
+
+	nb_tx_to_clean = txq->nb_tx_free;
+	nb_tx_free_last = txq->nb_tx_free;
+	if (!free_cnt)
+		free_cnt = txq->nb_tx_desc;
+
+	/* Loop through swr_ring to count the amount of
+	 * freeable mubfs and packets.
+	 */
+	for (pkt_cnt = 0; pkt_cnt < free_cnt; ) {
+		for (i = 0; i < nb_tx_to_clean &&
+			pkt_cnt < free_cnt &&
+			tx_id != tx_last; i++) {
+			if (swr_ring[tx_id].mbuf != NULL) {
+				rte_pktmbuf_free_seg(swr_ring[tx_id].mbuf);
+				swr_ring[tx_id].mbuf = NULL;
+
+				/*
+				 * last segment in the packet,
+				 * increment packet count
+				 */
+				pkt_cnt += (swr_ring[tx_id].last_id == tx_id);
+			}
+
+			tx_id = swr_ring[tx_id].next_id;
+		}
+
+		if (txq->tx_rs_thresh > txq->nb_tx_desc -
+			txq->nb_tx_free || tx_id == tx_last)
+			break;
+
+		if (pkt_cnt < free_cnt) {
+			if (ixgbe_xmit_cleanup(txq))
+				break;
+
+			nb_tx_to_clean = txq->nb_tx_free - nb_tx_free_last;
+			nb_tx_free_last = txq->nb_tx_free;
+		}
+	}
+
+	return (int)pkt_cnt;
+}
+
+static int
+ixgbe_tx_done_cleanup_simple(struct ixgbe_tx_queue *txq,
+			uint32_t free_cnt)
+{
+	int i, n, cnt;
+
+	if (free_cnt == 0 || free_cnt > txq->nb_tx_desc)
+		free_cnt = txq->nb_tx_desc;
+
+	cnt = free_cnt - free_cnt % txq->tx_rs_thresh;
+
+	for (i = 0; i < cnt; i += n) {
+		if (txq->nb_tx_desc - txq->nb_tx_free < txq->tx_rs_thresh)
+			break;
+
+		n = ixgbe_tx_free_bufs(txq);
+
+		if (n == 0)
+			break;
+	}
+
+	return i;
+}
+
+static int
+ixgbe_tx_done_cleanup_vec(struct ixgbe_tx_queue *txq __rte_unused,
+			uint32_t free_cnt __rte_unused)
+{
+	return -ENOTSUP;
+}
+
+int
+ixgbe_dev_tx_done_cleanup(void *tx_queue, uint32_t free_cnt)
+{
+	struct ixgbe_tx_queue *txq = (struct ixgbe_tx_queue *)tx_queue;
+	if (txq->offloads == 0 &&
+#ifdef RTE_LIBRTE_SECURITY
+			!(txq->using_ipsec) &&
+#endif
+			txq->tx_rs_thresh >= RTE_PMD_IXGBE_TX_MAX_BURST) {
+		if (txq->tx_rs_thresh <= RTE_IXGBE_TX_MAX_FREE_BUF_SZ &&
+				(rte_eal_process_type() != RTE_PROC_PRIMARY ||
+					txq->sw_ring_v != NULL)) {
+			return ixgbe_tx_done_cleanup_vec(txq, free_cnt);
+		} else {
+			return ixgbe_tx_done_cleanup_simple(txq, free_cnt);
+		}
+	}
+
+	return ixgbe_tx_done_cleanup_full(txq, free_cnt);
+}
+
+static void __rte_cold
 ixgbe_tx_free_swring(struct ixgbe_tx_queue *txq)
 {
 	if (txq != NULL &&
@@ -1802,7 +2423,7 @@ ixgbe_tx_free_swring(struct ixgbe_tx_queue *txq)
 		rte_free(txq->sw_ring);
 }
 
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_tx_queue_release(struct ixgbe_tx_queue *txq)
 {
 	if (txq != NULL && txq->ops != NULL) {
@@ -1812,14 +2433,14 @@ ixgbe_tx_queue_release(struct ixgbe_tx_queue *txq)
 	}
 }
 
-void __attribute__((cold))
+void __rte_cold
 ixgbe_dev_tx_queue_release(void *txq)
 {
 	ixgbe_tx_queue_release(txq);
 }
 
 /* (Re)set dynamic ixgbe_tx_queue fields to defaults */
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_reset_tx_queue(struct ixgbe_tx_queue *txq)
 {
 	static const union ixgbe_adv_tx_desc zeroed_desc = {{0}};
@@ -1835,7 +2456,8 @@ ixgbe_reset_tx_queue(struct ixgbe_tx_queue *txq)
 	prev = (uint16_t) (txq->nb_tx_desc - 1);
 	for (i = 0; i < txq->nb_tx_desc; i++) {
 		volatile union ixgbe_adv_tx_desc *txd = &txq->tx_ring[i];
-		txd->wb.status = IXGBE_TXD_STAT_DD;
+
+		txd->wb.status = rte_cpu_to_le_32(IXGBE_TXD_STAT_DD);
 		txe[i].mbuf = NULL;
 		txe[i].last_id = i;
 		txe[prev].next_id = i;
@@ -1854,7 +2476,7 @@ ixgbe_reset_tx_queue(struct ixgbe_tx_queue *txq)
 	txq->last_desc_cleaned = (uint16_t)(txq->nb_tx_desc - 1);
 	txq->nb_tx_free = (uint16_t)(txq->nb_tx_desc - 1);
 	txq->ctx_curr = 0;
-	memset((void*)&txq->ctx_cache, 0,
+	memset((void *)&txq->ctx_cache, 0,
 		IXGBE_CTX_NUM * sizeof(struct ixgbe_advctx_info));
 }
 
@@ -1868,37 +2490,78 @@ static const struct ixgbe_txq_ops def_txq_ops = {
  * the queue parameters. Used in tx_queue_setup by primary process and then
  * in dev_init by secondary process when attaching to an existing ethdev.
  */
-void __attribute__((cold))
+void __rte_cold
 ixgbe_set_tx_function(struct rte_eth_dev *dev, struct ixgbe_tx_queue *txq)
 {
 	/* Use a simple Tx queue (no offloads, no multi segs) if possible */
-	if (((txq->txq_flags & IXGBE_SIMPLE_FLAGS) == IXGBE_SIMPLE_FLAGS)
-			&& (txq->tx_rs_thresh >= RTE_PMD_IXGBE_TX_MAX_BURST)) {
-		PMD_INIT_LOG(INFO, "Using simple tx code path");
-#ifdef RTE_IXGBE_INC_VECTOR
+	if ((txq->offloads == 0) &&
+#ifdef RTE_LIBRTE_SECURITY
+			!(txq->using_ipsec) &&
+#endif
+			(txq->tx_rs_thresh >= RTE_PMD_IXGBE_TX_MAX_BURST)) {
+		PMD_INIT_LOG(DEBUG, "Using simple tx code path");
+		dev->tx_pkt_prepare = NULL;
 		if (txq->tx_rs_thresh <= RTE_IXGBE_TX_MAX_FREE_BUF_SZ &&
 				(rte_eal_process_type() != RTE_PROC_PRIMARY ||
 					ixgbe_txq_vec_setup(txq) == 0)) {
-			PMD_INIT_LOG(INFO, "Vector tx enabled.");
+			PMD_INIT_LOG(DEBUG, "Vector tx enabled.");
 			dev->tx_pkt_burst = ixgbe_xmit_pkts_vec;
 		} else
-#endif
 		dev->tx_pkt_burst = ixgbe_xmit_pkts_simple;
 	} else {
-		PMD_INIT_LOG(INFO, "Using full-featured tx code path");
-		PMD_INIT_LOG(INFO,
-				" - txq_flags = %lx " "[IXGBE_SIMPLE_FLAGS=%lx]",
-				(unsigned long)txq->txq_flags,
-				(unsigned long)IXGBE_SIMPLE_FLAGS);
-		PMD_INIT_LOG(INFO,
+		PMD_INIT_LOG(DEBUG, "Using full-featured tx code path");
+		PMD_INIT_LOG(DEBUG,
+				" - offloads = 0x%" PRIx64,
+				txq->offloads);
+		PMD_INIT_LOG(DEBUG,
 				" - tx_rs_thresh = %lu " "[RTE_PMD_IXGBE_TX_MAX_BURST=%lu]",
 				(unsigned long)txq->tx_rs_thresh,
 				(unsigned long)RTE_PMD_IXGBE_TX_MAX_BURST);
 		dev->tx_pkt_burst = ixgbe_xmit_pkts;
+		dev->tx_pkt_prepare = ixgbe_prep_pkts;
 	}
 }
 
-int __attribute__((cold))
+uint64_t
+ixgbe_get_tx_queue_offloads(struct rte_eth_dev *dev)
+{
+	RTE_SET_USED(dev);
+
+	return 0;
+}
+
+uint64_t
+ixgbe_get_tx_port_offloads(struct rte_eth_dev *dev)
+{
+	uint64_t tx_offload_capa;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	tx_offload_capa =
+		DEV_TX_OFFLOAD_VLAN_INSERT |
+		DEV_TX_OFFLOAD_IPV4_CKSUM  |
+		DEV_TX_OFFLOAD_UDP_CKSUM   |
+		DEV_TX_OFFLOAD_TCP_CKSUM   |
+		DEV_TX_OFFLOAD_SCTP_CKSUM  |
+		DEV_TX_OFFLOAD_TCP_TSO     |
+		DEV_TX_OFFLOAD_MULTI_SEGS;
+
+	if (hw->mac.type == ixgbe_mac_82599EB ||
+	    hw->mac.type == ixgbe_mac_X540)
+		tx_offload_capa |= DEV_TX_OFFLOAD_MACSEC_INSERT;
+
+	if (hw->mac.type == ixgbe_mac_X550 ||
+	    hw->mac.type == ixgbe_mac_X550EM_x ||
+	    hw->mac.type == ixgbe_mac_X550EM_a)
+		tx_offload_capa |= DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM;
+
+#ifdef RTE_LIBRTE_SECURITY
+	if (dev->security_ctx)
+		tx_offload_capa |= DEV_TX_OFFLOAD_SECURITY;
+#endif
+	return tx_offload_capa;
+}
+
+int __rte_cold
 ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 			 uint16_t queue_idx,
 			 uint16_t nb_desc,
@@ -1909,18 +2572,21 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	struct ixgbe_tx_queue *txq;
 	struct ixgbe_hw     *hw;
 	uint16_t tx_rs_thresh, tx_free_thresh;
+	uint64_t offloads;
 
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	offloads = tx_conf->offloads | dev->data->dev_conf.txmode.offloads;
 
 	/*
 	 * Validate number of transmit descriptors.
 	 * It must not exceed hardware maximum, and must be multiple
 	 * of IXGBE_ALIGN.
 	 */
-	if (((nb_desc * sizeof(union ixgbe_adv_tx_desc)) % IXGBE_ALIGN) != 0 ||
-	    (nb_desc > IXGBE_MAX_RING_DESC) ||
-	    (nb_desc < IXGBE_MIN_RING_DESC)) {
+	if (nb_desc % IXGBE_TXD_ALIGN != 0 ||
+			(nb_desc > IXGBE_MAX_RING_DESC) ||
+			(nb_desc < IXGBE_MIN_RING_DESC)) {
 		return -EINVAL;
 	}
 
@@ -1940,19 +2606,41 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	 *  tx_rs_thresh must be a divisor of the ring size.
 	 *  tx_free_thresh must be greater than 0.
 	 *  tx_free_thresh must be less than the size of the ring minus 3.
+	 *  tx_free_thresh + tx_rs_thresh must not exceed nb_desc.
 	 * One descriptor in the TX ring is used as a sentinel to avoid a
 	 * H/W race condition, hence the maximum threshold constraints.
 	 * When set to zero use default values.
 	 */
-	tx_rs_thresh = (uint16_t)((tx_conf->tx_rs_thresh) ?
-			tx_conf->tx_rs_thresh : DEFAULT_TX_RS_THRESH);
 	tx_free_thresh = (uint16_t)((tx_conf->tx_free_thresh) ?
 			tx_conf->tx_free_thresh : DEFAULT_TX_FREE_THRESH);
+	/* force tx_rs_thresh to adapt an aggresive tx_free_thresh */
+	tx_rs_thresh = (DEFAULT_TX_RS_THRESH + tx_free_thresh > nb_desc) ?
+			nb_desc - tx_free_thresh : DEFAULT_TX_RS_THRESH;
+	if (tx_conf->tx_rs_thresh > 0)
+		tx_rs_thresh = tx_conf->tx_rs_thresh;
+	if (tx_rs_thresh + tx_free_thresh > nb_desc) {
+		PMD_INIT_LOG(ERR, "tx_rs_thresh + tx_free_thresh must not "
+			     "exceed nb_desc. (tx_rs_thresh=%u "
+			     "tx_free_thresh=%u nb_desc=%u port = %d queue=%d)",
+			     (unsigned int)tx_rs_thresh,
+			     (unsigned int)tx_free_thresh,
+			     (unsigned int)nb_desc,
+			     (int)dev->data->port_id,
+			     (int)queue_idx);
+		return -(EINVAL);
+	}
 	if (tx_rs_thresh >= (nb_desc - 2)) {
 		PMD_INIT_LOG(ERR, "tx_rs_thresh must be less than the number "
-			     "of TX descriptors minus 2. (tx_rs_thresh=%u "
-			     "port=%d queue=%d)", (unsigned int)tx_rs_thresh,
-			     (int)dev->data->port_id, (int)queue_idx);
+			"of TX descriptors minus 2. (tx_rs_thresh=%u "
+			"port=%d queue=%d)", (unsigned int)tx_rs_thresh,
+			(int)dev->data->port_id, (int)queue_idx);
+		return -(EINVAL);
+	}
+	if (tx_rs_thresh > DEFAULT_TX_RS_THRESH) {
+		PMD_INIT_LOG(ERR, "tx_rs_thresh must be less or equal than %u. "
+			"(tx_rs_thresh=%u port=%d queue=%d)",
+			DEFAULT_TX_RS_THRESH, (unsigned int)tx_rs_thresh,
+			(int)dev->data->port_id, (int)queue_idx);
 		return -(EINVAL);
 	}
 	if (tx_free_thresh >= (nb_desc - 3)) {
@@ -2006,19 +2694,19 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	txq = rte_zmalloc_socket("ethdev TX queue", sizeof(struct ixgbe_tx_queue),
 				 RTE_CACHE_LINE_SIZE, socket_id);
 	if (txq == NULL)
-		return (-ENOMEM);
+		return -ENOMEM;
 
 	/*
 	 * Allocate TX ring hardware descriptors. A memzone large enough to
 	 * handle the maximum ring size is allocated in order to allow for
 	 * resizing in later calls to the queue setup function.
 	 */
-	tz = ring_dma_zone_reserve(dev, "tx_ring", queue_idx,
+	tz = rte_eth_dma_zone_reserve(dev, "tx_ring", queue_idx,
 			sizeof(union ixgbe_adv_tx_desc) * IXGBE_MAX_RING_DESC,
-			socket_id);
+			IXGBE_ALIGN, socket_id);
 	if (tz == NULL) {
 		ixgbe_tx_queue_release(txq);
-		return (-ENOMEM);
+		return -ENOMEM;
 	}
 
 	txq->nb_tx_desc = nb_desc;
@@ -2031,9 +2719,13 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	txq->reg_idx = (uint16_t)((RTE_ETH_DEV_SRIOV(dev).active == 0) ?
 		queue_idx : RTE_ETH_DEV_SRIOV(dev).def_pool_q_idx + queue_idx);
 	txq->port_id = dev->data->port_id;
-	txq->txq_flags = tx_conf->txq_flags;
+	txq->offloads = offloads;
 	txq->ops = &def_txq_ops;
 	txq->tx_deferred_start = tx_conf->tx_deferred_start;
+#ifdef RTE_LIBRTE_SECURITY
+	txq->using_ipsec = !!(dev->data->dev_conf.txmode.offloads &
+			DEV_TX_OFFLOAD_SECURITY);
+#endif
 
 	/*
 	 * Modification to set VFTDT for virtual function if vf is detected
@@ -2041,15 +2733,13 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	if (hw->mac.type == ixgbe_mac_82599_vf ||
 	    hw->mac.type == ixgbe_mac_X540_vf ||
 	    hw->mac.type == ixgbe_mac_X550_vf ||
-	    hw->mac.type == ixgbe_mac_X550EM_x_vf)
+	    hw->mac.type == ixgbe_mac_X550EM_x_vf ||
+	    hw->mac.type == ixgbe_mac_X550EM_a_vf)
 		txq->tdt_reg_addr = IXGBE_PCI_REG_ADDR(hw, IXGBE_VFTDT(queue_idx));
 	else
 		txq->tdt_reg_addr = IXGBE_PCI_REG_ADDR(hw, IXGBE_TDT(txq->reg_idx));
-#ifndef	RTE_LIBRTE_XEN_DOM0
-	txq->tx_ring_phys_addr = (uint64_t) tz->phys_addr;
-#else
-	txq->tx_ring_phys_addr = rte_mem_phy2mch(tz->memseg_id, tz->phys_addr);
-#endif
+
+	txq->tx_ring_phys_addr = tz->iova;
 	txq->tx_ring = (union ixgbe_adv_tx_desc *) tz->addr;
 
 	/* Allocate software ring */
@@ -2058,7 +2748,7 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 				RTE_CACHE_LINE_SIZE, socket_id);
 	if (txq->sw_ring == NULL) {
 		ixgbe_tx_queue_release(txq);
-		return (-ENOMEM);
+		return -ENOMEM;
 	}
 	PMD_INIT_LOG(DEBUG, "sw_ring=%p hw_ring=%p dma_addr=0x%"PRIx64,
 		     txq->sw_ring, txq->tx_ring, txq->tx_ring_phys_addr);
@@ -2071,7 +2761,7 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	dev->data->tx_queues[queue_idx] = txq;
 
 
-	return (0);
+	return 0;
 }
 
 /**
@@ -2086,10 +2776,10 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
  *
  * @m scattered cluster head
  */
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_free_sc_cluster(struct rte_mbuf *m)
 {
-	uint8_t i, nb_segs = m->nb_segs;
+	uint16_t i, nb_segs = m->nb_segs;
 	struct rte_mbuf *next_seg;
 
 	for (i = 0; i < nb_segs; i++) {
@@ -2099,29 +2789,33 @@ ixgbe_free_sc_cluster(struct rte_mbuf *m)
 	}
 }
 
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_rx_queue_release_mbufs(struct ixgbe_rx_queue *rxq)
 {
 	unsigned i;
 
+	/* SSE Vector driver has a different way of releasing mbufs. */
+	if (rxq->rx_using_sse) {
+		ixgbe_rx_queue_release_mbufs_vec(rxq);
+		return;
+	}
+
 	if (rxq->sw_ring != NULL) {
 		for (i = 0; i < rxq->nb_rx_desc; i++) {
-			if (rxq->sw_ring[i].mbuf != NULL &&
-					rte_mbuf_refcnt_read(rxq->sw_ring[i].mbuf)) {
+			if (rxq->sw_ring[i].mbuf != NULL) {
 				rte_pktmbuf_free_seg(rxq->sw_ring[i].mbuf);
 				rxq->sw_ring[i].mbuf = NULL;
 			}
 		}
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
 		if (rxq->rx_nb_avail) {
 			for (i = 0; i < rxq->rx_nb_avail; ++i) {
 				struct rte_mbuf *mb;
+
 				mb = rxq->rx_stage[rxq->rx_next_avail + i];
 				rte_pktmbuf_free_seg(mb);
 			}
 			rxq->rx_nb_avail = 0;
 		}
-#endif
 	}
 
 	if (rxq->sw_sc_ring)
@@ -2132,7 +2826,7 @@ ixgbe_rx_queue_release_mbufs(struct ixgbe_rx_queue *rxq)
 			}
 }
 
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_rx_queue_release(struct ixgbe_rx_queue *rxq)
 {
 	if (rxq != NULL) {
@@ -2143,7 +2837,7 @@ ixgbe_rx_queue_release(struct ixgbe_rx_queue *rxq)
 	}
 }
 
-void __attribute__((cold))
+void __rte_cold
 ixgbe_dev_rx_queue_release(void *rxq)
 {
 	ixgbe_rx_queue_release(rxq);
@@ -2157,12 +2851,8 @@ ixgbe_dev_rx_queue_release(void *rxq)
  *  -EINVAL: the preconditions are NOT satisfied and the default Rx burst
  *           function must be used.
  */
-static inline int __attribute__((cold))
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
+static inline int __rte_cold
 check_rx_burst_bulk_alloc_preconditions(struct ixgbe_rx_queue *rxq)
-#else
-check_rx_burst_bulk_alloc_preconditions(__rte_unused struct ixgbe_rx_queue *rxq)
-#endif
 {
 	int ret = 0;
 
@@ -2171,11 +2861,9 @@ check_rx_burst_bulk_alloc_preconditions(__rte_unused struct ixgbe_rx_queue *rxq)
 	 *   rxq->rx_free_thresh >= RTE_PMD_IXGBE_RX_MAX_BURST
 	 *   rxq->rx_free_thresh < rxq->nb_rx_desc
 	 *   (rxq->nb_rx_desc % rxq->rx_free_thresh) == 0
-	 *   rxq->nb_rx_desc<(IXGBE_MAX_RING_DESC-RTE_PMD_IXGBE_RX_MAX_BURST)
 	 * Scattered packets are not supported.  This should be checked
 	 * outside of this function.
 	 */
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
 	if (!(rxq->rx_free_thresh >= RTE_PMD_IXGBE_RX_MAX_BURST)) {
 		PMD_INIT_LOG(DEBUG, "Rx Burst Bulk Alloc Preconditions: "
 			     "rxq->rx_free_thresh=%d, "
@@ -2194,25 +2882,13 @@ check_rx_burst_bulk_alloc_preconditions(__rte_unused struct ixgbe_rx_queue *rxq)
 			     "rxq->rx_free_thresh=%d",
 			     rxq->nb_rx_desc, rxq->rx_free_thresh);
 		ret = -EINVAL;
-	} else if (!(rxq->nb_rx_desc <
-	       (IXGBE_MAX_RING_DESC - RTE_PMD_IXGBE_RX_MAX_BURST))) {
-		PMD_INIT_LOG(DEBUG, "Rx Burst Bulk Alloc Preconditions: "
-			     "rxq->nb_rx_desc=%d, "
-			     "IXGBE_MAX_RING_DESC=%d, "
-			     "RTE_PMD_IXGBE_RX_MAX_BURST=%d",
-			     rxq->nb_rx_desc, IXGBE_MAX_RING_DESC,
-			     RTE_PMD_IXGBE_RX_MAX_BURST);
-		ret = -EINVAL;
 	}
-#else
-	ret = -EINVAL;
-#endif
 
 	return ret;
 }
 
 /* Reset dynamic ixgbe_rx_queue fields back to defaults */
-static void __attribute__((cold))
+static void __rte_cold
 ixgbe_reset_rx_queue(struct ixgbe_adapter *adapter, struct ixgbe_rx_queue *rxq)
 {
 	static const union ixgbe_adv_rx_desc zeroed_desc = {{0}};
@@ -2222,12 +2898,7 @@ ixgbe_reset_rx_queue(struct ixgbe_adapter *adapter, struct ixgbe_rx_queue *rxq)
 	/*
 	 * By default, the Rx queue setup function allocates enough memory for
 	 * IXGBE_MAX_RING_DESC.  The Rx Burst bulk allocation function requires
-	 * extra memory at the end of the descriptor ring to be zero'd out. A
-	 * pre-condition for using the Rx burst bulk alloc function is that the
-	 * number of descriptors is less than or equal to
-	 * (IXGBE_MAX_RING_DESC - RTE_PMD_IXGBE_RX_MAX_BURST). Check all the
-	 * constraints here to see if we need to zero out memory after the end
-	 * of the H/W descriptor ring.
+	 * extra memory at the end of the descriptor ring to be zero'd out.
 	 */
 	if (adapter->rx_bulk_alloc_allowed)
 		/* zero out extra memory */
@@ -2242,7 +2913,6 @@ ixgbe_reset_rx_queue(struct ixgbe_adapter *adapter, struct ixgbe_rx_queue *rxq)
 		rxq->rx_ring[i] = zeroed_desc;
 	}
 
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
 	/*
 	 * initialize extra software ring entries. Space for these extra
 	 * entries is always allocated
@@ -2255,14 +2925,95 @@ ixgbe_reset_rx_queue(struct ixgbe_adapter *adapter, struct ixgbe_rx_queue *rxq)
 	rxq->rx_nb_avail = 0;
 	rxq->rx_next_avail = 0;
 	rxq->rx_free_trigger = (uint16_t)(rxq->rx_free_thresh - 1);
-#endif /* RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC */
 	rxq->rx_tail = 0;
 	rxq->nb_rx_hold = 0;
 	rxq->pkt_first_seg = NULL;
 	rxq->pkt_last_seg = NULL;
+
+#if defined(RTE_ARCH_X86) || defined(RTE_ARCH_ARM64)
+	rxq->rxrearm_start = 0;
+	rxq->rxrearm_nb = 0;
+#endif
 }
 
-int __attribute__((cold))
+static int
+ixgbe_is_vf(struct rte_eth_dev *dev)
+{
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	switch (hw->mac.type) {
+	case ixgbe_mac_82599_vf:
+	case ixgbe_mac_X540_vf:
+	case ixgbe_mac_X550_vf:
+	case ixgbe_mac_X550EM_x_vf:
+	case ixgbe_mac_X550EM_a_vf:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+uint64_t
+ixgbe_get_rx_queue_offloads(struct rte_eth_dev *dev)
+{
+	uint64_t offloads = 0;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	if (hw->mac.type != ixgbe_mac_82598EB)
+		offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
+
+	return offloads;
+}
+
+uint64_t
+ixgbe_get_rx_port_offloads(struct rte_eth_dev *dev)
+{
+	uint64_t offloads;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	offloads = DEV_RX_OFFLOAD_IPV4_CKSUM  |
+		   DEV_RX_OFFLOAD_UDP_CKSUM   |
+		   DEV_RX_OFFLOAD_TCP_CKSUM   |
+		   DEV_RX_OFFLOAD_KEEP_CRC    |
+		   DEV_RX_OFFLOAD_JUMBO_FRAME |
+		   DEV_RX_OFFLOAD_VLAN_FILTER |
+		   DEV_RX_OFFLOAD_SCATTER |
+		   DEV_RX_OFFLOAD_RSS_HASH;
+
+	if (hw->mac.type == ixgbe_mac_82598EB)
+		offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
+
+	if (ixgbe_is_vf(dev) == 0)
+		offloads |= DEV_RX_OFFLOAD_VLAN_EXTEND;
+
+	/*
+	 * RSC is only supported by 82599 and x540 PF devices in a non-SR-IOV
+	 * mode.
+	 */
+	if ((hw->mac.type == ixgbe_mac_82599EB ||
+	     hw->mac.type == ixgbe_mac_X540 ||
+	     hw->mac.type == ixgbe_mac_X550) &&
+	    !RTE_ETH_DEV_SRIOV(dev).active)
+		offloads |= DEV_RX_OFFLOAD_TCP_LRO;
+
+	if (hw->mac.type == ixgbe_mac_82599EB ||
+	    hw->mac.type == ixgbe_mac_X540)
+		offloads |= DEV_RX_OFFLOAD_MACSEC_STRIP;
+
+	if (hw->mac.type == ixgbe_mac_X550 ||
+	    hw->mac.type == ixgbe_mac_X550EM_x ||
+	    hw->mac.type == ixgbe_mac_X550EM_a)
+		offloads |= DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM;
+
+#ifdef RTE_LIBRTE_SECURITY
+	if (dev->security_ctx)
+		offloads |= DEV_RX_OFFLOAD_SECURITY;
+#endif
+
+	return offloads;
+}
+
+int __rte_cold
 ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 			 uint16_t queue_idx,
 			 uint16_t nb_desc,
@@ -2274,21 +3025,23 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 	struct ixgbe_rx_queue *rxq;
 	struct ixgbe_hw     *hw;
 	uint16_t len;
-	struct ixgbe_adapter *adapter =
-		(struct ixgbe_adapter *)dev->data->dev_private;
+	struct ixgbe_adapter *adapter = dev->data->dev_private;
+	uint64_t offloads;
 
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	offloads = rx_conf->offloads | dev->data->dev_conf.rxmode.offloads;
 
 	/*
 	 * Validate number of receive descriptors.
 	 * It must not exceed hardware maximum, and must be multiple
 	 * of IXGBE_ALIGN.
 	 */
-	if (((nb_desc * sizeof(union ixgbe_adv_rx_desc)) % IXGBE_ALIGN) != 0 ||
-	    (nb_desc > IXGBE_MAX_RING_DESC) ||
-	    (nb_desc < IXGBE_MIN_RING_DESC)) {
-		return (-EINVAL);
+	if (nb_desc % IXGBE_RXD_ALIGN != 0 ||
+			(nb_desc > IXGBE_MAX_RING_DESC) ||
+			(nb_desc < IXGBE_MIN_RING_DESC)) {
+		return -EINVAL;
 	}
 
 	/* Free memory prior to re-allocation if needed... */
@@ -2301,7 +3054,7 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 	rxq = rte_zmalloc_socket("ethdev RX queue", sizeof(struct ixgbe_rx_queue),
 				 RTE_CACHE_LINE_SIZE, socket_id);
 	if (rxq == NULL)
-		return (-ENOMEM);
+		return -ENOMEM;
 	rxq->mb_pool = mp;
 	rxq->nb_rx_desc = nb_desc;
 	rxq->rx_free_thresh = rx_conf->rx_free_thresh;
@@ -2309,27 +3062,45 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 	rxq->reg_idx = (uint16_t)((RTE_ETH_DEV_SRIOV(dev).active == 0) ?
 		queue_idx : RTE_ETH_DEV_SRIOV(dev).def_pool_q_idx + queue_idx);
 	rxq->port_id = dev->data->port_id;
-	rxq->crc_len = (uint8_t) ((dev->data->dev_conf.rxmode.hw_strip_crc) ?
-							0 : ETHER_CRC_LEN);
+	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_KEEP_CRC)
+		rxq->crc_len = RTE_ETHER_CRC_LEN;
+	else
+		rxq->crc_len = 0;
 	rxq->drop_en = rx_conf->rx_drop_en;
 	rxq->rx_deferred_start = rx_conf->rx_deferred_start;
+	rxq->offloads = offloads;
+
+	/*
+	 * The packet type in RX descriptor is different for different NICs.
+	 * Some bits are used for x550 but reserved for other NICS.
+	 * So set different masks for different NICs.
+	 */
+	if (hw->mac.type == ixgbe_mac_X550 ||
+	    hw->mac.type == ixgbe_mac_X550EM_x ||
+	    hw->mac.type == ixgbe_mac_X550EM_a ||
+	    hw->mac.type == ixgbe_mac_X550_vf ||
+	    hw->mac.type == ixgbe_mac_X550EM_x_vf ||
+	    hw->mac.type == ixgbe_mac_X550EM_a_vf)
+		rxq->pkt_type_mask = IXGBE_PACKET_TYPE_MASK_X550;
+	else
+		rxq->pkt_type_mask = IXGBE_PACKET_TYPE_MASK_82599;
 
 	/*
 	 * Allocate RX ring hardware descriptors. A memzone large enough to
 	 * handle the maximum ring size is allocated in order to allow for
 	 * resizing in later calls to the queue setup function.
 	 */
-	rz = ring_dma_zone_reserve(dev, "rx_ring", queue_idx,
-				   RX_RING_SZ, socket_id);
+	rz = rte_eth_dma_zone_reserve(dev, "rx_ring", queue_idx,
+				      RX_RING_SZ, IXGBE_ALIGN, socket_id);
 	if (rz == NULL) {
 		ixgbe_rx_queue_release(rxq);
-		return (-ENOMEM);
+		return -ENOMEM;
 	}
 
 	/*
 	 * Zero init all the descriptors in the ring.
 	 */
-	memset (rz->addr, 0, RX_RING_SZ);
+	memset(rz->addr, 0, RX_RING_SZ);
 
 	/*
 	 * Modified to setup VFRDT for Virtual Function
@@ -2337,23 +3108,20 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 	if (hw->mac.type == ixgbe_mac_82599_vf ||
 	    hw->mac.type == ixgbe_mac_X540_vf ||
 	    hw->mac.type == ixgbe_mac_X550_vf ||
-	    hw->mac.type == ixgbe_mac_X550EM_x_vf) {
+	    hw->mac.type == ixgbe_mac_X550EM_x_vf ||
+	    hw->mac.type == ixgbe_mac_X550EM_a_vf) {
 		rxq->rdt_reg_addr =
 			IXGBE_PCI_REG_ADDR(hw, IXGBE_VFRDT(queue_idx));
 		rxq->rdh_reg_addr =
 			IXGBE_PCI_REG_ADDR(hw, IXGBE_VFRDH(queue_idx));
-	}
-	else {
+	} else {
 		rxq->rdt_reg_addr =
 			IXGBE_PCI_REG_ADDR(hw, IXGBE_RDT(rxq->reg_idx));
 		rxq->rdh_reg_addr =
 			IXGBE_PCI_REG_ADDR(hw, IXGBE_RDH(rxq->reg_idx));
 	}
-#ifndef RTE_LIBRTE_XEN_DOM0
-	rxq->rx_ring_phys_addr = (uint64_t) rz->phys_addr;
-#else
-	rxq->rx_ring_phys_addr = rte_mem_phy2mch(rz->memseg_id, rz->phys_addr);
-#endif
+
+	rxq->rx_ring_phys_addr = rz->iova;
 	rxq->rx_ring = (union ixgbe_adv_rx_desc *) rz->addr;
 
 	/*
@@ -2383,7 +3151,7 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 					  RTE_CACHE_LINE_SIZE, socket_id);
 	if (!rxq->sw_ring) {
 		ixgbe_rx_queue_release(rxq);
-		return (-ENOMEM);
+		return -ENOMEM;
 	}
 
 	/*
@@ -2400,7 +3168,7 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 				   RTE_CACHE_LINE_SIZE, socket_id);
 	if (!rxq->sw_sc_ring) {
 		ixgbe_rx_queue_release(rxq);
-		return (-ENOMEM);
+		return -ENOMEM;
 	}
 
 	PMD_INIT_LOG(DEBUG, "sw_ring=%p sw_sc_ring=%p hw_ring=%p "
@@ -2432,16 +3200,12 @@ ixgbe_dev_rx_queue_count(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 	struct ixgbe_rx_queue *rxq;
 	uint32_t desc = 0;
 
-	if (rx_queue_id >= dev->data->nb_rx_queues) {
-		PMD_RX_LOG(ERR, "Invalid RX queue id=%d", rx_queue_id);
-		return 0;
-	}
-
 	rxq = dev->data->rx_queues[rx_queue_id];
 	rxdp = &(rxq->rx_ring[rxq->rx_tail]);
 
 	while ((desc < rxq->nb_rx_desc) &&
-		(rxdp->wb.upper.status_error & IXGBE_RXDADV_STAT_DD)) {
+		(rxdp->wb.upper.status_error &
+			rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD))) {
 		desc += IXGBE_RXQ_SCAN_INTERVAL;
 		rxdp += IXGBE_RXQ_SCAN_INTERVAL;
 		if (rxq->rx_tail + desc >= rxq->nb_rx_desc)
@@ -2466,20 +3230,110 @@ ixgbe_dev_rx_descriptor_done(void *rx_queue, uint16_t offset)
 		desc -= rxq->nb_rx_desc;
 
 	rxdp = &rxq->rx_ring[desc];
-	return !!(rxdp->wb.upper.status_error & IXGBE_RXDADV_STAT_DD);
+	return !!(rxdp->wb.upper.status_error &
+			rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD));
 }
 
-void __attribute__((cold))
+int
+ixgbe_dev_rx_descriptor_status(void *rx_queue, uint16_t offset)
+{
+	struct ixgbe_rx_queue *rxq = rx_queue;
+	volatile uint32_t *status;
+	uint32_t nb_hold, desc;
+
+	if (unlikely(offset >= rxq->nb_rx_desc))
+		return -EINVAL;
+
+#if defined(RTE_ARCH_X86) || defined(RTE_ARCH_ARM64)
+	if (rxq->rx_using_sse)
+		nb_hold = rxq->rxrearm_nb;
+	else
+#endif
+		nb_hold = rxq->nb_rx_hold;
+	if (offset >= rxq->nb_rx_desc - nb_hold)
+		return RTE_ETH_RX_DESC_UNAVAIL;
+
+	desc = rxq->rx_tail + offset;
+	if (desc >= rxq->nb_rx_desc)
+		desc -= rxq->nb_rx_desc;
+
+	status = &rxq->rx_ring[desc].wb.upper.status_error;
+	if (*status & rte_cpu_to_le_32(IXGBE_RXDADV_STAT_DD))
+		return RTE_ETH_RX_DESC_DONE;
+
+	return RTE_ETH_RX_DESC_AVAIL;
+}
+
+int
+ixgbe_dev_tx_descriptor_status(void *tx_queue, uint16_t offset)
+{
+	struct ixgbe_tx_queue *txq = tx_queue;
+	volatile uint32_t *status;
+	uint32_t desc;
+
+	if (unlikely(offset >= txq->nb_tx_desc))
+		return -EINVAL;
+
+	desc = txq->tx_tail + offset;
+	/* go to next desc that has the RS bit */
+	desc = ((desc + txq->tx_rs_thresh - 1) / txq->tx_rs_thresh) *
+		txq->tx_rs_thresh;
+	if (desc >= txq->nb_tx_desc) {
+		desc -= txq->nb_tx_desc;
+		if (desc >= txq->nb_tx_desc)
+			desc -= txq->nb_tx_desc;
+	}
+
+	status = &txq->tx_ring[desc].wb.status;
+	if (*status & rte_cpu_to_le_32(IXGBE_ADVTXD_STAT_DD))
+		return RTE_ETH_TX_DESC_DONE;
+
+	return RTE_ETH_TX_DESC_FULL;
+}
+
+/*
+ * Set up link loopback for X540/X550 mode Tx->Rx.
+ */
+static inline void __rte_cold
+ixgbe_setup_loopback_link_x540_x550(struct ixgbe_hw *hw, bool enable)
+{
+	uint32_t macc;
+	PMD_INIT_FUNC_TRACE();
+
+	u16 autoneg_reg = IXGBE_MII_AUTONEG_REG;
+
+	hw->phy.ops.read_reg(hw, IXGBE_MDIO_AUTO_NEG_CONTROL,
+			     IXGBE_MDIO_AUTO_NEG_DEV_TYPE, &autoneg_reg);
+	macc = IXGBE_READ_REG(hw, IXGBE_MACC);
+
+	if (enable) {
+		/* datasheet 15.2.1: disable AUTONEG (PHY Bit 7.0.C) */
+		autoneg_reg |= IXGBE_MII_AUTONEG_ENABLE;
+		/* datasheet 15.2.1: MACC.FLU = 1 (force link up) */
+		macc |= IXGBE_MACC_FLU;
+	} else {
+		autoneg_reg &= ~IXGBE_MII_AUTONEG_ENABLE;
+		macc &= ~IXGBE_MACC_FLU;
+	}
+
+	hw->phy.ops.write_reg(hw, IXGBE_MDIO_AUTO_NEG_CONTROL,
+			      IXGBE_MDIO_AUTO_NEG_DEV_TYPE, autoneg_reg);
+
+	IXGBE_WRITE_REG(hw, IXGBE_MACC, macc);
+}
+
+void __rte_cold
 ixgbe_dev_clear_queues(struct rte_eth_dev *dev)
 {
 	unsigned i;
-	struct ixgbe_adapter *adapter =
-		(struct ixgbe_adapter *)dev->data->dev_private;
+	struct ixgbe_adapter *adapter = dev->data->dev_private;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
 	PMD_INIT_FUNC_TRACE();
 
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
 		struct ixgbe_tx_queue *txq = dev->data->tx_queues[i];
+
 		if (txq != NULL) {
 			txq->ops->release_mbufs(txq);
 			txq->ops->reset(txq);
@@ -2488,11 +3342,42 @@ ixgbe_dev_clear_queues(struct rte_eth_dev *dev)
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		struct ixgbe_rx_queue *rxq = dev->data->rx_queues[i];
+
 		if (rxq != NULL) {
 			ixgbe_rx_queue_release_mbufs(rxq);
 			ixgbe_reset_rx_queue(adapter, rxq);
 		}
 	}
+	/* If loopback mode was enabled, reconfigure the link accordingly */
+	if (dev->data->dev_conf.lpbk_mode != 0) {
+		if (hw->mac.type == ixgbe_mac_X540 ||
+		     hw->mac.type == ixgbe_mac_X550 ||
+		     hw->mac.type == ixgbe_mac_X550EM_x ||
+		     hw->mac.type == ixgbe_mac_X550EM_a)
+			ixgbe_setup_loopback_link_x540_x550(hw, false);
+	}
+}
+
+void
+ixgbe_dev_free_queues(struct rte_eth_dev *dev)
+{
+	unsigned i;
+
+	PMD_INIT_FUNC_TRACE();
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++) {
+		ixgbe_dev_rx_queue_release(dev->data->rx_queues[i]);
+		dev->data->rx_queues[i] = NULL;
+		rte_eth_dma_zone_free(dev, "rx_ring", i);
+	}
+	dev->data->nb_rx_queues = 0;
+
+	for (i = 0; i < dev->data->nb_tx_queues; i++) {
+		ixgbe_dev_tx_queue_release(dev->data->tx_queues[i]);
+		dev->data->tx_queues[i] = NULL;
+		rte_eth_dma_zone_free(dev, "tx_ring", i);
+	}
+	dev->data->nb_tx_queues = 0;
 }
 
 /*********************************************************************
@@ -2536,11 +3421,13 @@ ixgbe_rss_disable(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw *hw;
 	uint32_t mrqc;
+	uint32_t mrqc_reg;
 
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
-	mrqc = IXGBE_READ_REG(hw, IXGBE_MRQC);
+	mrqc_reg = ixgbe_mrqc_reg_get(hw->mac.type);
+	mrqc = IXGBE_READ_REG(hw, mrqc_reg);
 	mrqc &= ~IXGBE_MRQC_RSSEN;
-	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
+	IXGBE_WRITE_REG(hw, mrqc_reg, mrqc);
 }
 
 static void
@@ -2551,6 +3438,11 @@ ixgbe_hw_rss_hash_set(struct ixgbe_hw *hw, struct rte_eth_rss_conf *rss_conf)
 	uint32_t rss_key;
 	uint64_t rss_hf;
 	uint16_t i;
+	uint32_t mrqc_reg;
+	uint32_t rssrk_reg;
+
+	mrqc_reg = ixgbe_mrqc_reg_get(hw->mac.type);
+	rssrk_reg = ixgbe_rssrk_reg_get(hw->mac.type, 0);
 
 	hash_key = rss_conf->rss_key;
 	if (hash_key != NULL) {
@@ -2560,7 +3452,7 @@ ixgbe_hw_rss_hash_set(struct ixgbe_hw *hw, struct rte_eth_rss_conf *rss_conf)
 			rss_key |= hash_key[(i * 4) + 1] << 8;
 			rss_key |= hash_key[(i * 4) + 2] << 16;
 			rss_key |= hash_key[(i * 4) + 3] << 24;
-			IXGBE_WRITE_REG_ARRAY(hw, IXGBE_RSSRK(0), i, rss_key);
+			IXGBE_WRITE_REG_ARRAY(hw, rssrk_reg, i, rss_key);
 		}
 	}
 
@@ -2585,7 +3477,7 @@ ixgbe_hw_rss_hash_set(struct ixgbe_hw *hw, struct rte_eth_rss_conf *rss_conf)
 		mrqc |= IXGBE_MRQC_RSS_FIELD_IPV6_UDP;
 	if (rss_hf & ETH_RSS_IPV6_UDP_EX)
 		mrqc |= IXGBE_MRQC_RSS_FIELD_IPV6_EX_UDP;
-	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
+	IXGBE_WRITE_REG(hw, mrqc_reg, mrqc);
 }
 
 int
@@ -2595,8 +3487,16 @@ ixgbe_dev_rss_hash_update(struct rte_eth_dev *dev,
 	struct ixgbe_hw *hw;
 	uint32_t mrqc;
 	uint64_t rss_hf;
+	uint32_t mrqc_reg;
 
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	if (!ixgbe_rss_update_sp(hw->mac.type)) {
+		PMD_DRV_LOG(ERR, "RSS hash update is not supported on this "
+			"NIC.");
+		return -ENOTSUP;
+	}
+	mrqc_reg = ixgbe_mrqc_reg_get(hw->mac.type);
 
 	/*
 	 * Excerpt from section 7.1.2.8 Receive-Side Scaling (RSS):
@@ -2608,7 +3508,7 @@ ixgbe_dev_rss_hash_update(struct rte_eth_dev *dev,
 	 * disabled at initialization time.
 	 */
 	rss_hf = rss_conf->rss_hf & IXGBE_RSS_OFFLOAD_ALL;
-	mrqc = IXGBE_READ_REG(hw, IXGBE_MRQC);
+	mrqc = IXGBE_READ_REG(hw, mrqc_reg);
 	if (!(mrqc & IXGBE_MRQC_RSSEN)) { /* RSS disabled */
 		if (rss_hf != 0) /* Enable RSS */
 			return -(EINVAL);
@@ -2631,13 +3531,17 @@ ixgbe_dev_rss_hash_conf_get(struct rte_eth_dev *dev,
 	uint32_t rss_key;
 	uint64_t rss_hf;
 	uint16_t i;
+	uint32_t mrqc_reg;
+	uint32_t rssrk_reg;
 
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	mrqc_reg = ixgbe_mrqc_reg_get(hw->mac.type);
+	rssrk_reg = ixgbe_rssrk_reg_get(hw->mac.type, 0);
 	hash_key = rss_conf->rss_key;
 	if (hash_key != NULL) {
 		/* Return RSS hash key */
 		for (i = 0; i < 10; i++) {
-			rss_key = IXGBE_READ_REG_ARRAY(hw, IXGBE_RSSRK(0), i);
+			rss_key = IXGBE_READ_REG_ARRAY(hw, rssrk_reg, i);
 			hash_key[(i * 4)] = rss_key & 0x000000FF;
 			hash_key[(i * 4) + 1] = (rss_key >> 8) & 0x000000FF;
 			hash_key[(i * 4) + 2] = (rss_key >> 16) & 0x000000FF;
@@ -2646,7 +3550,7 @@ ixgbe_dev_rss_hash_conf_get(struct rte_eth_dev *dev,
 	}
 
 	/* Get RSS functions configured in MRQC register */
-	mrqc = IXGBE_READ_REG(hw, IXGBE_MRQC);
+	mrqc = IXGBE_READ_REG(hw, mrqc_reg);
 	if ((mrqc & IXGBE_MRQC_RSSEN) == 0) { /* RSS is disabled */
 		rss_conf->rss_hf = 0;
 		return 0;
@@ -2678,27 +3582,37 @@ static void
 ixgbe_rss_configure(struct rte_eth_dev *dev)
 {
 	struct rte_eth_rss_conf rss_conf;
+	struct ixgbe_adapter *adapter;
 	struct ixgbe_hw *hw;
 	uint32_t reta;
 	uint16_t i;
 	uint16_t j;
+	uint16_t sp_reta_size;
+	uint32_t reta_reg;
 
 	PMD_INIT_FUNC_TRACE();
+	adapter = dev->data->dev_private;
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	sp_reta_size = ixgbe_reta_size_get(hw->mac.type);
 
 	/*
 	 * Fill in redirection table
 	 * The byte-swap is needed because NIC registers are in
 	 * little-endian order.
 	 */
-	reta = 0;
-	for (i = 0, j = 0; i < 128; i++, j++) {
-		if (j == dev->data->nb_rx_queues)
-			j = 0;
-		reta = (reta << 8) | j;
-		if ((i & 3) == 3)
-			IXGBE_WRITE_REG(hw, IXGBE_RETA(i >> 2),
-					rte_bswap32(reta));
+	if (adapter->rss_reta_updated == 0) {
+		reta = 0;
+		for (i = 0, j = 0; i < sp_reta_size; i++, j++) {
+			reta_reg = ixgbe_reta_reg_get(hw->mac.type, i);
+
+			if (j == dev->data->nb_rx_queues)
+				j = 0;
+			reta = (reta << 8) | j;
+			if ((i & 3) == 3)
+				IXGBE_WRITE_REG(hw, reta_reg,
+						rte_bswap32(reta));
+		}
 	}
 
 	/*
@@ -2717,6 +3631,7 @@ ixgbe_rss_configure(struct rte_eth_dev *dev)
 
 #define NUM_VFTA_REGISTERS 128
 #define NIC_RX_BUFFER_SIZE 0x200
+#define X550_RX_BUFFER_SIZE 0x180
 
 static void
 ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
@@ -2745,9 +3660,19 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 	 * RXPBSIZE
 	 * split rx buffer up into sections, each for 1 traffic class
 	 */
-	pbsize = (uint16_t)(NIC_RX_BUFFER_SIZE / nb_tcs);
-	for (i = 0 ; i < nb_tcs; i++) {
+	switch (hw->mac.type) {
+	case ixgbe_mac_X550:
+	case ixgbe_mac_X550EM_x:
+	case ixgbe_mac_X550EM_a:
+		pbsize = (uint16_t)(X550_RX_BUFFER_SIZE / nb_tcs);
+		break;
+	default:
+		pbsize = (uint16_t)(NIC_RX_BUFFER_SIZE / nb_tcs);
+		break;
+	}
+	for (i = 0; i < nb_tcs; i++) {
 		uint32_t rxpbsize = IXGBE_READ_REG(hw, IXGBE_RXPBSIZE(i));
+
 		rxpbsize &= (~(0x3FF << IXGBE_RXPBSIZE_SHIFT));
 		/* clear 10 bits. */
 		rxpbsize |= (pbsize << IXGBE_RXPBSIZE_SHIFT); /* set value */
@@ -2756,14 +3681,15 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 	/* zero alloc all unused TCs */
 	for (i = nb_tcs; i < ETH_DCB_NUM_USER_PRIORITIES; i++) {
 		uint32_t rxpbsize = IXGBE_READ_REG(hw, IXGBE_RXPBSIZE(i));
-		rxpbsize &= (~( 0x3FF << IXGBE_RXPBSIZE_SHIFT ));
+
+		rxpbsize &= (~(0x3FF << IXGBE_RXPBSIZE_SHIFT));
 		/* clear 10 bits. */
 		IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), rxpbsize);
 	}
 
 	/* MRQC: enable vmdq and dcb */
-	mrqc = ((num_pools == ETH_16_POOLS) ? \
-		IXGBE_MRQC_VMDQRT8TCEN : IXGBE_MRQC_VMDQRT4TCEN );
+	mrqc = (num_pools == ETH_16_POOLS) ?
+		IXGBE_MRQC_VMDQRT8TCEN : IXGBE_MRQC_VMDQRT4TCEN;
 	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
 
 	/* PFVTCTL: turn on virtualisation and set the default pool */
@@ -2783,7 +3709,7 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 		 * mapping is done with 3 bits per priority,
 		 * so shift by i*3 each time
 		 */
-		queue_mapping |= ((cfg->dcb_queue[i] & 0x07) << (i * 3));
+		queue_mapping |= ((cfg->dcb_tc[i] & 0x07) << (i * 3));
 
 	IXGBE_WRITE_REG(hw, IXGBE_RTRUP2TC, queue_mapping);
 
@@ -2792,7 +3718,7 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 
 	/* VLNCTRL: enable vlan filtering and allow all vlan tags through */
 	vlanctrl = IXGBE_READ_REG(hw, IXGBE_VLNCTRL);
-	vlanctrl |= IXGBE_VLNCTRL_VFE ; /* enable vlan filters */
+	vlanctrl |= IXGBE_VLNCTRL_VFE; /* enable vlan filters */
 	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlanctrl);
 
 	/* VFTA - enable all vlan filters */
@@ -2801,7 +3727,7 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 	}
 
 	/* VFRE: pool enabling for receive - 16 or 32 */
-	IXGBE_WRITE_REG(hw, IXGBE_VFRE(0), \
+	IXGBE_WRITE_REG(hw, IXGBE_VFRE(0),
 			num_pools == ETH_16_POOLS ? 0xFFFF : 0xFFFFFFFF);
 
 	/*
@@ -2814,7 +3740,7 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 	/* PFVLVF, PFVLVFB: set up filters for vlan tags as configured */
 	for (i = 0; i < cfg->nb_pool_maps; i++) {
 		/* set vlan id in VF register and set the valid bit */
-		IXGBE_WRITE_REG(hw, IXGBE_VLVF(i), (IXGBE_VLVF_VIEN | \
+		IXGBE_WRITE_REG(hw, IXGBE_VLVF(i), (IXGBE_VLVF_VIEN |
 				(cfg->pool_map[i].vlan_id & 0xFFF)));
 		/*
 		 * Put the allowed pools in VFB reg. As we only have 16 or 32
@@ -2827,15 +3753,15 @@ ixgbe_vmdq_dcb_configure(struct rte_eth_dev *dev)
 
 /**
  * ixgbe_dcb_config_tx_hw_config - Configure general DCB TX parameters
- * @hw: pointer to hardware structure
+ * @dev: pointer to eth_dev structure
  * @dcb_config: pointer to ixgbe_dcb_config structure
  */
 static void
-ixgbe_dcb_tx_hw_config(struct ixgbe_hw *hw,
-               struct ixgbe_dcb_config *dcb_config)
+ixgbe_dcb_tx_hw_config(struct rte_eth_dev *dev,
+		       struct ixgbe_dcb_config *dcb_config)
 {
 	uint32_t reg;
-	uint32_t q;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
 	PMD_INIT_FUNC_TRACE();
 	if (hw->mac.type != ixgbe_mac_82598EB) {
@@ -2847,18 +3773,12 @@ ixgbe_dcb_tx_hw_config(struct ixgbe_hw *hw,
 		/* Enable DCB for Tx with 8 TCs */
 		if (dcb_config->num_tcs.pg_tcs == 8) {
 			reg = IXGBE_MTQC_RT_ENA | IXGBE_MTQC_8TC_8TQ;
-		}
-		else {
+		} else {
 			reg = IXGBE_MTQC_RT_ENA | IXGBE_MTQC_4TC_4TQ;
 		}
 		if (dcb_config->vt_mode)
-	            reg |= IXGBE_MTQC_VT_ENA;
+			reg |= IXGBE_MTQC_VT_ENA;
 		IXGBE_WRITE_REG(hw, IXGBE_MTQC, reg);
-
-		/* Disable drop for all queues */
-		for (q = 0; q < 128; q++)
-			IXGBE_WRITE_REG(hw, IXGBE_QDE,
-	             (IXGBE_QDE_WRITE | (q << IXGBE_QDE_IDX_SHIFT)));
 
 		/* Enable the Tx desc arbiter */
 		reg = IXGBE_READ_REG(hw, IXGBE_RTTDCS);
@@ -2870,7 +3790,6 @@ ixgbe_dcb_tx_hw_config(struct ixgbe_hw *hw,
 		reg |= IXGBE_SECTX_DCB;
 		IXGBE_WRITE_REG(hw, IXGBE_SECTXMINIFG, reg);
 	}
-	return;
 }
 
 /**
@@ -2894,64 +3813,73 @@ ixgbe_vmdq_dcb_hw_tx_config(struct rte_eth_dev *dev,
 			vmdq_tx_conf->nb_queue_pools == ETH_16_POOLS ? 0xFFFF : 0xFFFFFFFF);
 
 	/*Configure general DCB TX parameters*/
-	ixgbe_dcb_tx_hw_config(hw,dcb_config);
-	return;
+	ixgbe_dcb_tx_hw_config(dev, dcb_config);
 }
 
 static void
 ixgbe_vmdq_dcb_rx_config(struct rte_eth_dev *dev,
-                        struct ixgbe_dcb_config *dcb_config)
+			struct ixgbe_dcb_config *dcb_config)
 {
 	struct rte_eth_vmdq_dcb_conf *vmdq_rx_conf =
 			&dev->data->dev_conf.rx_adv_conf.vmdq_dcb_conf;
 	struct ixgbe_dcb_tc_config *tc;
-	uint8_t i,j;
+	uint8_t i, j;
 
 	/* convert rte_eth_conf.rx_adv_conf to struct ixgbe_dcb_config */
-	if (vmdq_rx_conf->nb_queue_pools == ETH_16_POOLS ) {
+	if (vmdq_rx_conf->nb_queue_pools == ETH_16_POOLS) {
 		dcb_config->num_tcs.pg_tcs = ETH_8_TCS;
 		dcb_config->num_tcs.pfc_tcs = ETH_8_TCS;
-	}
-	else {
+	} else {
 		dcb_config->num_tcs.pg_tcs = ETH_4_TCS;
 		dcb_config->num_tcs.pfc_tcs = ETH_4_TCS;
 	}
+
+	/* Initialize User Priority to Traffic Class mapping */
+	for (j = 0; j < IXGBE_DCB_MAX_TRAFFIC_CLASS; j++) {
+		tc = &dcb_config->tc_config[j];
+		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap = 0;
+	}
+
 	/* User Priority to Traffic Class mapping */
 	for (i = 0; i < ETH_DCB_NUM_USER_PRIORITIES; i++) {
-		j = vmdq_rx_conf->dcb_queue[i];
+		j = vmdq_rx_conf->dcb_tc[i];
 		tc = &dcb_config->tc_config[j];
-		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap =
-						(uint8_t)(1 << j);
+		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap |=
+						(uint8_t)(1 << i);
 	}
 }
 
 static void
 ixgbe_dcb_vt_tx_config(struct rte_eth_dev *dev,
-                        struct ixgbe_dcb_config *dcb_config)
+			struct ixgbe_dcb_config *dcb_config)
 {
 	struct rte_eth_vmdq_dcb_tx_conf *vmdq_tx_conf =
 			&dev->data->dev_conf.tx_adv_conf.vmdq_dcb_tx_conf;
 	struct ixgbe_dcb_tc_config *tc;
-	uint8_t i,j;
+	uint8_t i, j;
 
 	/* convert rte_eth_conf.rx_adv_conf to struct ixgbe_dcb_config */
-	if (vmdq_tx_conf->nb_queue_pools == ETH_16_POOLS ) {
+	if (vmdq_tx_conf->nb_queue_pools == ETH_16_POOLS) {
 		dcb_config->num_tcs.pg_tcs = ETH_8_TCS;
 		dcb_config->num_tcs.pfc_tcs = ETH_8_TCS;
-	}
-	else {
+	} else {
 		dcb_config->num_tcs.pg_tcs = ETH_4_TCS;
 		dcb_config->num_tcs.pfc_tcs = ETH_4_TCS;
 	}
 
+	/* Initialize User Priority to Traffic Class mapping */
+	for (j = 0; j < IXGBE_DCB_MAX_TRAFFIC_CLASS; j++) {
+		tc = &dcb_config->tc_config[j];
+		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap = 0;
+	}
+
 	/* User Priority to Traffic Class mapping */
 	for (i = 0; i < ETH_DCB_NUM_USER_PRIORITIES; i++) {
-		j = vmdq_tx_conf->dcb_queue[i];
+		j = vmdq_tx_conf->dcb_tc[i];
 		tc = &dcb_config->tc_config[j];
-		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap =
-						(uint8_t)(1 << j);
+		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap |=
+						(uint8_t)(1 << i);
 	}
-	return;
 }
 
 static void
@@ -2961,17 +3889,23 @@ ixgbe_dcb_rx_config(struct rte_eth_dev *dev,
 	struct rte_eth_dcb_rx_conf *rx_conf =
 			&dev->data->dev_conf.rx_adv_conf.dcb_rx_conf;
 	struct ixgbe_dcb_tc_config *tc;
-	uint8_t i,j;
+	uint8_t i, j;
 
 	dcb_config->num_tcs.pg_tcs = (uint8_t)rx_conf->nb_tcs;
 	dcb_config->num_tcs.pfc_tcs = (uint8_t)rx_conf->nb_tcs;
 
+	/* Initialize User Priority to Traffic Class mapping */
+	for (j = 0; j < IXGBE_DCB_MAX_TRAFFIC_CLASS; j++) {
+		tc = &dcb_config->tc_config[j];
+		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap = 0;
+	}
+
 	/* User Priority to Traffic Class mapping */
 	for (i = 0; i < ETH_DCB_NUM_USER_PRIORITIES; i++) {
-		j = rx_conf->dcb_queue[i];
+		j = rx_conf->dcb_tc[i];
 		tc = &dcb_config->tc_config[j];
-		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap =
-						(uint8_t)(1 << j);
+		tc->path[IXGBE_DCB_RX_CONFIG].up_to_tc_bitmap |=
+						(uint8_t)(1 << i);
 	}
 }
 
@@ -2982,32 +3916,40 @@ ixgbe_dcb_tx_config(struct rte_eth_dev *dev,
 	struct rte_eth_dcb_tx_conf *tx_conf =
 			&dev->data->dev_conf.tx_adv_conf.dcb_tx_conf;
 	struct ixgbe_dcb_tc_config *tc;
-	uint8_t i,j;
+	uint8_t i, j;
 
 	dcb_config->num_tcs.pg_tcs = (uint8_t)tx_conf->nb_tcs;
 	dcb_config->num_tcs.pfc_tcs = (uint8_t)tx_conf->nb_tcs;
 
+	/* Initialize User Priority to Traffic Class mapping */
+	for (j = 0; j < IXGBE_DCB_MAX_TRAFFIC_CLASS; j++) {
+		tc = &dcb_config->tc_config[j];
+		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap = 0;
+	}
+
 	/* User Priority to Traffic Class mapping */
 	for (i = 0; i < ETH_DCB_NUM_USER_PRIORITIES; i++) {
-		j = tx_conf->dcb_queue[i];
+		j = tx_conf->dcb_tc[i];
 		tc = &dcb_config->tc_config[j];
-		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap =
-						(uint8_t)(1 << j);
+		tc->path[IXGBE_DCB_TX_CONFIG].up_to_tc_bitmap |=
+						(uint8_t)(1 << i);
 	}
 }
 
 /**
  * ixgbe_dcb_rx_hw_config - Configure general DCB RX HW parameters
- * @hw: pointer to hardware structure
+ * @dev: pointer to eth_dev structure
  * @dcb_config: pointer to ixgbe_dcb_config structure
  */
 static void
-ixgbe_dcb_rx_hw_config(struct ixgbe_hw *hw,
-               struct ixgbe_dcb_config *dcb_config)
+ixgbe_dcb_rx_hw_config(struct rte_eth_dev *dev,
+		       struct ixgbe_dcb_config *dcb_config)
 {
 	uint32_t reg;
 	uint32_t vlanctrl;
 	uint8_t i;
+	uint32_t q;
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
 	PMD_INIT_FUNC_TRACE();
 	/*
@@ -3024,9 +3966,13 @@ ixgbe_dcb_rx_hw_config(struct ixgbe_hw *hw,
 				reg = (reg & ~IXGBE_MRQC_MRQE_MASK) |
 					IXGBE_MRQC_VMDQRT4TCEN;
 			else {
+				/* no matter the mode is DCB or DCB_RSS, just
+				 * set the MRQE to RSSXTCEN. RSS is controlled
+				 * by RSS_FIELD
+				 */
 				IXGBE_WRITE_REG(hw, IXGBE_VT_CTL, 0);
 				reg = (reg & ~IXGBE_MRQC_MRQE_MASK) |
-					IXGBE_MRQC_RT4TCEN;
+					IXGBE_MRQC_RTRSS4TCEN;
 			}
 		}
 		if (dcb_config->num_tcs.pg_tcs == 8) {
@@ -3036,16 +3982,31 @@ ixgbe_dcb_rx_hw_config(struct ixgbe_hw *hw,
 			else {
 				IXGBE_WRITE_REG(hw, IXGBE_VT_CTL, 0);
 				reg = (reg & ~IXGBE_MRQC_MRQE_MASK) |
-					IXGBE_MRQC_RT8TCEN;
+					IXGBE_MRQC_RTRSS8TCEN;
 			}
 		}
 
 		IXGBE_WRITE_REG(hw, IXGBE_MRQC, reg);
+
+		if (RTE_ETH_DEV_SRIOV(dev).active == 0) {
+			/* Disable drop for all queues in VMDQ mode*/
+			for (q = 0; q < IXGBE_MAX_RX_QUEUE_NUM; q++)
+				IXGBE_WRITE_REG(hw, IXGBE_QDE,
+						(IXGBE_QDE_WRITE |
+						 (q << IXGBE_QDE_IDX_SHIFT)));
+		} else {
+			/* Enable drop for all queues in SRIOV mode */
+			for (q = 0; q < IXGBE_MAX_RX_QUEUE_NUM; q++)
+				IXGBE_WRITE_REG(hw, IXGBE_QDE,
+						(IXGBE_QDE_WRITE |
+						 (q << IXGBE_QDE_IDX_SHIFT) |
+						 IXGBE_QDE_ENABLE));
+		}
 	}
 
 	/* VLNCTRL: enable vlan filtering and allow all vlan tags through */
 	vlanctrl = IXGBE_READ_REG(hw, IXGBE_VLNCTRL);
-	vlanctrl |= IXGBE_VLNCTRL_VFE ; /* enable vlan filters */
+	vlanctrl |= IXGBE_VLNCTRL_VFE; /* enable vlan filters */
 	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlanctrl);
 
 	/* VFTA - enable all vlan filters */
@@ -3059,13 +4020,11 @@ ixgbe_dcb_rx_hw_config(struct ixgbe_hw *hw,
 	 */
 	reg = IXGBE_RTRPCS_RRM | IXGBE_RTRPCS_RAC;
 	IXGBE_WRITE_REG(hw, IXGBE_RTRPCS, reg);
-
-	return;
 }
 
 static void
 ixgbe_dcb_hw_arbite_rx_config(struct ixgbe_hw *hw, uint16_t *refill,
-			uint16_t *max,uint8_t *bwg_id, uint8_t *tsa, uint8_t *map)
+			uint16_t *max, uint8_t *bwg_id, uint8_t *tsa, uint8_t *map)
 {
 	switch (hw->mac.type) {
 	case ixgbe_mac_82598EB:
@@ -3075,6 +4034,7 @@ ixgbe_dcb_hw_arbite_rx_config(struct ixgbe_hw *hw, uint16_t *refill,
 	case ixgbe_mac_X540:
 	case ixgbe_mac_X550:
 	case ixgbe_mac_X550EM_x:
+	case ixgbe_mac_X550EM_a:
 		ixgbe_dcb_config_rx_arbiter_82599(hw, refill, max, bwg_id,
 						  tsa, map);
 		break;
@@ -3089,15 +4049,16 @@ ixgbe_dcb_hw_arbite_tx_config(struct ixgbe_hw *hw, uint16_t *refill, uint16_t *m
 {
 	switch (hw->mac.type) {
 	case ixgbe_mac_82598EB:
-		ixgbe_dcb_config_tx_desc_arbiter_82598(hw, refill, max, bwg_id,tsa);
-		ixgbe_dcb_config_tx_data_arbiter_82598(hw, refill, max, bwg_id,tsa);
+		ixgbe_dcb_config_tx_desc_arbiter_82598(hw, refill, max, bwg_id, tsa);
+		ixgbe_dcb_config_tx_data_arbiter_82598(hw, refill, max, bwg_id, tsa);
 		break;
 	case ixgbe_mac_82599EB:
 	case ixgbe_mac_X540:
 	case ixgbe_mac_X550:
 	case ixgbe_mac_X550EM_x:
-		ixgbe_dcb_config_tx_desc_arbiter_82599(hw, refill, max, bwg_id,tsa);
-		ixgbe_dcb_config_tx_data_arbiter_82599(hw, refill, max, bwg_id,tsa, map);
+	case ixgbe_mac_X550EM_a:
+		ixgbe_dcb_config_tx_desc_arbiter_82599(hw, refill, max, bwg_id, tsa);
+		ixgbe_dcb_config_tx_data_arbiter_82599(hw, refill, max, bwg_id, tsa, map);
 		break;
 	default:
 		break;
@@ -3118,8 +4079,8 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 			struct ixgbe_dcb_config *dcb_config)
 {
 	int     ret = 0;
-	uint8_t i,pfc_en,nb_tcs;
-	uint16_t pbsize;
+	uint8_t i, pfc_en, nb_tcs;
+	uint16_t pbsize, rx_buffer_size;
 	uint8_t config_dcb_rx = 0;
 	uint8_t config_dcb_tx = 0;
 	uint8_t tsa[IXGBE_DCB_MAX_TRAFFIC_CLASS] = {0};
@@ -3128,11 +4089,14 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 	uint16_t max[IXGBE_DCB_MAX_TRAFFIC_CLASS] = {0};
 	uint8_t map[IXGBE_DCB_MAX_TRAFFIC_CLASS] = {0};
 	struct ixgbe_dcb_tc_config *tc;
-	uint32_t max_frame = dev->data->mtu + ETHER_HDR_LEN + ETHER_CRC_LEN;
+	uint32_t max_frame = dev->data->mtu + RTE_ETHER_HDR_LEN +
+		RTE_ETHER_CRC_LEN;
 	struct ixgbe_hw *hw =
 			IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct ixgbe_bw_conf *bw_conf =
+		IXGBE_DEV_PRIVATE_TO_BW_CONF(dev->data->dev_private);
 
-	switch(dev->data->dev_conf.rxmode.mq_mode){
+	switch (dev->data->dev_conf.rxmode.mq_mode) {
 	case ETH_MQ_RX_VMDQ_DCB:
 		dcb_config->vt_mode = true;
 		if (hw->mac.type != ixgbe_mac_82598EB) {
@@ -3141,18 +4105,19 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 			 *get dcb and VT rx configuration parameters
 			 *from rte_eth_conf
 			 */
-			ixgbe_vmdq_dcb_rx_config(dev,dcb_config);
+			ixgbe_vmdq_dcb_rx_config(dev, dcb_config);
 			/*Configure general VMDQ and DCB RX parameters*/
 			ixgbe_vmdq_dcb_configure(dev);
 		}
 		break;
 	case ETH_MQ_RX_DCB:
+	case ETH_MQ_RX_DCB_RSS:
 		dcb_config->vt_mode = false;
 		config_dcb_rx = DCB_RX_CONFIG;
 		/* Get dcb TX configuration parameters from rte_eth_conf */
-		ixgbe_dcb_rx_config(dev,dcb_config);
+		ixgbe_dcb_rx_config(dev, dcb_config);
 		/*Configure general DCB RX parameters*/
-		ixgbe_dcb_rx_hw_config(hw, dcb_config);
+		ixgbe_dcb_rx_hw_config(dev, dcb_config);
 		break;
 	default:
 		PMD_INIT_LOG(ERR, "Incorrect DCB RX mode configuration");
@@ -3162,19 +4127,21 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 	case ETH_MQ_TX_VMDQ_DCB:
 		dcb_config->vt_mode = true;
 		config_dcb_tx = DCB_TX_CONFIG;
-		/* get DCB and VT TX configuration parameters from rte_eth_conf */
-		ixgbe_dcb_vt_tx_config(dev,dcb_config);
+		/* get DCB and VT TX configuration parameters
+		 * from rte_eth_conf
+		 */
+		ixgbe_dcb_vt_tx_config(dev, dcb_config);
 		/*Configure general VMDQ and DCB TX parameters*/
-		ixgbe_vmdq_dcb_hw_tx_config(dev,dcb_config);
+		ixgbe_vmdq_dcb_hw_tx_config(dev, dcb_config);
 		break;
 
 	case ETH_MQ_TX_DCB:
 		dcb_config->vt_mode = false;
 		config_dcb_tx = DCB_TX_CONFIG;
 		/*get DCB TX configuration parameters from rte_eth_conf*/
-		ixgbe_dcb_tx_config(dev,dcb_config);
+		ixgbe_dcb_tx_config(dev, dcb_config);
 		/*Configure general DCB TX parameters*/
-		ixgbe_dcb_tx_hw_config(hw, dcb_config);
+		ixgbe_dcb_tx_hw_config(dev, dcb_config);
 		break;
 	default:
 		PMD_INIT_LOG(ERR, "Incorrect DCB TX mode configuration");
@@ -3184,12 +4151,13 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 	nb_tcs = dcb_config->num_tcs.pfc_tcs;
 	/* Unpack map */
 	ixgbe_dcb_unpack_map_cee(dcb_config, IXGBE_DCB_RX_CONFIG, map);
-	if(nb_tcs == ETH_4_TCS) {
+	if (nb_tcs == ETH_4_TCS) {
 		/* Avoid un-configured priority mapping to TC0 */
 		uint8_t j = 4;
 		uint8_t mask = 0xFF;
+
 		for (i = 0; i < ETH_DCB_NUM_USER_PRIORITIES - 4; i++)
-			mask = (uint8_t)(mask & (~ (1 << map[i])));
+			mask = (uint8_t)(mask & (~(1 << map[i])));
 		for (i = 0; mask && (i < IXGBE_DCB_MAX_TRAFFIC_CLASS); i++) {
 			if ((mask & 0x1) && (j < ETH_DCB_NUM_USER_PRIORITIES))
 				map[j++] = i;
@@ -3198,8 +4166,9 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 		/* Re-configure 4 TCs BW */
 		for (i = 0; i < nb_tcs; i++) {
 			tc = &dcb_config->tc_config[i];
-			tc->path[IXGBE_DCB_TX_CONFIG].bwg_percent =
-						(uint8_t)(100 / nb_tcs);
+			if (bw_conf->tc_num != nb_tcs)
+				tc->path[IXGBE_DCB_TX_CONFIG].bwg_percent =
+					(uint8_t)(100 / nb_tcs);
 			tc->path[IXGBE_DCB_RX_CONFIG].bwg_percent =
 						(uint8_t)(100 / nb_tcs);
 		}
@@ -3208,13 +4177,35 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 			tc->path[IXGBE_DCB_TX_CONFIG].bwg_percent = 0;
 			tc->path[IXGBE_DCB_RX_CONFIG].bwg_percent = 0;
 		}
+	} else {
+		/* Re-configure 8 TCs BW */
+		for (i = 0; i < nb_tcs; i++) {
+			tc = &dcb_config->tc_config[i];
+			if (bw_conf->tc_num != nb_tcs)
+				tc->path[IXGBE_DCB_TX_CONFIG].bwg_percent =
+					(uint8_t)(100 / nb_tcs + (i & 1));
+			tc->path[IXGBE_DCB_RX_CONFIG].bwg_percent =
+				(uint8_t)(100 / nb_tcs + (i & 1));
+		}
 	}
 
-	if(config_dcb_rx) {
+	switch (hw->mac.type) {
+	case ixgbe_mac_X550:
+	case ixgbe_mac_X550EM_x:
+	case ixgbe_mac_X550EM_a:
+		rx_buffer_size = X550_RX_BUFFER_SIZE;
+		break;
+	default:
+		rx_buffer_size = NIC_RX_BUFFER_SIZE;
+		break;
+	}
+
+	if (config_dcb_rx) {
 		/* Set RX buffer size */
-		pbsize = (uint16_t)(NIC_RX_BUFFER_SIZE / nb_tcs);
+		pbsize = (uint16_t)(rx_buffer_size / nb_tcs);
 		uint32_t rxpbsize = pbsize << IXGBE_RXPBSIZE_SHIFT;
-		for (i = 0 ; i < nb_tcs; i++) {
+
+		for (i = 0; i < nb_tcs; i++) {
 			IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), rxpbsize);
 		}
 		/* zero alloc all unused TCs */
@@ -3222,10 +4213,13 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 			IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), 0);
 		}
 	}
-	if(config_dcb_tx) {
-		/* Only support an equally distributed Tx packet buffer strategy. */
+	if (config_dcb_tx) {
+		/* Only support an equally distributed
+		 *  Tx packet buffer strategy.
+		 */
 		uint32_t txpktsize = IXGBE_TXPBSIZE_MAX / nb_tcs;
 		uint32_t txpbthresh = (txpktsize / DCB_TX_PB) - IXGBE_TXPKT_SIZE_MAX;
+
 		for (i = 0; i < nb_tcs; i++) {
 			IXGBE_WRITE_REG(hw, IXGBE_TXPBSIZE(i), txpktsize);
 			IXGBE_WRITE_REG(hw, IXGBE_TXPBTHRESH(i), txpbthresh);
@@ -3238,50 +4232,50 @@ ixgbe_dcb_hw_configure(struct rte_eth_dev *dev,
 	}
 
 	/*Calculates traffic class credits*/
-	ixgbe_dcb_calculate_tc_credits_cee(hw, dcb_config,max_frame,
+	ixgbe_dcb_calculate_tc_credits_cee(hw, dcb_config, max_frame,
 				IXGBE_DCB_TX_CONFIG);
-	ixgbe_dcb_calculate_tc_credits_cee(hw, dcb_config,max_frame,
+	ixgbe_dcb_calculate_tc_credits_cee(hw, dcb_config, max_frame,
 				IXGBE_DCB_RX_CONFIG);
 
-	if(config_dcb_rx) {
+	if (config_dcb_rx) {
 		/* Unpack CEE standard containers */
 		ixgbe_dcb_unpack_refill_cee(dcb_config, IXGBE_DCB_RX_CONFIG, refill);
 		ixgbe_dcb_unpack_max_cee(dcb_config, max);
 		ixgbe_dcb_unpack_bwgid_cee(dcb_config, IXGBE_DCB_RX_CONFIG, bwgid);
 		ixgbe_dcb_unpack_tsa_cee(dcb_config, IXGBE_DCB_RX_CONFIG, tsa);
 		/* Configure PG(ETS) RX */
-		ixgbe_dcb_hw_arbite_rx_config(hw,refill,max,bwgid,tsa,map);
+		ixgbe_dcb_hw_arbite_rx_config(hw, refill, max, bwgid, tsa, map);
 	}
 
-	if(config_dcb_tx) {
+	if (config_dcb_tx) {
 		/* Unpack CEE standard containers */
 		ixgbe_dcb_unpack_refill_cee(dcb_config, IXGBE_DCB_TX_CONFIG, refill);
 		ixgbe_dcb_unpack_max_cee(dcb_config, max);
 		ixgbe_dcb_unpack_bwgid_cee(dcb_config, IXGBE_DCB_TX_CONFIG, bwgid);
 		ixgbe_dcb_unpack_tsa_cee(dcb_config, IXGBE_DCB_TX_CONFIG, tsa);
 		/* Configure PG(ETS) TX */
-		ixgbe_dcb_hw_arbite_tx_config(hw,refill,max,bwgid,tsa,map);
+		ixgbe_dcb_hw_arbite_tx_config(hw, refill, max, bwgid, tsa, map);
 	}
 
 	/*Configure queue statistics registers*/
 	ixgbe_dcb_config_tc_stats_82599(hw, dcb_config);
 
 	/* Check if the PFC is supported */
-	if(dev->data->dev_conf.dcb_capability_en & ETH_DCB_PFC_SUPPORT) {
-		pbsize = (uint16_t) (NIC_RX_BUFFER_SIZE / nb_tcs);
+	if (dev->data->dev_conf.dcb_capability_en & ETH_DCB_PFC_SUPPORT) {
+		pbsize = (uint16_t)(rx_buffer_size / nb_tcs);
 		for (i = 0; i < nb_tcs; i++) {
 			/*
 			* If the TC count is 8,and the default high_water is 48,
 			* the low_water is 16 as default.
 			*/
-			hw->fc.high_water[i] = (pbsize * 3 ) / 4;
+			hw->fc.high_water[i] = (pbsize * 3) / 4;
 			hw->fc.low_water[i] = pbsize / 4;
 			/* Enable pfc for this TC */
 			tc = &dcb_config->tc_config[i];
 			tc->pfc = ixgbe_dcb_pfc_enabled;
 		}
 		ixgbe_dcb_unpack_pfc_cee(dcb_config, map, &pfc_en);
-		if(dcb_config->num_tcs.pfc_tcs == ETH_4_TCS)
+		if (dcb_config->num_tcs.pfc_tcs == ETH_4_TCS)
 			pfc_en &= 0x0F;
 		ret = ixgbe_dcb_config_pfc(hw, pfc_en, map);
 	}
@@ -3303,16 +4297,15 @@ void ixgbe_configure_dcb(struct rte_eth_dev *dev)
 
 	/* check support mq_mode for DCB */
 	if ((dev_conf->rxmode.mq_mode != ETH_MQ_RX_VMDQ_DCB) &&
-	    (dev_conf->rxmode.mq_mode != ETH_MQ_RX_DCB))
+	    (dev_conf->rxmode.mq_mode != ETH_MQ_RX_DCB) &&
+	    (dev_conf->rxmode.mq_mode != ETH_MQ_RX_DCB_RSS))
 		return;
 
-	if (dev->data->nb_rx_queues != ETH_DCB_NUM_QUEUES)
+	if (dev->data->nb_rx_queues > ETH_DCB_NUM_QUEUES)
 		return;
 
 	/** Configure DCB hardware **/
-	ixgbe_dcb_hw_configure(dev,dcb_cfg);
-
-	return;
+	ixgbe_dcb_hw_configure(dev, dcb_cfg);
 }
 
 /*
@@ -3355,7 +4348,7 @@ ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 
 	/* VLNCTRL: enable vlan filtering and allow all vlan tags through */
 	vlanctrl = IXGBE_READ_REG(hw, IXGBE_VLNCTRL);
-	vlanctrl |= IXGBE_VLNCTRL_VFE ; /* enable vlan filters */
+	vlanctrl |= IXGBE_VLNCTRL_VFE; /* enable vlan filters */
 	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlanctrl);
 
 	/* VFTA - enable all vlan filters */
@@ -3377,7 +4370,7 @@ ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 	/* PFVLVF, PFVLVFB: set up filters for vlan tags as configured */
 	for (i = 0; i < cfg->nb_pool_maps; i++) {
 		/* set vlan id in VF register and set the valid bit */
-		IXGBE_WRITE_REG(hw, IXGBE_VLVF(i), (IXGBE_VLVF_VIEN | \
+		IXGBE_WRITE_REG(hw, IXGBE_VLVF(i), (IXGBE_VLVF_VIEN |
 				(cfg->pool_map[i].vlan_id & IXGBE_RXD_VLAN_ID_MASK)));
 		/*
 		 * Put the allowed pools in VFB reg. As we only have 16 or 64
@@ -3385,12 +4378,11 @@ ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 		 * i.e. bits 0-31
 		 */
 		if (((cfg->pool_map[i].pools >> 32) & UINT32_MAX) == 0)
-			IXGBE_WRITE_REG(hw, IXGBE_VLVFB(i*2), \
+			IXGBE_WRITE_REG(hw, IXGBE_VLVFB(i * 2),
 					(cfg->pool_map[i].pools & UINT32_MAX));
 		else
-			IXGBE_WRITE_REG(hw, IXGBE_VLVFB((i*2+1)), \
-					((cfg->pool_map[i].pools >> 32) \
-					& UINT32_MAX));
+			IXGBE_WRITE_REG(hw, IXGBE_VLVFB((i * 2 + 1)),
+					((cfg->pool_map[i].pools >> 32) & UINT32_MAX));
 
 	}
 
@@ -3430,7 +4422,7 @@ ixgbe_vmdq_tx_hw_configure(struct ixgbe_hw *hw)
 	/* Disable drop for all queues */
 	for (q = 0; q < IXGBE_MAX_RX_QUEUE_NUM; q++)
 		IXGBE_WRITE_REG(hw, IXGBE_QDE,
-	          (IXGBE_QDE_WRITE | (q << IXGBE_QDE_IDX_SHIFT)));
+		  (IXGBE_QDE_WRITE | (q << IXGBE_QDE_IDX_SHIFT)));
 
 	/* Enable the Tx desc arbiter */
 	reg = IXGBE_READ_REG(hw, IXGBE_RTTDCS);
@@ -3438,37 +4430,33 @@ ixgbe_vmdq_tx_hw_configure(struct ixgbe_hw *hw)
 	IXGBE_WRITE_REG(hw, IXGBE_RTTDCS, reg);
 
 	IXGBE_WRITE_FLUSH(hw);
-
-	return;
 }
 
-static int __attribute__((cold))
+static int __rte_cold
 ixgbe_alloc_rx_queue_mbufs(struct ixgbe_rx_queue *rxq)
 {
 	struct ixgbe_rx_entry *rxe = rxq->sw_ring;
 	uint64_t dma_addr;
-	unsigned i;
+	unsigned int i;
 
 	/* Initialize software ring entries */
 	for (i = 0; i < rxq->nb_rx_desc; i++) {
 		volatile union ixgbe_adv_rx_desc *rxd;
-		struct rte_mbuf *mbuf = rte_rxmbuf_alloc(rxq->mb_pool);
+		struct rte_mbuf *mbuf = rte_mbuf_raw_alloc(rxq->mb_pool);
+
 		if (mbuf == NULL) {
 			PMD_INIT_LOG(ERR, "RX mbuf alloc failed queue_id=%u",
 				     (unsigned) rxq->queue_id);
-			return (-ENOMEM);
+			return -ENOMEM;
 		}
 
-		rte_mbuf_refcnt_set(mbuf, 1);
-		mbuf->next = NULL;
 		mbuf->data_off = RTE_PKTMBUF_HEADROOM;
-		mbuf->nb_segs = 1;
 		mbuf->port = rxq->port_id;
 
 		dma_addr =
-			rte_cpu_to_le_64(RTE_MBUF_DATA_DMA_ADDR_DEFAULT(mbuf));
+			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mbuf));
 		rxd = &rxq->rx_ring[i];
-		rxd->read.hdr_addr = dma_addr;
+		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
 	}
@@ -3552,38 +4540,45 @@ ixgbe_dev_mq_rx_configure(struct rte_eth_dev *dev)
 		 * any DCB/RSS w/o VMDq multi-queue setting
 		 */
 		switch (dev->data->dev_conf.rxmode.mq_mode) {
-			case ETH_MQ_RX_RSS:
-				ixgbe_rss_configure(dev);
-				break;
+		case ETH_MQ_RX_RSS:
+		case ETH_MQ_RX_DCB_RSS:
+		case ETH_MQ_RX_VMDQ_RSS:
+			ixgbe_rss_configure(dev);
+			break;
 
-			case ETH_MQ_RX_VMDQ_DCB:
-				ixgbe_vmdq_dcb_configure(dev);
-				break;
+		case ETH_MQ_RX_VMDQ_DCB:
+			ixgbe_vmdq_dcb_configure(dev);
+			break;
 
-			case ETH_MQ_RX_VMDQ_ONLY:
-				ixgbe_vmdq_rx_hw_configure(dev);
-				break;
+		case ETH_MQ_RX_VMDQ_ONLY:
+			ixgbe_vmdq_rx_hw_configure(dev);
+			break;
 
-			case ETH_MQ_RX_NONE:
-				/* if mq_mode is none, disable rss mode.*/
-			default: ixgbe_rss_disable(dev);
+		case ETH_MQ_RX_NONE:
+		default:
+			/* if mq_mode is none, disable rss mode.*/
+			ixgbe_rss_disable(dev);
+			break;
 		}
 	} else {
-		/*
-		 * SRIOV active scheme
-		 * Support RSS together with VMDq & SRIOV
+		/* SRIOV active scheme
+		 * Support RSS together with SRIOV.
 		 */
 		switch (dev->data->dev_conf.rxmode.mq_mode) {
 		case ETH_MQ_RX_RSS:
 		case ETH_MQ_RX_VMDQ_RSS:
 			ixgbe_config_vf_rss(dev);
 			break;
-
-		/* FIXME if support DCB/RSS together with VMDq & SRIOV */
 		case ETH_MQ_RX_VMDQ_DCB:
+		case ETH_MQ_RX_DCB:
+		/* In SRIOV, the configuration is the same as VMDq case */
+			ixgbe_vmdq_dcb_configure(dev);
+			break;
+		/* DCB/RSS together with SRIOV is not supported */
 		case ETH_MQ_RX_VMDQ_DCB_RSS:
+		case ETH_MQ_RX_DCB_RSS:
 			PMD_INIT_LOG(ERR,
-				"Could not support DCB with VMDq & SRIOV");
+				"Could not support DCB/RSS with VMDq & SRIOV");
 			return -1;
 		default:
 			ixgbe_config_vf_default(dev);
@@ -3667,7 +4662,7 @@ ixgbe_get_rscctl_maxdesc(struct rte_mempool *pool)
 
 	/* MAXDESC * SRRCTL.BSIZEPKT must not exceed 64 KB minus one */
 	uint16_t maxdesc =
-		IPV4_MAX_PKT_LEN /
+		RTE_IPV4_MAX_PKT_LEN /
 			(mp_priv->mbuf_data_room_size - RTE_PKTMBUF_HEADROOM);
 
 	if (maxdesc >= 16)
@@ -3737,11 +4732,11 @@ ixgbe_set_ivar(struct rte_eth_dev *dev, u8 entry, u8 vector, s8 type)
 	}
 }
 
-void __attribute__((cold))
+void __rte_cold
 ixgbe_set_rx_function(struct rte_eth_dev *dev)
 {
-	struct ixgbe_adapter *adapter =
-		(struct ixgbe_adapter *)dev->data->dev_private;
+	uint16_t i, rx_using_sse;
+	struct ixgbe_adapter *adapter = dev->data->dev_private;
 
 	/*
 	 * In order to allow Vector Rx there are a few configuration
@@ -3750,8 +4745,7 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 	if (ixgbe_rx_vec_dev_conf_condition_check(dev) ||
 	    !adapter->rx_bulk_alloc_allowed) {
 		PMD_INIT_LOG(DEBUG, "Port[%d] doesn't meet Vector Rx "
-				    "preconditions or RTE_IXGBE_INC_VECTOR is "
-				    "not enabled",
+				    "preconditions",
 			     dev->data->port_id);
 
 		adapter->rx_vec_allowed = false;
@@ -3766,11 +4760,11 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 	 */
 	if (dev->data->lro) {
 		if (adapter->rx_bulk_alloc_allowed) {
-			PMD_INIT_LOG(INFO, "LRO is requested. Using a bulk "
+			PMD_INIT_LOG(DEBUG, "LRO is requested. Using a bulk "
 					   "allocation version");
 			dev->rx_pkt_burst = ixgbe_recv_pkts_lro_bulk_alloc;
 		} else {
-			PMD_INIT_LOG(INFO, "LRO is requested. Using a single "
+			PMD_INIT_LOG(DEBUG, "LRO is requested. Using a single "
 					   "allocation version");
 			dev->rx_pkt_burst = ixgbe_recv_pkts_lro_single_alloc;
 		}
@@ -3786,7 +4780,7 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 
 			dev->rx_pkt_burst = ixgbe_recv_scattered_pkts_vec;
 		} else if (adapter->rx_bulk_alloc_allowed) {
-			PMD_INIT_LOG(INFO, "Using a Scattered with bulk "
+			PMD_INIT_LOG(DEBUG, "Using a Scattered with bulk "
 					   "allocation callback (port=%d).",
 				     dev->data->port_id);
 			dev->rx_pkt_burst = ixgbe_recv_pkts_lro_bulk_alloc;
@@ -3808,8 +4802,10 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 	 *    - Single buffer allocation (the simplest one)
 	 */
 	} else if (adapter->rx_vec_allowed) {
-		PMD_INIT_LOG(INFO, "Vector rx enabled, please make sure RX "
-				   "burst size no less than 32.");
+		PMD_INIT_LOG(DEBUG, "Vector rx enabled, please make sure RX "
+				    "burst size no less than %d (port=%d).",
+			     RTE_IXGBE_DESCS_PER_LOOP,
+			     dev->data->port_id);
 
 		dev->rx_pkt_burst = ixgbe_recv_pkts_vec;
 	} else if (adapter->rx_bulk_alloc_allowed) {
@@ -3821,12 +4817,27 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 		dev->rx_pkt_burst = ixgbe_recv_pkts_bulk_alloc;
 	} else {
 		PMD_INIT_LOG(DEBUG, "Rx Burst Bulk Alloc Preconditions are not "
-				    "satisfied, or Scattered Rx is requested, "
-				    "or RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC "
-				    "is not enabled (port=%d).",
+				    "satisfied, or Scattered Rx is requested "
+				    "(port=%d).",
 			     dev->data->port_id);
 
 		dev->rx_pkt_burst = ixgbe_recv_pkts;
+	}
+
+	/* Propagate information about RX function choice through all queues. */
+
+	rx_using_sse =
+		(dev->rx_pkt_burst == ixgbe_recv_scattered_pkts_vec ||
+		dev->rx_pkt_burst == ixgbe_recv_pkts_vec);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++) {
+		struct ixgbe_rx_queue *rxq = dev->data->rx_queues[i];
+
+		rxq->rx_using_sse = rx_using_sse;
+#ifdef RTE_LIBRTE_SECURITY
+		rxq->using_ipsec = !!(dev->data->dev_conf.rxmode.offloads &
+				DEV_RX_OFFLOAD_SECURITY);
+#endif
 	}
 }
 
@@ -3849,13 +4860,14 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 	bool rsc_capable = false;
 	uint16_t i;
 	uint32_t rdrxctl;
+	uint32_t rfctl;
 
 	/* Sanity check */
 	dev->dev_ops->dev_infos_get(dev, &dev_info);
 	if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_LRO)
 		rsc_capable = true;
 
-	if (!rsc_capable && rx_conf->enable_lro) {
+	if (!rsc_capable && (rx_conf->offloads & DEV_RX_OFFLOAD_TCP_LRO)) {
 		PMD_INIT_LOG(CRIT, "LRO is requested on HW that doesn't "
 				   "support it");
 		return -EINVAL;
@@ -3863,7 +4875,8 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 
 	/* RSC global configuration (chapter 4.6.7.2.1 of 82599 Spec) */
 
-	if (!rx_conf->hw_strip_crc && rx_conf->enable_lro) {
+	if ((rx_conf->offloads & DEV_RX_OFFLOAD_KEEP_CRC) &&
+	     (rx_conf->offloads & DEV_RX_OFFLOAD_TCP_LRO)) {
 		/*
 		 * According to chapter of 4.6.7.2.1 of the Spec Rev.
 		 * 3.0 RSC configuration requires HW CRC stripping being
@@ -3876,24 +4889,21 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 	}
 
 	/* RFCTL configuration  */
-	if (rsc_capable) {
-		uint32_t rfctl = IXGBE_READ_REG(hw, IXGBE_RFCTL);
-		if (rx_conf->enable_lro)
-			/*
-			 * Since NFS packets coalescing is not supported - clear
-			 * RFCTL.NFSW_DIS and RFCTL.NFSR_DIS when RSC is
-			 * enabled.
-			 */
-			rfctl &= ~(IXGBE_RFCTL_RSC_DIS | IXGBE_RFCTL_NFSW_DIS |
-				   IXGBE_RFCTL_NFSR_DIS);
-		else
-			rfctl |= IXGBE_RFCTL_RSC_DIS;
-
-		IXGBE_WRITE_REG(hw, IXGBE_RFCTL, rfctl);
-	}
+	rfctl = IXGBE_READ_REG(hw, IXGBE_RFCTL);
+	if ((rsc_capable) && (rx_conf->offloads & DEV_RX_OFFLOAD_TCP_LRO))
+		/*
+		 * Since NFS packets coalescing is not supported - clear
+		 * RFCTL.NFSW_DIS and RFCTL.NFSR_DIS when RSC is
+		 * enabled.
+		 */
+		rfctl &= ~(IXGBE_RFCTL_RSC_DIS | IXGBE_RFCTL_NFSW_DIS |
+			   IXGBE_RFCTL_NFSR_DIS);
+	else
+		rfctl |= IXGBE_RFCTL_RSC_DIS;
+	IXGBE_WRITE_REG(hw, IXGBE_RFCTL, rfctl);
 
 	/* If LRO hasn't been requested - we are done here. */
-	if (!rx_conf->enable_lro)
+	if (!(rx_conf->offloads & DEV_RX_OFFLOAD_TCP_LRO))
 		return 0;
 
 	/* Set RDRXCTL.RSCACKC bit */
@@ -3950,7 +4960,8 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 		 * at most 500us latency for a single RSC aggregation.
 		 */
 		eitr &= ~IXGBE_EITR_ITR_INT_MASK;
-		eitr |= IXGBE_EITR_INTERVAL_US(500) | IXGBE_EITR_CNT_WDIS;
+		eitr |= IXGBE_EITR_INTERVAL_US(IXGBE_QUEUE_ITR_INTERVAL_DEFAULT);
+		eitr |= IXGBE_EITR_CNT_WDIS;
 
 		IXGBE_WRITE_REG(hw, IXGBE_SRRCTL(rxq->reg_idx), srrctl);
 		IXGBE_WRITE_REG(hw, IXGBE_RSCCTL(rxq->reg_idx), rscctl);
@@ -3966,7 +4977,7 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 
 	dev->data->lro = 1;
 
-	PMD_INIT_LOG(INFO, "enabling LRO mode");
+	PMD_INIT_LOG(DEBUG, "enabling LRO mode");
 
 	return 0;
 }
@@ -3974,7 +4985,7 @@ ixgbe_set_rsc(struct rte_eth_dev *dev)
 /*
  * Initializes Receive Unit.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
@@ -4013,15 +5024,15 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 	 * Configure CRC stripping, if any.
 	 */
 	hlreg0 = IXGBE_READ_REG(hw, IXGBE_HLREG0);
-	if (rx_conf->hw_strip_crc)
-		hlreg0 |= IXGBE_HLREG0_RXCRCSTRP;
-	else
+	if (rx_conf->offloads & DEV_RX_OFFLOAD_KEEP_CRC)
 		hlreg0 &= ~IXGBE_HLREG0_RXCRCSTRP;
+	else
+		hlreg0 |= IXGBE_HLREG0_RXCRCSTRP;
 
 	/*
 	 * Configure jumbo frame support, if any.
 	 */
-	if (rx_conf->jumbo_frame == 1) {
+	if (rx_conf->offloads & DEV_RX_OFFLOAD_JUMBO_FRAME) {
 		hlreg0 |= IXGBE_HLREG0_JUMBOEN;
 		maxfrs = IXGBE_READ_REG(hw, IXGBE_MAXFRS);
 		maxfrs &= 0x0000FFFF;
@@ -4031,16 +5042,26 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		hlreg0 &= ~IXGBE_HLREG0_JUMBOEN;
 
 	/*
-	 * If loopback mode is configured for 82599, set LPBK bit.
+	 * If loopback mode is configured, set LPBK bit.
 	 */
-	if (hw->mac.type == ixgbe_mac_82599EB &&
-			dev->data->dev_conf.lpbk_mode == IXGBE_LPBK_82599_TX_RX)
+	if (dev->data->dev_conf.lpbk_mode != 0) {
+		rc = ixgbe_check_supported_loopback_mode(dev);
+		if (rc < 0) {
+			PMD_INIT_LOG(ERR, "Unsupported loopback mode");
+			return rc;
+		}
 		hlreg0 |= IXGBE_HLREG0_LPBK;
-	else
+	} else {
 		hlreg0 &= ~IXGBE_HLREG0_LPBK;
+	}
 
 	IXGBE_WRITE_REG(hw, IXGBE_HLREG0, hlreg0);
 
+	/*
+	 * Assume no header split and no VLAN strip support
+	 * on any Rx queue first .
+	 */
+	rx_conf->offloads &= ~DEV_RX_OFFLOAD_VLAN_STRIP;
 	/* Setup RX queues */
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		rxq = dev->data->rx_queues[i];
@@ -4049,7 +5070,10 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		 * Reset crc_len in case it was changed after queue setup by a
 		 * call to configure.
 		 */
-		rxq->crc_len = rx_conf->hw_strip_crc ? 0 : ETHER_CRC_LEN;
+		if (rx_conf->offloads & DEV_RX_OFFLOAD_KEEP_CRC)
+			rxq->crc_len = RTE_ETHER_CRC_LEN;
+		else
+			rxq->crc_len = 0;
 
 		/* Setup the Base and Length of the Rx Descriptor Rings */
 		bus_addr = rxq->rx_ring_phys_addr;
@@ -4063,27 +5087,7 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		IXGBE_WRITE_REG(hw, IXGBE_RDT(rxq->reg_idx), 0);
 
 		/* Configure the SRRCTL register */
-#ifdef RTE_HEADER_SPLIT_ENABLE
-		/*
-		 * Configure Header Split
-		 */
-		if (rx_conf->header_split) {
-			if (hw->mac.type == ixgbe_mac_82599EB) {
-				/* Must setup the PSRTYPE register */
-				uint32_t psrtype;
-				psrtype = IXGBE_PSRTYPE_TCPHDR |
-					IXGBE_PSRTYPE_UDPHDR   |
-					IXGBE_PSRTYPE_IPV4HDR  |
-					IXGBE_PSRTYPE_IPV6HDR;
-				IXGBE_WRITE_REG(hw, IXGBE_PSRTYPE(rxq->reg_idx), psrtype);
-			}
-			srrctl = ((rx_conf->split_hdr_size <<
-				IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT) &
-				IXGBE_SRRCTL_BSIZEHDR_MASK);
-			srrctl |= IXGBE_SRRCTL_DESCTYPE_HDR_SPLIT_ALWAYS;
-		} else
-#endif
-			srrctl = IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
+		srrctl = IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 
 		/* Set if packets are dropped when no descriptors available */
 		if (rxq->drop_en)
@@ -4109,9 +5113,11 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		if (dev->data->dev_conf.rxmode.max_rx_pkt_len +
 					    2 * IXGBE_VLAN_TAG_SIZE > buf_size)
 			dev->data->scattered_rx = 1;
+		if (rxq->offloads & DEV_RX_OFFLOAD_VLAN_STRIP)
+			rx_conf->offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
 	}
 
-	if (rx_conf->enable_scatter)
+	if (rx_conf->offloads & DEV_RX_OFFLOAD_SCATTER)
 		dev->data->scattered_rx = 1;
 
 	/*
@@ -4126,7 +5132,7 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 	 */
 	rxcsum = IXGBE_READ_REG(hw, IXGBE_RXCSUM);
 	rxcsum |= IXGBE_RXCSUM_PCSD;
-	if (rx_conf->hw_ip_checksum)
+	if (rx_conf->offloads & DEV_RX_OFFLOAD_CHECKSUM)
 		rxcsum |= IXGBE_RXCSUM_IPPCSE;
 	else
 		rxcsum &= ~IXGBE_RXCSUM_IPPCSE;
@@ -4136,10 +5142,10 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 	if (hw->mac.type == ixgbe_mac_82599EB ||
 	    hw->mac.type == ixgbe_mac_X540) {
 		rdrxctl = IXGBE_READ_REG(hw, IXGBE_RDRXCTL);
-		if (rx_conf->hw_strip_crc)
-			rdrxctl |= IXGBE_RDRXCTL_CRCSTRIP;
-		else
+		if (rx_conf->offloads & DEV_RX_OFFLOAD_KEEP_CRC)
 			rdrxctl &= ~IXGBE_RDRXCTL_CRCSTRIP;
+		else
+			rdrxctl |= IXGBE_RDRXCTL_CRCSTRIP;
 		rdrxctl &= ~IXGBE_RDRXCTL_RSCFRSTSIZE;
 		IXGBE_WRITE_REG(hw, IXGBE_RDRXCTL, rdrxctl);
 	}
@@ -4156,7 +5162,7 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 /*
  * Initializes Transmit Unit.
  */
-void __attribute__((cold))
+void __rte_cold
 ixgbe_dev_tx_init(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
@@ -4170,7 +5176,8 @@ ixgbe_dev_tx_init(struct rte_eth_dev *dev)
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
 	/* Enable TX CRC (checksum offload requirement) and hw padding
-	 * (TSO requirement) */
+	 * (TSO requirement)
+	 */
 	hlreg0 = IXGBE_READ_REG(hw, IXGBE_HLREG0);
 	hlreg0 |= (IXGBE_HLREG0_TXCRCEN | IXGBE_HLREG0_TXPADEN);
 	IXGBE_WRITE_REG(hw, IXGBE_HLREG0, hlreg0);
@@ -4195,25 +5202,26 @@ ixgbe_dev_tx_init(struct rte_eth_dev *dev)
 		 * bookkeeping if things aren't delivered in order.
 		 */
 		switch (hw->mac.type) {
-			case ixgbe_mac_82598EB:
-				txctrl = IXGBE_READ_REG(hw,
-							IXGBE_DCA_TXCTRL(txq->reg_idx));
-				txctrl &= ~IXGBE_DCA_TXCTRL_DESC_WRO_EN;
-				IXGBE_WRITE_REG(hw, IXGBE_DCA_TXCTRL(txq->reg_idx),
-						txctrl);
-				break;
+		case ixgbe_mac_82598EB:
+			txctrl = IXGBE_READ_REG(hw,
+						IXGBE_DCA_TXCTRL(txq->reg_idx));
+			txctrl &= ~IXGBE_DCA_TXCTRL_DESC_WRO_EN;
+			IXGBE_WRITE_REG(hw, IXGBE_DCA_TXCTRL(txq->reg_idx),
+					txctrl);
+			break;
 
-			case ixgbe_mac_82599EB:
-			case ixgbe_mac_X540:
-			case ixgbe_mac_X550:
-			case ixgbe_mac_X550EM_x:
-			default:
-				txctrl = IXGBE_READ_REG(hw,
+		case ixgbe_mac_82599EB:
+		case ixgbe_mac_X540:
+		case ixgbe_mac_X550:
+		case ixgbe_mac_X550EM_x:
+		case ixgbe_mac_X550EM_a:
+		default:
+			txctrl = IXGBE_READ_REG(hw,
 						IXGBE_DCA_TXCTRL_82599(txq->reg_idx));
-				txctrl &= ~IXGBE_DCA_TXCTRL_DESC_WRO_EN;
-				IXGBE_WRITE_REG(hw, IXGBE_DCA_TXCTRL_82599(txq->reg_idx),
-						txctrl);
-				break;
+			txctrl &= ~IXGBE_DCA_TXCTRL_DESC_WRO_EN;
+			IXGBE_WRITE_REG(hw, IXGBE_DCA_TXCTRL_82599(txq->reg_idx),
+					txctrl);
+			break;
 		}
 	}
 
@@ -4222,9 +5230,28 @@ ixgbe_dev_tx_init(struct rte_eth_dev *dev)
 }
 
 /*
+ * Check if requested loopback mode is supported
+ */
+int
+ixgbe_check_supported_loopback_mode(struct rte_eth_dev *dev)
+{
+	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	if (dev->data->dev_conf.lpbk_mode == IXGBE_LPBK_TX_RX)
+		if (hw->mac.type == ixgbe_mac_82599EB ||
+		     hw->mac.type == ixgbe_mac_X540 ||
+		     hw->mac.type == ixgbe_mac_X550 ||
+		     hw->mac.type == ixgbe_mac_X550EM_x ||
+		     hw->mac.type == ixgbe_mac_X550EM_a)
+			return 0;
+
+	return -ENOTSUP;
+}
+
+/*
  * Set up link for 82599 loopback mode Tx->Rx.
  */
-static inline void __attribute__((cold))
+static inline void __rte_cold
 ixgbe_setup_loopback_link_82599(struct ixgbe_hw *hw)
 {
 	PMD_INIT_FUNC_TRACE();
@@ -4252,7 +5279,7 @@ ixgbe_setup_loopback_link_82599(struct ixgbe_hw *hw)
 /*
  * Start Transmit and Receive Units.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_rxtx_start(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
@@ -4308,10 +5335,31 @@ ixgbe_dev_rxtx_start(struct rte_eth_dev *dev)
 	rxctrl |= IXGBE_RXCTRL_RXEN;
 	hw->mac.ops.enable_rx_dma(hw, rxctrl);
 
-	/* If loopback mode is enabled for 82599, set up the link accordingly */
-	if (hw->mac.type == ixgbe_mac_82599EB &&
-			dev->data->dev_conf.lpbk_mode == IXGBE_LPBK_82599_TX_RX)
-		ixgbe_setup_loopback_link_82599(hw);
+	/* If loopback mode is enabled, set up the link accordingly */
+	if (dev->data->dev_conf.lpbk_mode != 0) {
+		if (hw->mac.type == ixgbe_mac_82599EB)
+			ixgbe_setup_loopback_link_82599(hw);
+		else if (hw->mac.type == ixgbe_mac_X540 ||
+		     hw->mac.type == ixgbe_mac_X550 ||
+		     hw->mac.type == ixgbe_mac_X550EM_x ||
+		     hw->mac.type == ixgbe_mac_X550EM_a)
+			ixgbe_setup_loopback_link_x540_x550(hw, true);
+	}
+
+#ifdef RTE_LIBRTE_SECURITY
+	if ((dev->data->dev_conf.rxmode.offloads &
+			DEV_RX_OFFLOAD_SECURITY) ||
+		(dev->data->dev_conf.txmode.offloads &
+			DEV_TX_OFFLOAD_SECURITY)) {
+		ret = ixgbe_crypto_enable_ipsec(dev);
+		if (ret != 0) {
+			PMD_DRV_LOG(ERR,
+				    "ixgbe_crypto_enable_ipsec fails with %d.",
+				    ret);
+			return ret;
+		}
+	}
+#endif
 
 	return 0;
 }
@@ -4319,7 +5367,7 @@ ixgbe_dev_rxtx_start(struct rte_eth_dev *dev)
 /*
  * Start Receive Units for specified queue.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_rx_queue_start(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 {
 	struct ixgbe_hw     *hw;
@@ -4330,33 +5378,30 @@ ixgbe_dev_rx_queue_start(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
-	if (rx_queue_id < dev->data->nb_rx_queues) {
-		rxq = dev->data->rx_queues[rx_queue_id];
+	rxq = dev->data->rx_queues[rx_queue_id];
 
-		/* Allocate buffers for descriptor rings */
-		if (ixgbe_alloc_rx_queue_mbufs(rxq) != 0) {
-			PMD_INIT_LOG(ERR, "Could not alloc mbuf for queue:%d",
-				     rx_queue_id);
-			return -1;
-		}
-		rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
-		rxdctl |= IXGBE_RXDCTL_ENABLE;
-		IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(rxq->reg_idx), rxdctl);
-
-		/* Wait until RX Enable ready */
-		poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
-		do {
-			rte_delay_ms(1);
-			rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
-		} while (--poll_ms && !(rxdctl & IXGBE_RXDCTL_ENABLE));
-		if (!poll_ms)
-			PMD_INIT_LOG(ERR, "Could not enable Rx Queue %d",
-				     rx_queue_id);
-		rte_wmb();
-		IXGBE_WRITE_REG(hw, IXGBE_RDH(rxq->reg_idx), 0);
-		IXGBE_WRITE_REG(hw, IXGBE_RDT(rxq->reg_idx), rxq->nb_rx_desc - 1);
-	} else
+	/* Allocate buffers for descriptor rings */
+	if (ixgbe_alloc_rx_queue_mbufs(rxq) != 0) {
+		PMD_INIT_LOG(ERR, "Could not alloc mbuf for queue:%d",
+			     rx_queue_id);
 		return -1;
+	}
+	rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
+	rxdctl |= IXGBE_RXDCTL_ENABLE;
+	IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(rxq->reg_idx), rxdctl);
+
+	/* Wait until RX Enable ready */
+	poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
+	do {
+		rte_delay_ms(1);
+		rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
+	} while (--poll_ms && !(rxdctl & IXGBE_RXDCTL_ENABLE));
+	if (!poll_ms)
+		PMD_INIT_LOG(ERR, "Could not enable Rx Queue %d", rx_queue_id);
+	rte_wmb();
+	IXGBE_WRITE_REG(hw, IXGBE_RDH(rxq->reg_idx), 0);
+	IXGBE_WRITE_REG(hw, IXGBE_RDT(rxq->reg_idx), rxq->nb_rx_desc - 1);
+	dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STARTED;
 
 	return 0;
 }
@@ -4364,12 +5409,11 @@ ixgbe_dev_rx_queue_start(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 /*
  * Stop Receive Units for specified queue.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_rx_queue_stop(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 {
 	struct ixgbe_hw     *hw;
-	struct ixgbe_adapter *adapter =
-		(struct ixgbe_adapter *)dev->data->dev_private;
+	struct ixgbe_adapter *adapter = dev->data->dev_private;
 	struct ixgbe_rx_queue *rxq;
 	uint32_t rxdctl;
 	int poll_ms;
@@ -4377,29 +5421,26 @@ ixgbe_dev_rx_queue_stop(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
-	if (rx_queue_id < dev->data->nb_rx_queues) {
-		rxq = dev->data->rx_queues[rx_queue_id];
+	rxq = dev->data->rx_queues[rx_queue_id];
 
+	rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
+	rxdctl &= ~IXGBE_RXDCTL_ENABLE;
+	IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(rxq->reg_idx), rxdctl);
+
+	/* Wait until RX Enable bit clear */
+	poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
+	do {
+		rte_delay_ms(1);
 		rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
-		rxdctl &= ~IXGBE_RXDCTL_ENABLE;
-		IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(rxq->reg_idx), rxdctl);
+	} while (--poll_ms && (rxdctl & IXGBE_RXDCTL_ENABLE));
+	if (!poll_ms)
+		PMD_INIT_LOG(ERR, "Could not disable Rx Queue %d", rx_queue_id);
 
-		/* Wait until RX Enable ready */
-		poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
-		do {
-			rte_delay_ms(1);
-			rxdctl = IXGBE_READ_REG(hw, IXGBE_RXDCTL(rxq->reg_idx));
-		} while (--poll_ms && (rxdctl | IXGBE_RXDCTL_ENABLE));
-		if (!poll_ms)
-			PMD_INIT_LOG(ERR, "Could not disable Rx Queue %d",
-				     rx_queue_id);
+	rte_delay_us(RTE_IXGBE_WAIT_100_US);
 
-		rte_delay_us(RTE_IXGBE_WAIT_100_US);
-
-		ixgbe_rx_queue_release_mbufs(rxq);
-		ixgbe_reset_rx_queue(adapter, rxq);
-	} else
-		return -1;
+	ixgbe_rx_queue_release_mbufs(rxq);
+	ixgbe_reset_rx_queue(adapter, rxq);
+	dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
 
 	return 0;
 }
@@ -4408,7 +5449,7 @@ ixgbe_dev_rx_queue_stop(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 /*
  * Start Transmit Units for specified queue.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_tx_queue_start(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 {
 	struct ixgbe_hw     *hw;
@@ -4419,29 +5460,27 @@ ixgbe_dev_tx_queue_start(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
-	if (tx_queue_id < dev->data->nb_tx_queues) {
-		txq = dev->data->tx_queues[tx_queue_id];
-		txdctl = IXGBE_READ_REG(hw, IXGBE_TXDCTL(txq->reg_idx));
-		txdctl |= IXGBE_TXDCTL_ENABLE;
-		IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(txq->reg_idx), txdctl);
+	txq = dev->data->tx_queues[tx_queue_id];
+	IXGBE_WRITE_REG(hw, IXGBE_TDH(txq->reg_idx), 0);
+	txdctl = IXGBE_READ_REG(hw, IXGBE_TXDCTL(txq->reg_idx));
+	txdctl |= IXGBE_TXDCTL_ENABLE;
+	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(txq->reg_idx), txdctl);
 
-		/* Wait until TX Enable ready */
-		if (hw->mac.type == ixgbe_mac_82599EB) {
-			poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
-			do {
-				rte_delay_ms(1);
-				txdctl = IXGBE_READ_REG(hw,
-					IXGBE_TXDCTL(txq->reg_idx));
-			} while (--poll_ms && !(txdctl & IXGBE_TXDCTL_ENABLE));
-			if (!poll_ms)
-				PMD_INIT_LOG(ERR, "Could not enable "
-					     "Tx Queue %d", tx_queue_id);
-		}
-		rte_wmb();
-		IXGBE_WRITE_REG(hw, IXGBE_TDH(txq->reg_idx), 0);
-		IXGBE_WRITE_REG(hw, IXGBE_TDT(txq->reg_idx), 0);
-	} else
-		return -1;
+	/* Wait until TX Enable ready */
+	if (hw->mac.type == ixgbe_mac_82599EB) {
+		poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
+		do {
+			rte_delay_ms(1);
+			txdctl = IXGBE_READ_REG(hw,
+				IXGBE_TXDCTL(txq->reg_idx));
+		} while (--poll_ms && !(txdctl & IXGBE_TXDCTL_ENABLE));
+		if (!poll_ms)
+			PMD_INIT_LOG(ERR, "Could not enable Tx Queue %d",
+				tx_queue_id);
+	}
+	rte_wmb();
+	IXGBE_WRITE_REG(hw, IXGBE_TDT(txq->reg_idx), 0);
+	dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STARTED;
 
 	return 0;
 }
@@ -4449,7 +5488,7 @@ ixgbe_dev_tx_queue_start(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 /*
  * Stop Transmit Units for specified queue.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbe_dev_tx_queue_stop(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 {
 	struct ixgbe_hw     *hw;
@@ -4461,59 +5500,97 @@ ixgbe_dev_tx_queue_stop(struct rte_eth_dev *dev, uint16_t tx_queue_id)
 	PMD_INIT_FUNC_TRACE();
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 
-	if (tx_queue_id < dev->data->nb_tx_queues) {
-		txq = dev->data->tx_queues[tx_queue_id];
+	txq = dev->data->tx_queues[tx_queue_id];
 
-		/* Wait until TX queue is empty */
-		if (hw->mac.type == ixgbe_mac_82599EB) {
-			poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
-			do {
-				rte_delay_us(RTE_IXGBE_WAIT_100_US);
-				txtdh = IXGBE_READ_REG(hw,
-						IXGBE_TDH(txq->reg_idx));
-				txtdt = IXGBE_READ_REG(hw,
-						IXGBE_TDT(txq->reg_idx));
-			} while (--poll_ms && (txtdh != txtdt));
-			if (!poll_ms)
-				PMD_INIT_LOG(ERR, "Tx Queue %d is not empty "
-					     "when stopping.", tx_queue_id);
-		}
+	/* Wait until TX queue is empty */
+	if (hw->mac.type == ixgbe_mac_82599EB) {
+		poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
+		do {
+			rte_delay_us(RTE_IXGBE_WAIT_100_US);
+			txtdh = IXGBE_READ_REG(hw,
+					       IXGBE_TDH(txq->reg_idx));
+			txtdt = IXGBE_READ_REG(hw,
+					       IXGBE_TDT(txq->reg_idx));
+		} while (--poll_ms && (txtdh != txtdt));
+		if (!poll_ms)
+			PMD_INIT_LOG(ERR,
+				"Tx Queue %d is not empty when stopping.",
+				tx_queue_id);
+	}
 
-		txdctl = IXGBE_READ_REG(hw, IXGBE_TXDCTL(txq->reg_idx));
-		txdctl &= ~IXGBE_TXDCTL_ENABLE;
-		IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(txq->reg_idx), txdctl);
+	txdctl = IXGBE_READ_REG(hw, IXGBE_TXDCTL(txq->reg_idx));
+	txdctl &= ~IXGBE_TXDCTL_ENABLE;
+	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(txq->reg_idx), txdctl);
 
-		/* Wait until TX Enable ready */
-		if (hw->mac.type == ixgbe_mac_82599EB) {
-			poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
-			do {
-				rte_delay_ms(1);
-				txdctl = IXGBE_READ_REG(hw,
+	/* Wait until TX Enable bit clear */
+	if (hw->mac.type == ixgbe_mac_82599EB) {
+		poll_ms = RTE_IXGBE_REGISTER_POLL_WAIT_10_MS;
+		do {
+			rte_delay_ms(1);
+			txdctl = IXGBE_READ_REG(hw,
 						IXGBE_TXDCTL(txq->reg_idx));
-			} while (--poll_ms && (txdctl | IXGBE_TXDCTL_ENABLE));
-			if (!poll_ms)
-				PMD_INIT_LOG(ERR, "Could not disable "
-					     "Tx Queue %d", tx_queue_id);
-		}
+		} while (--poll_ms && (txdctl & IXGBE_TXDCTL_ENABLE));
+		if (!poll_ms)
+			PMD_INIT_LOG(ERR, "Could not disable Tx Queue %d",
+				tx_queue_id);
+	}
 
-		if (txq->ops != NULL) {
-			txq->ops->release_mbufs(txq);
-			txq->ops->reset(txq);
-		}
-	} else
-		return -1;
+	if (txq->ops != NULL) {
+		txq->ops->release_mbufs(txq);
+		txq->ops->reset(txq);
+	}
+	dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
 
 	return 0;
+}
+
+void
+ixgbe_rxq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
+	struct rte_eth_rxq_info *qinfo)
+{
+	struct ixgbe_rx_queue *rxq;
+
+	rxq = dev->data->rx_queues[queue_id];
+
+	qinfo->mp = rxq->mb_pool;
+	qinfo->scattered_rx = dev->data->scattered_rx;
+	qinfo->nb_desc = rxq->nb_rx_desc;
+
+	qinfo->conf.rx_free_thresh = rxq->rx_free_thresh;
+	qinfo->conf.rx_drop_en = rxq->drop_en;
+	qinfo->conf.rx_deferred_start = rxq->rx_deferred_start;
+	qinfo->conf.offloads = rxq->offloads;
+}
+
+void
+ixgbe_txq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
+	struct rte_eth_txq_info *qinfo)
+{
+	struct ixgbe_tx_queue *txq;
+
+	txq = dev->data->tx_queues[queue_id];
+
+	qinfo->nb_desc = txq->nb_tx_desc;
+
+	qinfo->conf.tx_thresh.pthresh = txq->pthresh;
+	qinfo->conf.tx_thresh.hthresh = txq->hthresh;
+	qinfo->conf.tx_thresh.wthresh = txq->wthresh;
+
+	qinfo->conf.tx_free_thresh = txq->tx_free_thresh;
+	qinfo->conf.tx_rs_thresh = txq->tx_rs_thresh;
+	qinfo->conf.offloads = txq->offloads;
+	qinfo->conf.tx_deferred_start = txq->tx_deferred_start;
 }
 
 /*
  * [VF] Initializes Receive Unit.
  */
-int __attribute__((cold))
+int __rte_cold
 ixgbevf_dev_rx_init(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
 	struct ixgbe_rx_queue *rxq;
+	struct rte_eth_rxmode *rxmode = &dev->data->dev_conf.rxmode;
 	uint64_t bus_addr;
 	uint32_t srrctl, psrtype = 0;
 	uint16_t buf_size;
@@ -4553,6 +5630,11 @@ ixgbevf_dev_rx_init(struct rte_eth_dev *dev)
 	ixgbevf_rlpml_set_vf(hw,
 		(uint16_t)dev->data->dev_conf.rxmode.max_rx_pkt_len);
 
+	/*
+	 * Assume no header split and no VLAN strip support
+	 * on any Rx queue first .
+	 */
+	rxmode->offloads &= ~DEV_RX_OFFLOAD_VLAN_STRIP;
 	/* Setup RX queues */
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		rxq = dev->data->rx_queues[i];
@@ -4576,18 +5658,7 @@ ixgbevf_dev_rx_init(struct rte_eth_dev *dev)
 
 
 		/* Configure the SRRCTL register */
-#ifdef RTE_HEADER_SPLIT_ENABLE
-		/*
-		 * Configure Header Split
-		 */
-		if (dev->data->dev_conf.rxmode.header_split) {
-			srrctl = ((dev->data->dev_conf.rxmode.split_hdr_size <<
-				IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT) &
-				IXGBE_SRRCTL_BSIZEHDR_MASK);
-			srrctl |= IXGBE_SRRCTL_DESCTYPE_HDR_SPLIT_ALWAYS;
-		} else
-#endif
-			srrctl = IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
+		srrctl = IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 
 		/* Set if packets are dropped when no descriptors available */
 		if (rxq->drop_en)
@@ -4612,24 +5683,18 @@ ixgbevf_dev_rx_init(struct rte_eth_dev *dev)
 		buf_size = (uint16_t) ((srrctl & IXGBE_SRRCTL_BSIZEPKT_MASK) <<
 				       IXGBE_SRRCTL_BSIZEPKT_SHIFT);
 
-		if (dev->data->dev_conf.rxmode.enable_scatter ||
+		if (rxmode->offloads & DEV_RX_OFFLOAD_SCATTER ||
 		    /* It adds dual VLAN length for supporting dual VLAN */
-		    (dev->data->dev_conf.rxmode.max_rx_pkt_len +
+		    (rxmode->max_rx_pkt_len +
 				2 * IXGBE_VLAN_TAG_SIZE) > buf_size) {
 			if (!dev->data->scattered_rx)
 				PMD_INIT_LOG(DEBUG, "forcing scatter mode");
 			dev->data->scattered_rx = 1;
 		}
-	}
 
-#ifdef RTE_HEADER_SPLIT_ENABLE
-	if (dev->data->dev_conf.rxmode.header_split)
-		/* Must setup the PSRTYPE register */
-		psrtype = IXGBE_PSRTYPE_TCPHDR |
-			IXGBE_PSRTYPE_UDPHDR   |
-			IXGBE_PSRTYPE_IPV4HDR  |
-			IXGBE_PSRTYPE_IPV6HDR;
-#endif
+		if (rxq->offloads & DEV_RX_OFFLOAD_VLAN_STRIP)
+			rxmode->offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
+	}
 
 	/* Set RQPL for VF RSS according to max Rx queue */
 	psrtype |= (dev->data->nb_rx_queues >> 1) <<
@@ -4644,7 +5709,7 @@ ixgbevf_dev_rx_init(struct rte_eth_dev *dev)
 /*
  * [VF] Initializes Transmit Unit.
  */
-void __attribute__((cold))
+void __rte_cold
 ixgbevf_dev_tx_init(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
@@ -4685,7 +5750,7 @@ ixgbevf_dev_tx_init(struct rte_eth_dev *dev)
 /*
  * [VF] Start Transmit and Receive Units.
  */
-void __attribute__((cold))
+void __rte_cold
 ixgbevf_dev_rxtx_start(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw     *hw;
@@ -4746,14 +5811,119 @@ ixgbevf_dev_rxtx_start(struct rte_eth_dev *dev)
 	}
 }
 
-/* Stubs needed for linkage when CONFIG_RTE_IXGBE_INC_VECTOR is set to 'n' */
-int __attribute__((weak))
+int
+ixgbe_rss_conf_init(struct ixgbe_rte_flow_rss_conf *out,
+		    const struct rte_flow_action_rss *in)
+{
+	if (in->key_len > RTE_DIM(out->key) ||
+	    in->queue_num > RTE_DIM(out->queue))
+		return -EINVAL;
+	out->conf = (struct rte_flow_action_rss){
+		.func = in->func,
+		.level = in->level,
+		.types = in->types,
+		.key_len = in->key_len,
+		.queue_num = in->queue_num,
+		.key = memcpy(out->key, in->key, in->key_len),
+		.queue = memcpy(out->queue, in->queue,
+				sizeof(*in->queue) * in->queue_num),
+	};
+	return 0;
+}
+
+int
+ixgbe_action_rss_same(const struct rte_flow_action_rss *comp,
+		      const struct rte_flow_action_rss *with)
+{
+	return (comp->func == with->func &&
+		comp->level == with->level &&
+		comp->types == with->types &&
+		comp->key_len == with->key_len &&
+		comp->queue_num == with->queue_num &&
+		!memcmp(comp->key, with->key, with->key_len) &&
+		!memcmp(comp->queue, with->queue,
+			sizeof(*with->queue) * with->queue_num));
+}
+
+int
+ixgbe_config_rss_filter(struct rte_eth_dev *dev,
+		struct ixgbe_rte_flow_rss_conf *conf, bool add)
+{
+	struct ixgbe_hw *hw;
+	uint32_t reta;
+	uint16_t i;
+	uint16_t j;
+	uint16_t sp_reta_size;
+	uint32_t reta_reg;
+	struct rte_eth_rss_conf rss_conf = {
+		.rss_key = conf->conf.key_len ?
+			(void *)(uintptr_t)conf->conf.key : NULL,
+		.rss_key_len = conf->conf.key_len,
+		.rss_hf = conf->conf.types,
+	};
+	struct ixgbe_filter_info *filter_info =
+		IXGBE_DEV_PRIVATE_TO_FILTER_INFO(dev->data->dev_private);
+
+	PMD_INIT_FUNC_TRACE();
+	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	sp_reta_size = ixgbe_reta_size_get(hw->mac.type);
+
+	if (!add) {
+		if (ixgbe_action_rss_same(&filter_info->rss_info.conf,
+					  &conf->conf)) {
+			ixgbe_rss_disable(dev);
+			memset(&filter_info->rss_info, 0,
+				sizeof(struct ixgbe_rte_flow_rss_conf));
+			return 0;
+		}
+		return -EINVAL;
+	}
+
+	if (filter_info->rss_info.conf.queue_num)
+		return -EINVAL;
+	/* Fill in redirection table
+	 * The byte-swap is needed because NIC registers are in
+	 * little-endian order.
+	 */
+	reta = 0;
+	for (i = 0, j = 0; i < sp_reta_size; i++, j++) {
+		reta_reg = ixgbe_reta_reg_get(hw->mac.type, i);
+
+		if (j == conf->conf.queue_num)
+			j = 0;
+		reta = (reta << 8) | conf->conf.queue[j];
+		if ((i & 3) == 3)
+			IXGBE_WRITE_REG(hw, reta_reg,
+					rte_bswap32(reta));
+	}
+
+	/* Configure the RSS key and the RSS protocols used to compute
+	 * the RSS hash of input packets.
+	 */
+	if ((rss_conf.rss_hf & IXGBE_RSS_OFFLOAD_ALL) == 0) {
+		ixgbe_rss_disable(dev);
+		return 0;
+	}
+	if (rss_conf.rss_key == NULL)
+		rss_conf.rss_key = rss_intel_key; /* Default hash key */
+	ixgbe_hw_rss_hash_set(hw, &rss_conf);
+
+	if (ixgbe_rss_conf_init(&filter_info->rss_info, &conf->conf))
+		return -EINVAL;
+
+	return 0;
+}
+
+/* Stubs needed for linkage when CONFIG_RTE_ARCH_PPC_64 is set */
+#if defined(RTE_ARCH_PPC_64)
+int
 ixgbe_rx_vec_dev_conf_condition_check(struct rte_eth_dev __rte_unused *dev)
 {
 	return -1;
 }
 
-uint16_t __attribute__((weak))
+uint16_t
 ixgbe_recv_pkts_vec(
 	void __rte_unused *rx_queue,
 	struct rte_mbuf __rte_unused **rx_pkts,
@@ -4762,7 +5932,7 @@ ixgbe_recv_pkts_vec(
 	return 0;
 }
 
-uint16_t __attribute__((weak))
+uint16_t
 ixgbe_recv_scattered_pkts_vec(
 	void __rte_unused *rx_queue,
 	struct rte_mbuf __rte_unused **rx_pkts,
@@ -4771,8 +5941,29 @@ ixgbe_recv_scattered_pkts_vec(
 	return 0;
 }
 
-int __attribute__((weak))
+int
 ixgbe_rxq_vec_setup(struct ixgbe_rx_queue __rte_unused *rxq)
 {
 	return -1;
 }
+
+uint16_t
+ixgbe_xmit_fixed_burst_vec(void __rte_unused *tx_queue,
+		struct rte_mbuf __rte_unused **tx_pkts,
+		uint16_t __rte_unused nb_pkts)
+{
+	return 0;
+}
+
+int
+ixgbe_txq_vec_setup(struct ixgbe_tx_queue __rte_unused *txq)
+{
+	return -1;
+}
+
+void
+ixgbe_rx_queue_release_mbufs_vec(struct ixgbe_rx_queue __rte_unused *rxq)
+{
+	return;
+}
+#endif

@@ -1,33 +1,5 @@
-#   BSD LICENSE
-#
-#   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
-#   All rights reserved.
-#
-#   Redistribution and use in source and binary forms, with or without
-#   modification, are permitted provided that the following conditions
-#   are met:
-#
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in
-#       the documentation and/or other materials provided with the
-#       distribution.
-#     * Neither the name of Intel Corporation nor the names of its
-#       contributors may be used to endorse or promote products derived
-#       from this software without specific prior written permission.
-#
-#   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-#   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-#   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-#   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-#   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-#   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-#   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-#   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-#   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-#   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-#   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright(c) 2010-2016 Intel Corporation
 
 include $(RTE_SDK)/mk/rte.vars.mk
 
@@ -41,15 +13,16 @@ CFLAGS += $(WERROR_FLAGS)
 
 EXPORT_MAP := rte_pmd_ixgbe_version.map
 
-LIBABIVER := 1
-
-ifeq ($(CC), icc)
+ifeq ($(CONFIG_RTE_TOOLCHAIN_ICC),y)
 #
 # CFLAGS for icc
 #
-CFLAGS_BASE_DRIVER = -wd174 -wd593 -wd869 -wd981 -wd2259
+CFLAGS_BASE_DRIVER  = -diag-disable 174 -diag-disable 593 -diag-disable 869
+CFLAGS_BASE_DRIVER += -diag-disable 981 -diag-disable 2259
 
-else ifeq ($(CC), clang)
+CFLAGS_ixgbe_rxtx.o += -diag-disable 3656
+
+else ifeq ($(CONFIG_RTE_TOOLCHAIN_CLANG),y)
 #
 # CFLAGS for clang
 #
@@ -74,15 +47,22 @@ endif
 
 ifeq ($(shell test $(GCC_VERSION) -ge 50 && echo 1), 1)
 CFLAGS_ixgbe_common.o += -Wno-logical-not-parentheses
+ifeq ($(shell test $(GCC_VERSION) -ge 70 && echo 1), 1)
+CFLAGS_BASE_DRIVER += -Wno-implicit-fallthrough
+endif
 endif
 
 endif
+LDLIBS += -lrte_eal -lrte_mbuf -lrte_mempool -lrte_ring
+LDLIBS += -lrte_ethdev -lrte_net -lrte_kvargs -lrte_hash
+LDLIBS += -lrte_bus_pci
+LDLIBS += -lpthread
 
 #
 # Add extra flags for base driver files (also known as shared code)
 # to disable warnings in them
 #
-BASE_DRIVER_OBJS=$(patsubst %.c,%.o,$(notdir $(wildcard $(SRCDIR)/base/*.c)))
+BASE_DRIVER_OBJS=$(sort $(patsubst %.c,%.o,$(notdir $(wildcard $(SRCDIR)/base/*.c))))
 $(foreach obj, $(BASE_DRIVER_OBJS), $(eval CFLAGS_$(obj)+=$(CFLAGS_BASE_DRIVER)))
 
 VPATH += $(SRCDIR)/base
@@ -98,6 +78,7 @@ SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_x550.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_phy.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_api.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_vf.c
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_hv_vf.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_dcb.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_dcb_82599.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_dcb_82598.c
@@ -106,21 +87,24 @@ SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_rxtx.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_ethdev.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_fdir.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_pf.c
-SRCS-$(CONFIG_RTE_IXGBE_INC_VECTOR) += ixgbe_rxtx_vec.c
-
-ifeq ($(CONFIG_RTE_NIC_BYPASS),y)
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_flow.c
+ifneq ($(filter y,$(CONFIG_RTE_ARCH_ARM) $(CONFIG_RTE_ARCH_ARM64)),)
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_rxtx_vec_neon.c
+else ifeq ($(CONFIG_RTE_ARCH_X86),y)
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_rxtx_vec_sse.c
+endif
+ifeq ($(CONFIG_RTE_LIBRTE_IXGBE_BYPASS),y)
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_bypass.c
 SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_82599_bypass.c
 endif
-
-
-# this lib depends upon:
-DEPDIRS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += lib/librte_eal lib/librte_ether
-DEPDIRS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += lib/librte_mempool lib/librte_mbuf
-DEPDIRS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += lib/librte_net lib/librte_malloc
-
-ifeq ($(CONFIG_RTE_IXGBE_INC_VECTOR)$(CONFIG_RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC),yn)
-$(error The ixgbe vpmd depends on Rx bulk alloc)
+ifeq ($(CONFIG_RTE_LIBRTE_SECURITY),y)
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_ipsec.c
 endif
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += rte_pmd_ixgbe.c
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_tm.c
+SRCS-$(CONFIG_RTE_LIBRTE_IXGBE_PMD) += ixgbe_vf_representor.c
+
+# install this header file
+SYMLINK-$(CONFIG_RTE_LIBRTE_IXGBE_PMD)-include := rte_pmd_ixgbe.h
 
 include $(RTE_SDK)/mk/rte.lib.mk

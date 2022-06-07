@@ -1,41 +1,13 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <time.h>
 #include <rte_atomic.h>
-#include <rte_ethdev.h>
+#include <rte_ethdev_driver.h>
 #include "ixgbe_ethdev.h"
 #include "ixgbe_bypass_api.h"
+#include "rte_pmd_ixgbe.h"
 
 #define	BYPASS_STATUS_OFF_MASK	3
 
@@ -46,7 +18,7 @@
 			    __func__, __LINE__);            \
 		return retval;                            \
 	}                                                   \
-} while(0)
+} while (0)
 
 #define	FUNC_PTR_OR_RET(func) do {                          \
 	if ((func) == NULL) {                               \
@@ -54,7 +26,7 @@
 			    __func__, __LINE__);            \
 		return;                                     \
 	}                                                   \
-} while(0)
+} while (0)
 
 
 /**
@@ -82,7 +54,7 @@ ixgbe_bypass_set_time(struct ixgbe_adapter *adapter)
 	       BYPASS_CTL1_VALID_M |
 	       BYPASS_CTL1_OFFTRST_M;
 	value = (sec & BYPASS_CTL1_TIME_M) |
-	        BYPASS_CTL1_VALID |
+		BYPASS_CTL1_VALID |
 		BYPASS_CTL1_OFFTRST;
 
 	FUNC_PTR_OR_RET(adapter->bps.ops.bypass_set);
@@ -153,7 +125,7 @@ ixgbe_bypass_state_show(struct rte_eth_dev *dev, u32 *state)
 	 */
 	*state = (by_ctl >> BYPASS_STATUS_OFF_SHIFT) &  BYPASS_STATUS_OFF_MASK;
 
-	return (ret_val);
+	return ret_val;
 }
 
 
@@ -275,8 +247,8 @@ s32
 ixgbe_bypass_wd_timeout_store(struct rte_eth_dev *dev, u32 timeout)
 {
 	struct ixgbe_hw *hw;
-        u32 status;
-        u32 mask;
+	u32 status;
+	u32 mask;
 	s32 ret_val;
 	struct ixgbe_adapter *adapter = IXGBE_DEV_TO_ADPATER(dev);
 
@@ -284,7 +256,7 @@ ixgbe_bypass_wd_timeout_store(struct rte_eth_dev *dev, u32 timeout)
 	FUNC_PTR_OR_ERR_RET(adapter->bps.ops.bypass_set, -ENOTSUP);
 
 	/* disable the timer with timeout of zero */
-	if (timeout == RTE_BYPASS_TMT_OFF) {
+	if (timeout == RTE_PMD_IXGBE_BYPASS_TMT_OFF) {
 		status = 0x0;   /* WDG enable off */
 		mask = BYPASS_WDT_ENABLE_M;
 	} else {
@@ -355,7 +327,7 @@ ixgbe_bypass_wd_timeout_show(struct rte_eth_dev *dev, u32 *wd_timeout)
 
 	wdg = by_ctl & BYPASS_WDT_ENABLE_M;
 	if (!wdg)
-		*wd_timeout = RTE_BYPASS_TMT_OFF;
+		*wd_timeout = RTE_PMD_IXGBE_BYPASS_TMT_OFF;
 	else
 		*wd_timeout = (by_ctl >> BYPASS_WDT_TIME_SHIFT) &
 			BYPASS_WDT_MASK;

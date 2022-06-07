@@ -1,61 +1,7 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-/*
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation.
  * Copyright (c) 2009, Olivier MATZ <zer0@droids-corp.org>
  * All rights reserved.
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of the University of California, Berkeley nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE REGENTS AND CONTRIBUTORS BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <stdio.h>
@@ -118,6 +64,14 @@ cmdline_isendoftoken(char c)
 	return 0;
 }
 
+int
+cmdline_isendofcommand(char c)
+{
+	if (!c || iscomment(c) || isendofline(c))
+		return 1;
+	return 0;
+}
+
 static unsigned int
 nb_common_chars(const char * s1, const char * s2)
 {
@@ -131,6 +85,21 @@ nb_common_chars(const char * s1, const char * s2)
 	return i;
 }
 
+/** Retrieve either static or dynamic token at a given index. */
+static cmdline_parse_token_hdr_t *
+get_token(cmdline_parse_inst_t *inst, unsigned int index)
+{
+	cmdline_parse_token_hdr_t *token_p;
+
+	/* check presence of static tokens first */
+	if (inst->tokens[0] || !inst->f)
+		return inst->tokens[index];
+	/* generate dynamic token */
+	token_p = NULL;
+	inst->f(&token_p, NULL, &inst->tokens[index]);
+	return token_p;
+}
+
 /**
  * try to match the buffer with an instruction (only the first
  * nb_match_token tokens if != 0). Return 0 if we match all the
@@ -140,18 +109,20 @@ static int
 match_inst(cmdline_parse_inst_t *inst, const char *buf,
 	   unsigned int nb_match_token, void *resbuf, unsigned resbuf_size)
 {
-	unsigned int token_num=0;
-	cmdline_parse_token_hdr_t * token_p;
+	cmdline_parse_token_hdr_t *token_p = NULL;
 	unsigned int i=0;
 	int n = 0;
 	struct cmdline_token_hdr token_hdr;
 
-	token_p = inst->tokens[token_num];
-	if (token_p)
+	if (resbuf != NULL)
+		memset(resbuf, 0, resbuf_size);
+	/* check if we match all tokens of inst */
+	while (!nb_match_token || i < nb_match_token) {
+		token_p = get_token(inst, i);
+		if (!token_p)
+			break;
 		memcpy(&token_hdr, token_p, sizeof(token_hdr));
 
-	/* check if we match all tokens of inst */
-	while (token_p && (!nb_match_token || i<nb_match_token)) {
 		debug_printf("TK\n");
 		/* skip spaces */
 		while (isblank2(*buf)) {
@@ -186,11 +157,6 @@ match_inst(cmdline_parse_inst_t *inst, const char *buf,
 		debug_printf("TK parsed (len=%d)\n", n);
 		i++;
 		buf += n;
-
-		token_num ++;
-		token_p = inst->tokens[token_num];
-		if (token_p)
-			memcpy(&token_hdr, token_p, sizeof(token_hdr));
 	}
 
 	/* does not match */
@@ -230,7 +196,10 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 	unsigned int inst_num=0;
 	cmdline_parse_inst_t *inst;
 	const char *curbuf;
-	char result_buf[CMDLINE_PARSE_RESULT_BUFSIZE];
+	union {
+		char buf[CMDLINE_PARSE_RESULT_BUFSIZE];
+		long double align; /* strong alignment constraint for buf */
+	} result, tmp_result;
 	void (*f)(void *, struct cmdline *, void *) = NULL;
 	void *data = NULL;
 	int comment = 0;
@@ -239,9 +208,7 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 	int err = CMDLINE_PARSE_NOMATCH;
 	int tok;
 	cmdline_parse_ctx_t *ctx;
-#ifdef RTE_LIBRTE_CMDLINE_DEBUG
-	char debug_buf[BUFSIZ];
-#endif
+	char *result_buf = result.buf;
 
 	if (!cl || !buf)
 		return CMDLINE_PARSE_BAD_ARGS;
@@ -280,10 +247,8 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 		return linelen;
 	}
 
-#ifdef RTE_LIBRTE_CMDLINE_DEBUG
-	snprintf(debug_buf, (linelen>64 ? 64 : linelen), "%s", buf);
-	debug_printf("Parse line : len=%d, <%s>\n", linelen, debug_buf);
-#endif
+	debug_printf("Parse line : len=%d, <%.*s>\n",
+		     linelen, linelen > 64 ? 64 : linelen, buf);
 
 	/* parse it !! */
 	inst = ctx[inst_num];
@@ -291,7 +256,8 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 		debug_printf("INST %d\n", inst_num);
 
 		/* fully parsed */
-		tok = match_inst(inst, buf, 0, result_buf, sizeof(result_buf));
+		tok = match_inst(inst, buf, 0, result_buf,
+				 CMDLINE_PARSE_RESULT_BUFSIZE);
 
 		if (tok > 0) /* we matched at least one token */
 			err = CMDLINE_PARSE_BAD_ARGS;
@@ -308,6 +274,7 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 				if (!f) {
 					memcpy(&f, &inst->f, sizeof(f));
 					memcpy(&data, &inst->data, sizeof(data));
+					result_buf = tmp_result.buf;
 				}
 				else {
 					/* more than 1 inst matches */
@@ -325,7 +292,7 @@ cmdline_parse(struct cmdline *cl, const char * buf)
 
 	/* call func */
 	if (f) {
-		f(result_buf, cl, data);
+		f(result.buf, cl, data);
 	}
 
 	/* no match */
@@ -388,11 +355,12 @@ cmdline_complete(struct cmdline *cl, const char *buf, int *state,
 		inst = ctx[inst_num];
 		while (inst) {
 			/* parse the first tokens of the inst */
-			if (nb_token && match_inst(inst, buf, nb_token, NULL, 0))
+			if (nb_token &&
+			    match_inst(inst, buf, nb_token, NULL, 0))
 				goto next;
 
 			debug_printf("instruction match\n");
-			token_p = inst->tokens[nb_token];
+			token_p = get_token(inst, nb_token);
 			if (token_p)
 				memcpy(&token_hdr, token_p, sizeof(token_hdr));
 
@@ -426,8 +394,9 @@ cmdline_complete(struct cmdline *cl, const char *buf, int *state,
 				if (!strncmp(partial_tok, tmpbuf,
 					     partial_tok_len)) {
 					if (comp_len == -1) {
-						snprintf(comp_buf, sizeof(comp_buf),
-							 "%s", tmpbuf + partial_tok_len);
+						strlcpy(comp_buf,
+							tmpbuf + partial_tok_len,
+							sizeof(comp_buf));
 						comp_len =
 							strnlen(tmpbuf + partial_tok_len,
 									sizeof(tmpbuf) - partial_tok_len);
@@ -463,7 +432,7 @@ cmdline_complete(struct cmdline *cl, const char *buf, int *state,
 				if ((unsigned)(comp_len + 1) > size)
 					return 0;
 
-				snprintf(dst, size, "%s", comp_buf);
+				strlcpy(dst, comp_buf, size);
 				dst[comp_len] = 0;
 				return 2;
 			}
@@ -482,10 +451,11 @@ cmdline_complete(struct cmdline *cl, const char *buf, int *state,
 		/* we need to redo it */
 		inst = ctx[inst_num];
 
-		if (nb_token && match_inst(inst, buf, nb_token, NULL, 0))
+		if (nb_token &&
+		    match_inst(inst, buf, nb_token, NULL, 0))
 			goto next2;
 
-		token_p = inst->tokens[nb_token];
+		token_p = get_token(inst, nb_token);
 		if (token_p)
 			memcpy(&token_hdr, token_p, sizeof(token_hdr));
 
@@ -539,7 +509,7 @@ cmdline_complete(struct cmdline *cl, const char *buf, int *state,
 					continue;
 				}
 				(*state)++;
-				l=snprintf(dst, size, "%s", tmpbuf);
+				l=strlcpy(dst, tmpbuf, size);
 				if (l>=0 && token_hdr.ops->get_help) {
 					token_hdr.ops->get_help(token_p, tmpbuf,
 								sizeof(tmpbuf));

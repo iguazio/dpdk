@@ -1,49 +1,28 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 L3 Forwarding Sample Application
 ================================
 
-The L3 Forwarding application is a simple example of packet processing using the DPDK.
+The L3 Forwarding application is a simple example of packet processing using
+DPDK to demonstrate usage of poll and event mode packet I/O mechanism.
 The application performs L3 forwarding.
 
 Overview
 --------
 
-The application demonstrates the use of the hash and LPM libraries in the DPDK to implement packet forwarding.
-The initialization and run-time paths are very similar to those of the L2 forwarding application
-(see Chapter 9 "L2 Forwarding Sample Application (in Real and Virtualized Environments)" for more information).
-The main difference from the L2 Forwarding sample application is that the forwarding decision
-is made based on information read from the input packet.
+The application demonstrates the use of the hash and LPM libraries in the DPDK
+to implement packet forwarding using poll or event mode PMDs for packet I/O.
+The initialization and run-time paths are very similar to those of the
+:doc:`l2_forward_real_virtual` and :doc:`l2_forward_event`.
+The main difference from the L2 Forwarding sample application is that optionally
+packet can be Rx/Tx from/to eventdev instead of port directly and forwarding
+decision is made based on information read from the input packet.
 
-The lookup method is either hash-based or LPM-based and is selected at compile time. When the selected lookup method is hash-based,
+Eventdev can optionally use S/W or H/W (if supported by platform) scheduler
+implementation for packet I/O based on run time parameters.
+
+The lookup method is either hash-based or LPM-based and is selected at run time. When the selected lookup method is hash-based,
 a hash object is used to emulate the flow classification stage.
 The hash object is used in correlation with a flow table to map each input packet to its flow at runtime.
 
@@ -63,105 +42,152 @@ In the sample application, hash-based forwarding supports IPv4 and IPv6. LPM-bas
 Compiling the Application
 -------------------------
 
-To compile the application:
+To compile the sample application see :doc:`compiling`.
 
-#.  Go to the sample application directory:
-
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk cd ${RTE_SDK}/examples/l3fwd
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-    See the *DPDK Getting Started Guide* for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
+The application is located in the ``l3fwd`` sub-directory.
 
 Running the Application
 -----------------------
 
-The application has a number of command line options:
+The application has a number of command line options::
+
+    ./l3fwd [EAL options] -- -p PORTMASK
+                             [-P]
+                             [-E]
+                             [-L]
+                             --config(port,queue,lcore)[,(port,queue,lcore)]
+                             [--eth-dest=X,MM:MM:MM:MM:MM:MM]
+                             [--enable-jumbo [--max-pkt-len PKTLEN]]
+                             [--no-numa]
+                             [--hash-entry-num]
+                             [--ipv6]
+                             [--parse-ptype]
+                             [--per-port-pool]
+                             [--mode]
+                             [--eventq-sched]
+                             [--event-eth-rxqs]
+
+Where,
+
+* ``-p PORTMASK:`` Hexadecimal bitmask of ports to configure
+
+* ``-P:`` Optional, sets all ports to promiscuous mode so that packets are accepted regardless of the packet's Ethernet MAC destination address.
+  Without this option, only packets with the Ethernet MAC destination address set to the Ethernet address of the port are accepted.
+
+* ``-E:`` Optional, enable exact match.
+
+* ``-L:`` Optional, enable longest prefix match.
+
+* ``--config (port,queue,lcore)[,(port,queue,lcore)]:`` Determines which queues from which ports are mapped to which cores.
+
+* ``--eth-dest=X,MM:MM:MM:MM:MM:MM:`` Optional, ethernet destination for port X.
+
+* ``--enable-jumbo:`` Optional, enables jumbo frames.
+
+* ``--max-pkt-len:`` Optional, under the premise of enabling jumbo, maximum packet length in decimal (64-9600).
+
+* ``--no-numa:`` Optional, disables numa awareness.
+
+* ``--hash-entry-num:`` Optional, specifies the hash entry number in hexadecimal to be setup.
+
+* ``--ipv6:`` Optional, set if running ipv6 packets.
+
+* ``--parse-ptype:`` Optional, set to use software to analyze packet type. Without this option, hardware will check the packet type.
+
+* ``--per-port-pool:`` Optional, set to use independent buffer pools per port. Without this option, single buffer pool is used for all ports.
+
+* ``--mode:`` Optional, Packet transfer mode for I/O, poll or eventdev.
+
+* ``--eventq-sched:`` Optional, Event queue synchronization method, Ordered, Atomic or Parallel. Only valid if --mode=eventdev.
+
+* ``--event-eth-rxqs:`` Optional, Number of ethernet RX queues per device. Only valid if --mode=eventdev.
+
+
+For example, consider a dual processor socket platform with 8 physical cores, where cores 0-7 and 16-23 appear on socket 0,
+while cores 8-15 and 24-31 appear on socket 1.
+
+To enable L3 forwarding between two ports, assuming that both ports are in the same socket, using two cores, cores 1 and 2,
+(which are in the same socket too), use the following command:
 
 .. code-block:: console
 
-    ./build/l3fwd [EAL options] -- -p PORTMASK [-P]  --config(port,queue,lcore)[,(port,queue,lcore)] [--enable-jumbo [--max-pkt-len PKTLEN]]  [--no-numa][--hash-entry-num][--ipv6]
-
-where,
-
-*   -p PORTMASK: Hexadecimal bitmask of ports to configure
-
-*   -P: optional, sets all ports to promiscuous mode so that packets are accepted regardless of the packet's Ethernet MAC destination address.
-    Without this option, only packets with the Ethernet MAC destination address set to the Ethernet address of the port are accepted.
-
-*   --config (port,queue,lcore)[,(port,queue,lcore)]: determines which queues from which ports are mapped to which cores
-
-*   --enable-jumbo: optional, enables jumbo frames
-
-*   --max-pkt-len: optional, maximum packet length in decimal (64-9600)
-
-*   --no-numa: optional, disables numa awareness
-
-*   --hash-entry-num: optional, specifies the hash entry number in hexadecimal to be setup
-
-*   --ipv6: optional, set it if running ipv6 packets
-
-For example, consider a dual processor socket platform where cores 0-7 and 16-23 appear on socket 0, while cores 8-15 and 24-31 appear on socket 1.
-Let's say that the programmer wants to use memory from both NUMA nodes, the platform has only two ports, one connected to each NUMA node,
-and the programmer wants to use two cores from each processor socket to do the packet processing.
-
-To enable L3 forwarding between two ports, using two cores, cores 1 and 2, from each processor,
-while also taking advantage of local memory access by optimizing around NUMA, the programmer must enable two queues from each port,
-pin to the appropriate cores and allocate memory from the appropriate NUMA node. This is achieved using the following command:
-
-.. code-block:: console
-
-    ./build/l3fwd -c 606 -n 4 -- -p 0x3 --config="(0,0,1),(0,1,2),(1,0,9),(1,1,10)"
+    ./build/l3fwd -l 1,2 -n 4 -- -p 0x3 --config="(0,0,1),(1,0,2)"
 
 In this command:
 
-*   The -c option enables cores 0, 1, 2, 3
+*   The -l option enables cores 1, 2
 
 *   The -p option enables ports 0 and 1
 
-*   The --config option enables two queues on each port and maps each (port,queue) pair to a specific core.
-    Logic to enable multiple RX queues using RSS and to allocate memory from the correct NUMA nodes
-    is included in the application and is done transparently.
+*   The --config option enables one queue on each port and maps each (port,queue) pair to a specific core.
     The following table shows the mapping in this example:
 
 +----------+-----------+-----------+-------------------------------------+
 | **Port** | **Queue** | **lcore** | **Description**                     |
 |          |           |           |                                     |
 +----------+-----------+-----------+-------------------------------------+
-| 0        | 0         | 0         | Map queue 0 from port 0 to lcore 0. |
+| 0        | 0         | 1         | Map queue 0 from port 0 to lcore 1. |
 |          |           |           |                                     |
 +----------+-----------+-----------+-------------------------------------+
-| 0        | 1         | 2         | Map queue 1 from port 0 to lcore 2. |
-|          |           |           |                                     |
-+----------+-----------+-----------+-------------------------------------+
-| 1        | 0         | 1         | Map queue 0 from port 1 to lcore 1. |
-|          |           |           |                                     |
-+----------+-----------+-----------+-------------------------------------+
-| 1        | 1         | 3         | Map queue 1 from port 1 to lcore 3. |
+| 1        | 0         | 2         | Map queue 0 from port 1 to lcore 2. |
 |          |           |           |                                     |
 +----------+-----------+-----------+-------------------------------------+
 
+To use eventdev mode with sync method **ordered** on above mentioned environment,
+Following is the sample command:
+
+.. code-block:: console
+
+    ./build/l3fwd -l 0-3 -n 4 -w <event device> -- -p 0x3 --eventq-sched=ordered
+
+or
+
+.. code-block:: console
+
+    ./build/l3fwd -l 0-3 -n 4 -w <event device> -- -p 0x03 --mode=eventdev --eventq-sched=ordered
+
+In this command:
+
+*   -w option whitelist the event device supported by platform. Way to pass this device may vary based on platform.
+
+*   The --mode option defines PMD to be used for packet I/O.
+
+*   The --eventq-sched option enables synchronization menthod of event queue so that packets will be scheduled accordingly.
+
+If application uses S/W scheduler, it uses following DPDK services:
+
+*   Software scheduler
+*   Rx adapter service function
+*   Tx adapter service function
+
+Application needs service cores to run above mentioned services. Service cores
+must be provided as EAL parameters along with the --vdev=event_sw0 to enable S/W
+scheduler. Following is the sample command:
+
+.. code-block:: console
+
+    ./build/l3fwd -l 0-7 -s 0xf0000 -n 4 --vdev event_sw0 -- -p 0x3 --mode=eventdev --eventq-sched=ordered
+
+In case of eventdev mode, *--config* option is not used for ethernet port
+configuration. Instead each ethernet port will be configured with mentioned
+setup:
+
+*   Single Rx/Tx queue
+
+*   Each Rx queue will be connected to event queue via Rx adapter.
+
+*   Each Tx queue will be connected via Tx adapter.
+
 Refer to the *DPDK Getting Started Guide* for general information on running applications and
 the Environment Abstraction Layer (EAL) options.
+
+.. _l3_fwd_explanation:
 
 Explanation
 -----------
 
 The following sections provide some explanation of the sample application code. As mentioned in the overview section,
-the initialization and run-time paths are very similar to those of the L2 forwarding application
-(see Chapter 9 "L2 Forwarding Sample Application (in Real and Virtualized Environments)" for more information).
+the initialization and run-time paths are very similar to those of the :doc:`l2_forward_real_virtual` and :doc:`l2_forward_event`.
 The following sections describe aspects that are specific to the L3 Forwarding sample application.
 
 Hash Initialization
@@ -232,7 +258,7 @@ The LPM object is created and loaded with the pre-configured entries read from a
 
         /* create the LPM table */
 
-        rte_snprintf(s, sizeof(s), "IPV4_L3FWD_LPM_%d", socketid);
+        snprintf(s, sizeof(s), "IPV4_L3FWD_LPM_%d", socketid);
 
         ipv4_l3fwd_lookup_struct[socketid] = rte_lpm_create(s, socketid, IPV4_L3FWD_LPM_MAX_RULES, 0);
 
@@ -276,12 +302,12 @@ The get_ipv4_dst_port() function is shown below:
 .. code-block:: c
 
     static inline uint8_t
-    get_ipv4_dst_port(void *ipv4_hdr, uint8_t portid, lookup_struct_t *ipv4_l3fwd_lookup_struct)
+    get_ipv4_dst_port(void *ipv4_hdr, uint16_t portid, lookup_struct_t *ipv4_l3fwd_lookup_struct)
     {
         int ret = 0;
         union ipv4_5tuple_host key;
 
-        ipv4_hdr = (uint8_t \*)ipv4_hdr + offsetof(struct ipv4_hdr, time_to_live);
+        ipv4_hdr = (uint8_t *)ipv4_hdr + offsetof(struct rte_ipv4_hdr, time_to_live);
 
         m128i data = _mm_loadu_si128(( m128i*)(ipv4_hdr));
 
@@ -305,14 +331,14 @@ The key code snippet of simple_ipv4_fwd_4pkts() is shown below:
 .. code-block:: c
 
     static inline void
-    simple_ipv4_fwd_4pkts(struct rte_mbuf* m[4], uint8_t portid, struct lcore_conf *qconf)
+    simple_ipv4_fwd_4pkts(struct rte_mbuf* m[4], uint16_t portid, struct lcore_conf *qconf)
     {
         // ...
 
-        data[0] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[0], unsigned char *) + sizeof(struct ether_hdr) + offsetof(struct ipv4_hdr, time_to_live)));
-        data[1] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[1], unsigned char *) + sizeof(struct ether_hdr) + offsetof(struct ipv4_hdr, time_to_live)));
-        data[2] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[2], unsigned char *) + sizeof(struct ether_hdr) + offsetof(struct ipv4_hdr, time_to_live)));
-        data[3] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[3], unsigned char *) + sizeof(struct ether_hdr) + offsetof(struct ipv4_hdr, time_to_live)));
+        data[0] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[0], unsigned char *) + sizeof(struct rte_ether_hdr) + offsetof(struct rte_ipv4_hdr, time_to_live)));
+        data[1] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[1], unsigned char *) + sizeof(struct rte_ether_hdr) + offsetof(struct rte_ipv4_hdr, time_to_live)));
+        data[2] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[2], unsigned char *) + sizeof(struct rte_ether_hdr) + offsetof(struct rte_ipv4_hdr, time_to_live)));
+        data[3] = _mm_loadu_si128(( m128i*)(rte_pktmbuf_mtod(m[3], unsigned char *) + sizeof(struct rte_ether_hdr) + offsetof(struct rte_ipv4_hdr, time_to_live)));
 
         key[0].xmm = _mm_and_si128(data[0], mask0);
         key[1].xmm = _mm_and_si128(data[1], mask0);
@@ -321,7 +347,7 @@ The key code snippet of simple_ipv4_fwd_4pkts() is shown below:
 
         const void *key_array[4] = {&key[0], &key[1], &key[2],&key[3]};
 
-        rte_hash_lookup_multi(qconf->ipv4_lookup_struct, &key_array[0], 4, ret);
+        rte_hash_lookup_bulk(qconf->ipv4_lookup_struct, &key_array[0], 4, ret);
 
         dst_port[0] = (ret[0] < 0)? portid:ipv4_l3fwd_out_if[ret[0]];
         dst_port[1] = (ret[1] < 0)? portid:ipv4_l3fwd_out_if[ret[1]];
@@ -333,6 +359,8 @@ The key code snippet of simple_ipv4_fwd_4pkts() is shown below:
 
 The simple_ipv6_fwd_4pkts() function is similar to the simple_ipv4_fwd_4pkts() function.
 
+Known issue: IP packets with extensions or IP packets which are not TCP/UDP cannot work well at this mode.
+
 Packet Forwarding for LPM-based Lookups
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -342,10 +370,15 @@ for LPM-based lookups is done by the get_ipv4_dst_port() function below:
 
 .. code-block:: c
 
-    static inline uint8_t
-    get_ipv4_dst_port(struct ipv4_hdr *ipv4_hdr, uint8_t portid, lookup_struct_t *ipv4_l3fwd_lookup_struct)
+    static inline uint16_t
+    get_ipv4_dst_port(struct rte_ipv4_hdr *ipv4_hdr, uint16_t portid, lookup_struct_t *ipv4_l3fwd_lookup_struct)
     {
         uint8_t next_hop;
 
-        return (uint8_t) ((rte_lpm_lookup(ipv4_l3fwd_lookup_struct, rte_be_to_cpu_32(ipv4_hdr->dst_addr), &next_hop) == 0)? next_hop : portid);
+        return ((rte_lpm_lookup(ipv4_l3fwd_lookup_struct, rte_be_to_cpu_32(ipv4_hdr->dst_addr), &next_hop) == 0)? next_hop : portid);
     }
+
+Eventdev Driver Initialization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Eventdev driver initialization is same as L2 forwarding eventdev application.
+Refer :doc:`l2_forward_event` for more details.

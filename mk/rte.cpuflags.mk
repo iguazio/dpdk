@@ -1,39 +1,11 @@
-#   BSD LICENSE
-#
-#   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-#   All rights reserved.
-#
-#   Redistribution and use in source and binary forms, with or without
-#   modification, are permitted provided that the following conditions
-#   are met:
-#
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in
-#       the documentation and/or other materials provided with the
-#       distribution.
-#     * Neither the name of Intel Corporation nor the names of its
-#       contributors may be used to endorse or promote products derived
-#       from this software without specific prior written permission.
-#
-#   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-#   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-#   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-#   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-#   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-#   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-#   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-#   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-#   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-#   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-#   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright(c) 2010-2014 Intel Corporation
 
 # this makefile is called from the generic rte.vars.mk and is
 # used to set the RTE_CPUFLAG_* environment variables giving details
 # of what instruction sets the target cpu supports.
 
-AUTO_CPUFLAGS := $(shell $(CC) $(MACHINE_CFLAGS) -dM -E - < /dev/null)
+AUTO_CPUFLAGS := $(shell $(CC) $(MACHINE_CFLAGS) $(WERROR_FLAGS) $(EXTRA_CFLAGS) -dM -E - < /dev/null)
 
 # adding flags to CPUFLAGS
 
@@ -70,11 +42,17 @@ CPUFLAGS += PCLMULQDQ
 endif
 
 ifneq ($(filter $(AUTO_CPUFLAGS),__AVX__),)
+ifeq ($(CONFIG_RTE_ENABLE_AVX),y)
 CPUFLAGS += AVX
+endif
 endif
 
 ifneq ($(filter $(AUTO_CPUFLAGS),__RDRND__),)
 CPUFLAGS += RDRAND
+endif
+
+ifneq ($(filter $(AUTO_CPUFLAGS),__RDSEED__),)
+CPUFLAGS += RDSEED
 endif
 
 ifneq ($(filter $(AUTO_CPUFLAGS),__FSGSBASE__),)
@@ -86,7 +64,20 @@ CPUFLAGS += F16C
 endif
 
 ifneq ($(filter $(AUTO_CPUFLAGS),__AVX2__),)
+ifeq ($(CONFIG_RTE_ENABLE_AVX),y)
 CPUFLAGS += AVX2
+endif
+endif
+
+ifneq ($(filter $(AUTO_CPUFLAGS),__AVX512F__),)
+ifeq ($(CONFIG_RTE_ENABLE_AVX512),y)
+CPUFLAGS += AVX512F
+else
+# disable AVX512F support for GCC & binutils 2.30 as a workaround for Bug 97
+ifeq ($(FORCE_DISABLE_AVX512),y)
+MACHINE_CFLAGS += -mno-avx512f
+endif
+endif
 endif
 
 # IBM Power CPU flags
@@ -106,6 +97,22 @@ ifneq ($(filter $(AUTO_CPUFLAGS),__builtin_vsx_xvnmaddadp),)
 CPUFLAGS += VSX
 endif
 
+# ARM flags
+ifneq ($(filter __ARM_NEON __aarch64__,$(AUTO_CPUFLAGS)),)
+CPUFLAGS += NEON
+endif
+
+ifneq ($(filter $(AUTO_CPUFLAGS),__ARM_FEATURE_CRC32),)
+CPUFLAGS += CRC32
+endif
+
+ifneq ($(filter $(AUTO_CPUFLAGS),__ARM_FEATURE_CRYPTO),)
+CPUFLAGS += AES
+CPUFLAGS += PMULL
+CPUFLAGS += SHA1
+CPUFLAGS += SHA2
+endif
+
 MACHINE_CFLAGS += $(addprefix -DRTE_MACHINE_CPUFLAG_,$(CPUFLAGS))
 
 # To strip whitespace
@@ -114,4 +121,4 @@ empty:=
 space:= $(empty) $(empty)
 CPUFLAGSTMP1 := $(addprefix RTE_CPUFLAG_,$(CPUFLAGS))
 CPUFLAGSTMP2 := $(subst $(space),$(comma),$(CPUFLAGSTMP1))
-MACHINE_CFLAGS += -DRTE_COMPILE_TIME_CPUFLAGS=$(CPUFLAGSTMP2)
+CPUFLAGS_LIST := -DRTE_COMPILE_TIME_CPUFLAGS=$(CPUFLAGSTMP2)

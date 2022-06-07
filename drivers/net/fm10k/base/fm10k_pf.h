@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013 - 2015 Intel Corporation
+ */
 
 #ifndef _FM10K_PF_H_
 #define _FM10K_PF_H_
@@ -57,7 +28,8 @@ enum fm10k_pf_tlv_msg_id_v1 {
 	FM10K_PF_MSG_ID_SET_FLOW_STATE		= 0x505,
 	FM10K_PF_MSG_ID_GET_1588_INFO		= 0x506,
 	FM10K_PF_MSG_ID_1588_TIMESTAMP		= 0x701,
-	FM10K_PF_MSG_ID_TX_TIMESTAMP_MODE	= 0x702,
+	FM10K_PF_MSG_ID_1588_CLOCK_OWNER	= 0x702,
+	FM10K_PF_MSG_ID_MASTER_CLK_OFFSET	= 0x703,
 };
 
 enum fm10k_pf_tlv_attr_id_v1 {
@@ -76,8 +48,8 @@ enum fm10k_pf_tlv_attr_id_v1 {
 	FM10K_PF_ATTR_ID_PORT			= 0x0C,
 	FM10K_PF_ATTR_ID_UPDATE_PVID		= 0x0D,
 	FM10K_PF_ATTR_ID_1588_TIMESTAMP		= 0x10,
-	FM10K_PF_ATTR_ID_TIMESTAMP_MODE_REQ	= 0x11,
-	FM10K_PF_ATTR_ID_TIMESTAMP_MODE_RESP	= 0x12,
+	FM10K_PF_ATTR_ID_1588_CLOCK_OWNER	= 0x12,
+	FM10K_PF_ATTR_ID_MASTER_CLK_OFFSET	= 0x14,
 };
 
 #define FM10K_MSG_LPORT_MAP_GLORT_SHIFT	0
@@ -89,6 +61,18 @@ enum fm10k_pf_tlv_attr_id_v1 {
 #define FM10K_MSG_UPDATE_PVID_GLORT_SIZE	16
 #define FM10K_MSG_UPDATE_PVID_PVID_SHIFT	16
 #define FM10K_MSG_UPDATE_PVID_PVID_SIZE		16
+
+#define FM10K_MSG_ERR_PEP_NOT_SCHEDULED	280
+
+/* The following data structures are overlayed directly onto TLV mailbox
+ * messages, and must not break 4 byte alignment. Ensure the structures line
+ * up correctly as per their TLV definition.
+ */
+#ifdef C99
+#pragma pack(push, 4)
+#else
+#pragma pack(4)
+#endif /* C99 */
 
 struct fm10k_mac_update {
 	__le32	mac_lower;
@@ -118,17 +102,22 @@ struct fm10k_swapi_1588_timestamp {
 	__le16 sglort;
 };
 
-#define FM10K_PF_MSG_LPORT_CREATE_HANDLER(func) \
-	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_LPORT_CREATE, NULL, func)
-#define FM10K_PF_MSG_LPORT_DELETE_HANDLER(func) \
-	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_LPORT_DELETE, NULL, func)
+struct fm10k_swapi_1588_clock_owner {
+	__le16 glort;
+	__le16 enabled;
+};
+
+#ifdef C99
+#pragma pack(pop)
+#else
+#pragma pack()
+#endif /* C99 */
+
 s32 fm10k_msg_lport_map_pf(struct fm10k_hw *, u32 **, struct fm10k_mbx_info *);
 extern const struct fm10k_tlv_attr fm10k_lport_map_msg_attr[];
 #define FM10K_PF_MSG_LPORT_MAP_HANDLER(func) \
 	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_LPORT_MAP, \
 			  fm10k_lport_map_msg_attr, func)
-s32 fm10k_msg_update_pvid_pf(struct fm10k_hw *, u32 **,
-			     struct fm10k_mbx_info *);
 extern const struct fm10k_tlv_attr fm10k_update_pvid_msg_attr[];
 #define FM10K_PF_MSG_UPDATE_PVID_HANDLER(func) \
 	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_UPDATE_PVID, \
@@ -144,12 +133,32 @@ extern const struct fm10k_tlv_attr fm10k_1588_timestamp_msg_attr[];
 	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_1588_TIMESTAMP, \
 			  fm10k_1588_timestamp_msg_attr, func)
 
+s32 fm10k_msg_1588_clock_owner_pf(struct fm10k_hw *, u32 **,
+				  struct fm10k_mbx_info *);
+extern const struct fm10k_tlv_attr fm10k_1588_clock_owner_attr[];
+#define FM10K_PF_MSG_1588_CLOCK_OWNER_HANDLER(func) \
+	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_1588_CLOCK_OWNER, \
+			  fm10k_1588_clock_owner_attr, func)
+
+extern const struct fm10k_tlv_attr fm10k_master_clk_offset_attr[];
+#define FM10K_PF_MSG_MASTER_CLK_OFFSET_HANDLER(func) \
+	FM10K_MSG_HANDLER(FM10K_PF_MSG_ID_MASTER_CLK_OFFSET, \
+			  fm10k_master_clk_offset_attr, func)
+
 s32 fm10k_iov_msg_msix_pf(struct fm10k_hw *, u32 **, struct fm10k_mbx_info *);
 s32 fm10k_iov_msg_mac_vlan_pf(struct fm10k_hw *, u32 **,
 			      struct fm10k_mbx_info *);
 s32 fm10k_iov_msg_lport_state_pf(struct fm10k_hw *, u32 **,
 				 struct fm10k_mbx_info *);
+#ifndef NO_DEFAULT_SRIOV_MSG_HANDLERS
 extern const struct fm10k_msg_data fm10k_iov_msg_data_pf[];
+#endif
 
 s32 fm10k_init_ops_pf(struct fm10k_hw *hw);
+
+void fm10k_update_hw_stats_pf(struct fm10k_hw *hw,
+				     struct fm10k_hw_stats *stats);
+
+void fm10k_rebind_hw_stats_pf(struct fm10k_hw *hw,
+				     struct fm10k_hw_stats *stats);
 #endif /* _FM10K_PF_H */

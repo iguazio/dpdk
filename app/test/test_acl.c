@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <string.h>
@@ -44,6 +15,8 @@
 #include <rte_common.h>
 
 #include "test_acl.h"
+
+#define	BIT_SIZEOF(x) (sizeof(x) * CHAR_BIT)
 
 #define LEN RTE_ACL_MAX_CATEGORIES
 
@@ -100,29 +73,221 @@ bswap_test_data(struct ipv4_7tuple *data, int len, int to_be)
 	}
 }
 
+static int
+acl_ipv4vlan_check_rule(const struct rte_acl_ipv4vlan_rule *rule)
+{
+	if (rule->src_port_low > rule->src_port_high ||
+			rule->dst_port_low > rule->dst_port_high ||
+			rule->src_mask_len > BIT_SIZEOF(rule->src_addr) ||
+			rule->dst_mask_len > BIT_SIZEOF(rule->dst_addr))
+		return -EINVAL;
+	return 0;
+}
+
+static void
+acl_ipv4vlan_convert_rule(const struct rte_acl_ipv4vlan_rule *ri,
+	struct acl_ipv4vlan_rule *ro)
+{
+	ro->data = ri->data;
+
+	ro->field[RTE_ACL_IPV4VLAN_PROTO_FIELD].value.u8 = ri->proto;
+	ro->field[RTE_ACL_IPV4VLAN_VLAN1_FIELD].value.u16 = ri->vlan;
+	ro->field[RTE_ACL_IPV4VLAN_VLAN2_FIELD].value.u16 = ri->domain;
+	ro->field[RTE_ACL_IPV4VLAN_SRC_FIELD].value.u32 = ri->src_addr;
+	ro->field[RTE_ACL_IPV4VLAN_DST_FIELD].value.u32 = ri->dst_addr;
+	ro->field[RTE_ACL_IPV4VLAN_SRCP_FIELD].value.u16 = ri->src_port_low;
+	ro->field[RTE_ACL_IPV4VLAN_DSTP_FIELD].value.u16 = ri->dst_port_low;
+
+	ro->field[RTE_ACL_IPV4VLAN_PROTO_FIELD].mask_range.u8 = ri->proto_mask;
+	ro->field[RTE_ACL_IPV4VLAN_VLAN1_FIELD].mask_range.u16 = ri->vlan_mask;
+	ro->field[RTE_ACL_IPV4VLAN_VLAN2_FIELD].mask_range.u16 =
+		ri->domain_mask;
+	ro->field[RTE_ACL_IPV4VLAN_SRC_FIELD].mask_range.u32 =
+		ri->src_mask_len;
+	ro->field[RTE_ACL_IPV4VLAN_DST_FIELD].mask_range.u32 = ri->dst_mask_len;
+	ro->field[RTE_ACL_IPV4VLAN_SRCP_FIELD].mask_range.u16 =
+		ri->src_port_high;
+	ro->field[RTE_ACL_IPV4VLAN_DSTP_FIELD].mask_range.u16 =
+		ri->dst_port_high;
+}
+
+/*
+ * Add ipv4vlan rules to an existing ACL context.
+ * This function is not multi-thread safe.
+ *
+ * @param ctx
+ *   ACL context to add patterns to.
+ * @param rules
+ *   Array of rules to add to the ACL context.
+ *   Note that all fields in rte_acl_ipv4vlan_rule structures are expected
+ *   to be in host byte order.
+ * @param num
+ *   Number of elements in the input array of rules.
+ * @return
+ *   - -ENOMEM if there is no space in the ACL context for these rules.
+ *   - -EINVAL if the parameters are invalid.
+ *   - Zero if operation completed successfully.
+ */
+static int
+rte_acl_ipv4vlan_add_rules(struct rte_acl_ctx *ctx,
+	const struct rte_acl_ipv4vlan_rule *rules,
+	uint32_t num)
+{
+	int32_t rc;
+	uint32_t i;
+	struct acl_ipv4vlan_rule rv;
+
+	if (ctx == NULL || rules == NULL)
+		return -EINVAL;
+
+	/* check input rules. */
+	for (i = 0; i != num; i++) {
+		rc = acl_ipv4vlan_check_rule(rules + i);
+		if (rc != 0) {
+			RTE_LOG(ERR, ACL, "%s: rule #%u is invalid\n",
+				__func__, i + 1);
+			return rc;
+		}
+	}
+
+	/* perform conversion to the internal format and add to the context. */
+	for (i = 0, rc = 0; i != num && rc == 0; i++) {
+		acl_ipv4vlan_convert_rule(rules + i, &rv);
+		rc = rte_acl_add_rules(ctx, (struct rte_acl_rule *)&rv, 1);
+	}
+
+	return rc;
+}
+
+static void
+acl_ipv4vlan_config(struct rte_acl_config *cfg,
+	const uint32_t layout[RTE_ACL_IPV4VLAN_NUM],
+	uint32_t num_categories)
+{
+	static const struct rte_acl_field_def
+		ipv4_defs[RTE_ACL_IPV4VLAN_NUM_FIELDS] = {
+		{
+			.type = RTE_ACL_FIELD_TYPE_BITMASK,
+			.size = sizeof(uint8_t),
+			.field_index = RTE_ACL_IPV4VLAN_PROTO_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_PROTO,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_BITMASK,
+			.size = sizeof(uint16_t),
+			.field_index = RTE_ACL_IPV4VLAN_VLAN1_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_VLAN,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_BITMASK,
+			.size = sizeof(uint16_t),
+			.field_index = RTE_ACL_IPV4VLAN_VLAN2_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_VLAN,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_MASK,
+			.size = sizeof(uint32_t),
+			.field_index = RTE_ACL_IPV4VLAN_SRC_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_SRC,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_MASK,
+			.size = sizeof(uint32_t),
+			.field_index = RTE_ACL_IPV4VLAN_DST_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_DST,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_RANGE,
+			.size = sizeof(uint16_t),
+			.field_index = RTE_ACL_IPV4VLAN_SRCP_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_PORTS,
+		},
+		{
+			.type = RTE_ACL_FIELD_TYPE_RANGE,
+			.size = sizeof(uint16_t),
+			.field_index = RTE_ACL_IPV4VLAN_DSTP_FIELD,
+			.input_index = RTE_ACL_IPV4VLAN_PORTS,
+		},
+	};
+
+	memcpy(&cfg->defs, ipv4_defs, sizeof(ipv4_defs));
+	cfg->num_fields = RTE_DIM(ipv4_defs);
+
+	cfg->defs[RTE_ACL_IPV4VLAN_PROTO_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_PROTO];
+	cfg->defs[RTE_ACL_IPV4VLAN_VLAN1_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_VLAN];
+	cfg->defs[RTE_ACL_IPV4VLAN_VLAN2_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_VLAN] +
+		cfg->defs[RTE_ACL_IPV4VLAN_VLAN1_FIELD].size;
+	cfg->defs[RTE_ACL_IPV4VLAN_SRC_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_SRC];
+	cfg->defs[RTE_ACL_IPV4VLAN_DST_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_DST];
+	cfg->defs[RTE_ACL_IPV4VLAN_SRCP_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_PORTS];
+	cfg->defs[RTE_ACL_IPV4VLAN_DSTP_FIELD].offset =
+		layout[RTE_ACL_IPV4VLAN_PORTS] +
+		cfg->defs[RTE_ACL_IPV4VLAN_SRCP_FIELD].size;
+
+	cfg->num_categories = num_categories;
+}
+
+/*
+ * Analyze set of ipv4vlan rules and build required internal
+ * run-time structures.
+ * This function is not multi-thread safe.
+ *
+ * @param ctx
+ *   ACL context to build.
+ * @param layout
+ *   Layout of input data to search through.
+ * @param num_categories
+ *   Maximum number of categories to use in that build.
+ * @return
+ *   - -ENOMEM if couldn't allocate enough memory.
+ *   - -EINVAL if the parameters are invalid.
+ *   - Negative error code if operation failed.
+ *   - Zero if operation completed successfully.
+ */
+static int
+rte_acl_ipv4vlan_build(struct rte_acl_ctx *ctx,
+	const uint32_t layout[RTE_ACL_IPV4VLAN_NUM],
+	uint32_t num_categories)
+{
+	struct rte_acl_config cfg;
+
+	if (ctx == NULL || layout == NULL)
+		return -EINVAL;
+
+	memset(&cfg, 0, sizeof(cfg));
+	acl_ipv4vlan_config(&cfg, layout, num_categories);
+	return rte_acl_build(ctx, &cfg);
+}
+
 /*
  * Test scalar and SSE ACL lookup.
  */
 static int
-test_classify_run(struct rte_acl_ctx *acx)
+test_classify_run(struct rte_acl_ctx *acx, struct ipv4_7tuple test_data[],
+	size_t dim)
 {
 	int ret, i;
 	uint32_t result, count;
-	uint32_t results[RTE_DIM(acl_test_data) * RTE_ACL_MAX_CATEGORIES];
-	const uint8_t *data[RTE_DIM(acl_test_data)];
-
+	uint32_t results[dim * RTE_ACL_MAX_CATEGORIES];
+	const uint8_t *data[dim];
 	/* swap all bytes in the data to network order */
-	bswap_test_data(acl_test_data, RTE_DIM(acl_test_data), 1);
+	bswap_test_data(test_data, dim, 1);
 
 	/* store pointers to test data */
-	for (i = 0; i < (int) RTE_DIM(acl_test_data); i++)
-		data[i] = (uint8_t *)&acl_test_data[i];
+	for (i = 0; i < (int) dim; i++)
+		data[i] = (uint8_t *)&test_data[i];
 
 	/**
 	 * these will run quite a few times, it's necessary to test code paths
 	 * from num=0 to num>8
 	 */
-	for (count = 0; count <= RTE_DIM(acl_test_data); count++) {
+	for (count = 0; count <= dim; count++) {
 		ret = rte_acl_classify(acx, data, results,
 				count, RTE_ACL_MAX_CATEGORIES);
 		if (ret != 0) {
@@ -134,10 +299,10 @@ test_classify_run(struct rte_acl_ctx *acx)
 		for (i = 0; i < (int) count; i++) {
 			result =
 				results[i * RTE_ACL_MAX_CATEGORIES + ACL_ALLOW];
-			if (result != acl_test_data[i].allow) {
+			if (result != test_data[i].allow) {
 				printf("Line %i: Error in allow results at %i "
 					"(expected %"PRIu32" got %"PRIu32")!\n",
-					__LINE__, i, acl_test_data[i].allow,
+					__LINE__, i, test_data[i].allow,
 					result);
 				ret = -EINVAL;
 				goto err;
@@ -147,10 +312,10 @@ test_classify_run(struct rte_acl_ctx *acx)
 		/* check if we deny everything we should deny */
 		for (i = 0; i < (int) count; i++) {
 			result = results[i * RTE_ACL_MAX_CATEGORIES + ACL_DENY];
-			if (result != acl_test_data[i].deny) {
+			if (result != test_data[i].deny) {
 				printf("Line %i: Error in deny results at %i "
 					"(expected %"PRIu32" got %"PRIu32")!\n",
-					__LINE__, i, acl_test_data[i].deny,
+					__LINE__, i, test_data[i].deny,
 					result);
 				ret = -EINVAL;
 				goto err;
@@ -160,7 +325,7 @@ test_classify_run(struct rte_acl_ctx *acx)
 
 	/* make a quick check for scalar */
 	ret = rte_acl_classify_alg(acx, data, results,
-			RTE_DIM(acl_test_data), RTE_ACL_MAX_CATEGORIES,
+			dim, RTE_ACL_MAX_CATEGORIES,
 			RTE_ACL_CLASSIFY_SCALAR);
 	if (ret != 0) {
 		printf("Line %i: scalar classify failed!\n", __LINE__);
@@ -168,12 +333,12 @@ test_classify_run(struct rte_acl_ctx *acx)
 	}
 
 	/* check if we allow everything we should allow */
-	for (i = 0; i < (int) RTE_DIM(acl_test_data); i++) {
+	for (i = 0; i < (int) dim; i++) {
 		result = results[i * RTE_ACL_MAX_CATEGORIES + ACL_ALLOW];
-		if (result != acl_test_data[i].allow) {
+		if (result != test_data[i].allow) {
 			printf("Line %i: Error in allow results at %i "
 					"(expected %"PRIu32" got %"PRIu32")!\n",
-					__LINE__, i, acl_test_data[i].allow,
+					__LINE__, i, test_data[i].allow,
 					result);
 			ret = -EINVAL;
 			goto err;
@@ -181,12 +346,12 @@ test_classify_run(struct rte_acl_ctx *acx)
 	}
 
 	/* check if we deny everything we should deny */
-	for (i = 0; i < (int) RTE_DIM(acl_test_data); i++) {
+	for (i = 0; i < (int) dim; i++) {
 		result = results[i * RTE_ACL_MAX_CATEGORIES + ACL_DENY];
-		if (result != acl_test_data[i].deny) {
+		if (result != test_data[i].deny) {
 			printf("Line %i: Error in deny results at %i "
 					"(expected %"PRIu32" got %"PRIu32")!\n",
-					__LINE__, i, acl_test_data[i].deny,
+					__LINE__, i, test_data[i].deny,
 					result);
 			ret = -EINVAL;
 			goto err;
@@ -197,7 +362,7 @@ test_classify_run(struct rte_acl_ctx *acx)
 
 err:
 	/* swap data back to cpu order so that next time tests don't fail */
-	bswap_test_data(acl_test_data, RTE_DIM(acl_test_data), 0);
+	bswap_test_data(test_data, dim, 0);
 	return ret;
 }
 
@@ -260,7 +425,8 @@ test_classify(void)
 			break;
 		}
 
-		ret = test_classify_run(acx);
+		ret = test_classify_run(acx, acl_test_data,
+			RTE_DIM(acl_test_data));
 		if (ret != 0) {
 			printf("Line %i, iter: %d: %s failed!\n",
 				__LINE__, i, __func__);
@@ -269,7 +435,8 @@ test_classify(void)
 
 		/* reset rules and make sure that classify still works ok. */
 		rte_acl_reset_rules(acx);
-		ret = test_classify_run(acx);
+		ret = test_classify_run(acx, acl_test_data,
+			RTE_DIM(acl_test_data));
 		if (ret != 0) {
 			printf("Line %i, iter: %d: %s failed!\n",
 				__LINE__, i, __func__);
@@ -350,15 +517,15 @@ test_build_ports_range(void)
 	static struct ipv4_7tuple test_data[] = {
 		{
 			.proto = 6,
-			.ip_src = IPv4(10, 1, 1, 1),
-			.ip_dst = IPv4(192, 168, 0, 33),
+			.ip_src = RTE_IPV4(10, 1, 1, 1),
+			.ip_dst = RTE_IPV4(192, 168, 0, 33),
 			.port_dst = 53,
 			.allow = 1,
 		},
 		{
 			.proto = 6,
-			.ip_src = IPv4(127, 84, 33, 1),
-			.ip_dst = IPv4(1, 2, 3, 4),
+			.ip_src = RTE_IPV4(127, 84, 33, 1),
+			.ip_dst = RTE_IPV4(1, 2, 3, 4),
 			.port_dst = 65281,
 			.allow = 1,
 		},
@@ -760,7 +927,8 @@ test_convert_rules(const char *desc,
 			break;
 		}
 
-		rc = test_classify_run(acx);
+		rc = test_classify_run(acx, acl_test_data,
+			RTE_DIM(acl_test_data));
 		if (rc != 0)
 			printf("%s failed at line %i, max_size=%zu\n",
 				__func__, __LINE__, mem_sizes[i]);
@@ -1163,19 +1331,6 @@ test_invalid_rules(void)
 		goto err;
 	}
 
-	rule.dst_mask_len = 0;
-	rule.src_mask_len = 0;
-	rule.data.userdata = 0;
-
-	/* try adding this rule (it should fail because userdata is invalid) */
-	ret = rte_acl_ipv4vlan_add_rules(acx, &rule, 1);
-	if (ret == 0) {
-		printf("Line %i: Adding a rule with invalid user data "
-				"should have failed!\n", __LINE__);
-		rte_acl_free(acx);
-		return -1;
-	}
-
 	rte_acl_free(acx);
 
 	return 0;
@@ -1242,16 +1397,18 @@ test_invalid_parameters(void)
 	} else
 		rte_acl_free(acx);
 
-	/* invalid NUMA node */
-	memcpy(&param, &acl_param, sizeof(param));
-	param.socket_id = RTE_MAX_NUMA_NODES + 1;
+	if (rte_eal_has_hugepages()) {
+		/* invalid NUMA node */
+		memcpy(&param, &acl_param, sizeof(param));
+		param.socket_id = RTE_MAX_NUMA_NODES + 1;
 
-	acx = rte_acl_create(&param);
-	if (acx != NULL) {
-		printf("Line %i: ACL context creation with invalid NUMA "
-				"should have failed!\n", __LINE__);
-		rte_acl_free(acx);
-		return -1;
+		acx = rte_acl_create(&param);
+		if (acx != NULL) {
+			printf("Line %i: ACL context creation with invalid "
+					"NUMA should have failed!\n", __LINE__);
+			rte_acl_free(acx);
+			return -1;
+		}
 	}
 
 	/* NULL name */
@@ -1314,26 +1471,6 @@ test_invalid_parameters(void)
 	if (result != 0) {
 		printf("Line %i: Adding 0 rules to ACL context failed!\n",
 			__LINE__);
-		rte_acl_free(acx);
-		return -1;
-	}
-
-	/* free ACL context */
-	rte_acl_free(acx);
-
-	/* set wrong rule_size so that adding any rules would fail */
-	param.rule_size = RTE_ACL_IPV4VLAN_RULE_SZ + 4;
-	acx = rte_acl_create(&param);
-	if (acx == NULL) {
-		printf("Line %i: ACL context creation failed!\n", __LINE__);
-		return -1;
-	}
-
-	/* try adding a rule with size different from context rule_size */
-	result = rte_acl_ipv4vlan_add_rules(acx, &rule, 1);
-	if (result == 0) {
-		printf("Line %i: Adding an invalid sized rule "
-				"should have failed!\n", __LINE__);
 		rte_acl_free(acx);
 		return -1;
 	}
@@ -1465,6 +1602,119 @@ test_misc(void)
 	return 0;
 }
 
+static uint32_t
+get_u32_range_max(void)
+{
+	uint32_t i, max;
+
+	max = 0;
+	for (i = 0; i != RTE_DIM(acl_u32_range_test_rules); i++)
+		max = RTE_MAX(max, acl_u32_range_test_rules[i].src_mask_len);
+	return max;
+}
+
+static uint32_t
+get_u32_range_min(void)
+{
+	uint32_t i, min;
+
+	min = UINT32_MAX;
+	for (i = 0; i != RTE_DIM(acl_u32_range_test_rules); i++)
+		min = RTE_MIN(min, acl_u32_range_test_rules[i].src_addr);
+	return min;
+}
+
+static const struct rte_acl_ipv4vlan_rule *
+find_u32_range_rule(uint32_t val)
+{
+	uint32_t i;
+
+	for (i = 0; i != RTE_DIM(acl_u32_range_test_rules); i++) {
+		if (val >= acl_u32_range_test_rules[i].src_addr &&
+				val <= acl_u32_range_test_rules[i].src_mask_len)
+			return acl_u32_range_test_rules + i;
+	}
+	return NULL;
+}
+
+static void
+fill_u32_range_data(struct ipv4_7tuple tdata[], uint32_t start, uint32_t num)
+{
+	uint32_t i;
+	const struct rte_acl_ipv4vlan_rule *r;
+
+	for (i = 0; i != num; i++) {
+		tdata[i].ip_src = start + i;
+		r = find_u32_range_rule(start + i);
+		if (r != NULL)
+			tdata[i].allow = r->data.userdata;
+	}
+}
+
+static int
+test_u32_range(void)
+{
+	int32_t rc;
+	uint32_t i, k, max, min;
+	struct rte_acl_ctx *acx;
+	struct acl_ipv4vlan_rule r;
+	struct ipv4_7tuple test_data[64];
+
+	acx = rte_acl_create(&acl_param);
+	if (acx == NULL) {
+		printf("%s#%i: Error creating ACL context!\n",
+			__func__, __LINE__);
+		return -1;
+	}
+
+	for (i = 0; i != RTE_DIM(acl_u32_range_test_rules); i++) {
+		convert_rule(&acl_u32_range_test_rules[i], &r);
+		rc = rte_acl_add_rules(acx, (struct rte_acl_rule *)&r, 1);
+		if (rc != 0) {
+			printf("%s#%i: Adding rule to ACL context "
+				"failed with error code: %d\n",
+				__func__, __LINE__, rc);
+			rte_acl_free(acx);
+			return rc;
+		}
+	}
+
+	rc = build_convert_rules(acx, convert_config_2, 0);
+	if (rc != 0) {
+		printf("%s#%i Error @ build_convert_rules!\n",
+			__func__, __LINE__);
+		rte_acl_free(acx);
+		return rc;
+	}
+
+	max = get_u32_range_max();
+	min = get_u32_range_min();
+
+	max = RTE_MAX(max, max + 1);
+	min = RTE_MIN(min, min - 1);
+
+	printf("%s#%d starting range test from %u to %u\n",
+		__func__, __LINE__, min, max);
+
+	for (i = min; i <= max; i += k) {
+
+		k = RTE_MIN(max - i + 1, RTE_DIM(test_data));
+
+		memset(test_data, 0, sizeof(test_data));
+		fill_u32_range_data(test_data, i, k);
+
+		rc = test_classify_run(acx, test_data, k);
+		if (rc != 0) {
+			printf("%s#%d failed at [%u, %u) interval\n",
+				__func__, __LINE__, i, i + k);
+			break;
+		}
+	}
+
+	rte_acl_free(acx);
+	return rc;
+}
+
 static int
 test_acl(void)
 {
@@ -1484,12 +1734,10 @@ test_acl(void)
 		return -1;
 	if (test_convert() < 0)
 		return -1;
+	if (test_u32_range() < 0)
+		return -1;
 
 	return 0;
 }
 
-static struct test_command acl_cmd = {
-	.command = "acl_autotest",
-	.callback = test_acl,
-};
-REGISTER_TEST_COMMAND(acl_cmd);
+REGISTER_TEST_COMMAND(acl_autotest, test_acl);

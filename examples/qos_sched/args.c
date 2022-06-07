@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -112,23 +83,22 @@ app_usage(const char *prgname)
 
 static inline int str_is(const char *str, const char *is)
 {
-	return (strcmp(str, is) == 0);
+	return strcmp(str, is) == 0;
 }
 
 /* returns core mask used by DPDK */
 static uint64_t
 app_eal_core_mask(void)
 {
-	uint32_t i;
 	uint64_t cm = 0;
-	struct rte_config *cfg = rte_eal_get_configuration();
+	uint32_t i;
 
-	for (i = 0; i < RTE_MAX_LCORE; i++) {
-		if (cfg->lcore_role[i] == ROLE_RTE)
+	for (i = 0; i < APP_MAX_LCORE; i++) {
+		if (rte_lcore_has_role(i, ROLE_RTE))
 			cm |= (1ULL << i);
 	}
 
-	cm |= (1ULL << cfg->master_lcore);
+	cm |= (1ULL << rte_get_master_lcore());
 
 	return cm;
 }
@@ -142,7 +112,7 @@ app_cpu_core_count(void)
 	char path[PATH_MAX];
 	uint32_t ncores = 0;
 
-	for(i = 0; i < RTE_MAX_LCORE; i++) {
+	for (i = 0; i < APP_MAX_LCORE; i++) {
 		len = snprintf(path, sizeof(path), SYS_CPU_DIR, i);
 		if (len <= 0 || (unsigned)len >= sizeof(path))
 			continue;
@@ -162,7 +132,7 @@ static int
 app_parse_opt_vals(const char *conf_str, char separator, uint32_t n_vals, uint32_t *opt_vals)
 {
 	char *string;
-	uint32_t i, n_tokens;
+	int i, n_tokens;
 	char *tokens[MAX_OPT_VALUES];
 
 	if (conf_str == NULL || opt_vals == NULL || n_vals == 0 || n_vals > MAX_OPT_VALUES)
@@ -175,9 +145,11 @@ app_parse_opt_vals(const char *conf_str, char separator, uint32_t n_vals, uint32
 
 	n_tokens = rte_strsplit(string, strnlen(string, 32), tokens, n_vals, separator);
 
-	for(i = 0; i < n_tokens; i++) {
+	if (n_tokens > MAX_OPT_VALUES)
+		return -1;
+
+	for (i = 0; i < n_tokens; i++)
 		opt_vals[i] = (uint32_t)atol(tokens[i]);
-	}
 
 	free(string);
 
@@ -243,14 +215,15 @@ app_parse_flow_conf(const char *conf_str)
 	struct flow_conf *pconf;
 	uint64_t mask;
 
+	memset(vals, 0, sizeof(vals));
 	ret = app_parse_opt_vals(conf_str, ',', 6, vals);
 	if (ret < 4 || ret > 5)
 		return ret;
 
 	pconf = &qos_conf[nb_pfc];
 
-	pconf->rx_port = (uint8_t)vals[0];
-	pconf->tx_port = (uint8_t)vals[1];
+	pconf->rx_port = vals[0];
+	pconf->tx_port = vals[1];
 	pconf->rx_core = (uint8_t)vals[2];
 	pconf->wt_core = (uint8_t)vals[3];
 	if (ret == 5)
@@ -264,19 +237,19 @@ app_parse_flow_conf(const char *conf_str)
 	}
 
 	if (pconf->rx_port >= RTE_MAX_ETHPORTS) {
-		RTE_LOG(ERR, APP, "pfc %u: invalid rx port %"PRIu8" index\n",
+		RTE_LOG(ERR, APP, "pfc %u: invalid rx port %"PRIu16" index\n",
 				nb_pfc, pconf->rx_port);
 		return -1;
 	}
 	if (pconf->tx_port >= RTE_MAX_ETHPORTS) {
-		RTE_LOG(ERR, APP, "pfc %u: invalid tx port %"PRIu8" index\n",
-				nb_pfc, pconf->rx_port);
+		RTE_LOG(ERR, APP, "pfc %u: invalid tx port %"PRIu16" index\n",
+				nb_pfc, pconf->tx_port);
 		return -1;
 	}
 
 	mask = 1lu << pconf->rx_port;
 	if (app_used_rx_port_mask & mask) {
-		RTE_LOG(ERR, APP, "pfc %u: rx port %"PRIu8" is used already\n",
+		RTE_LOG(ERR, APP, "pfc %u: rx port %"PRIu16" is used already\n",
 				nb_pfc, pconf->rx_port);
 		return -1;
 	}
@@ -285,7 +258,7 @@ app_parse_flow_conf(const char *conf_str)
 
 	mask = 1lu << pconf->tx_port;
 	if (app_used_tx_port_mask & mask) {
-		RTE_LOG(ERR, APP, "pfc %u: port %"PRIu8" is used already\n",
+		RTE_LOG(ERR, APP, "pfc %u: port %"PRIu16" is used already\n",
 				nb_pfc, pconf->tx_port);
 		return -1;
 	}

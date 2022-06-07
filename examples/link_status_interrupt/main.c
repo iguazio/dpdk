@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #include <stdio.h>
@@ -37,7 +8,6 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <sys/types.h>
-#include <string.h>
 #include <sys/queue.h>
 #include <netinet/in.h>
 #include <setjmp.h>
@@ -48,11 +18,10 @@
 
 #include <rte_common.h>
 #include <rte_log.h>
+#include <rte_malloc.h>
 #include <rte_memory.h>
 #include <rte_memcpy.h>
-#include <rte_memzone.h>
 #include <rte_eal.h>
-#include <rte_per_lcore.h>
 #include <rte_launch.h>
 #include <rte_atomic.h>
 #include <rte_cycles.h>
@@ -61,12 +30,10 @@
 #include <rte_per_lcore.h>
 #include <rte_branch_prediction.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_random.h>
 #include <rte_debug.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
-#include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 
@@ -80,13 +47,13 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 128
-#define RTE_TEST_TX_DESC_DEFAULT 512
+#define RTE_TEST_RX_DESC_DEFAULT 1024
+#define RTE_TEST_TX_DESC_DEFAULT 1024
 static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
-static struct ether_addr lsi_ports_eth_addr[RTE_MAX_ETHPORTS];
+static struct rte_ether_addr lsi_ports_eth_addr[RTE_MAX_ETHPORTS];
 
 /* mask of enabled ports */
 static uint32_t lsi_enabled_port_mask = 0;
@@ -97,10 +64,6 @@ static unsigned int lsi_rx_queue_per_lcore = 1;
 static unsigned lsi_dst_ports[RTE_MAX_ETHPORTS] = {0};
 
 #define MAX_PKT_BURST 32
-struct mbuf_table {
-	unsigned len;
-	struct rte_mbuf *m_table[MAX_PKT_BURST];
-};
 
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
@@ -108,19 +71,14 @@ struct lcore_queue_conf {
 	unsigned n_rx_port;
 	unsigned rx_port_list[MAX_RX_QUEUE_PER_LCORE];
 	unsigned tx_queue_id;
-	struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];
-
 } __rte_cache_aligned;
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-static const struct rte_eth_conf port_conf = {
+struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
+
+static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.split_hdr_size = 0,
-		.header_split   = 0, /**< Header Split disabled */
-		.hw_ip_checksum = 0, /**< IP checksum offload disabled */
-		.hw_vlan_filter = 0, /**< VLAN filtering disabled */
-		.jumbo_frame    = 0, /**< Jumbo Frame Support disabled */
-		.hw_strip_crc   = 0, /**< CRC stripped by hardware */
 	},
 	.txmode = {
 		.mq_mode = ETH_MQ_TX_NONE,
@@ -151,7 +109,7 @@ print_stats(void)
 {
 	struct rte_eth_link link;
 	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
-	unsigned portid;
+	uint16_t portid;
 
 	total_packets_dropped = 0;
 	total_packets_tx = 0;
@@ -159,6 +117,7 @@ print_stats(void)
 
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+	int link_get_err;
 
 		/* Clear screen and move to top left */
 	printf("%s%s", clr, topLeft);
@@ -171,7 +130,7 @@ print_stats(void)
 			continue;
 
 		memset(&link, 0, sizeof(link));
-		rte_eth_link_get_nowait((uint8_t)portid, &link);
+		link_get_err = rte_eth_link_get_nowait(portid, &link);
 		printf("\nStatistics for port %u ------------------------------"
 			   "\nLink status: %25s"
 			   "\nLink speed: %26u"
@@ -180,8 +139,11 @@ print_stats(void)
 			   "\nPackets received: %20"PRIu64
 			   "\nPackets dropped: %21"PRIu64,
 			   portid,
+			   link_get_err < 0 ? "Link get failed" :
 			   (link.link_status ? "Link up" : "Link down"),
-			   (unsigned)link.link_speed,
+			   link_get_err < 0 ? 0 :
+					(unsigned int)link.link_speed,
+			   link_get_err < 0 ? "Link get failed" :
 			   (link.link_duplex == ETH_LINK_FULL_DUPLEX ? \
 					"full-duplex" : "half-duplex"),
 			   port_statistics[portid].tx,
@@ -200,72 +162,32 @@ print_stats(void)
 		   total_packets_rx,
 		   total_packets_dropped);
 	printf("\n====================================================\n");
-}
 
-/* Send the packet on an output interface */
-static int
-lsi_send_burst(struct lcore_queue_conf *qconf, unsigned n, uint8_t port)
-{
-	struct rte_mbuf **m_table;
-	unsigned ret;
-	unsigned queueid;
-
-	queueid = (uint16_t) qconf->tx_queue_id;
-	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
-
-	ret = rte_eth_tx_burst(port, (uint16_t) queueid, m_table, (uint16_t) n);
-	port_statistics[port].tx += ret;
-	if (unlikely(ret < n)) {
-		port_statistics[port].dropped += (n - ret);
-		do {
-			rte_pktmbuf_free(m_table[ret]);
-		} while (++ret < n);
-	}
-
-	return 0;
-}
-
-/* Send the packet on an output interface */
-static int
-lsi_send_packet(struct rte_mbuf *m, uint8_t port)
-{
-	unsigned lcore_id, len;
-	struct lcore_queue_conf *qconf;
-
-	lcore_id = rte_lcore_id();
-
-	qconf = &lcore_queue_conf[lcore_id];
-	len = qconf->tx_mbufs[port].len;
-	qconf->tx_mbufs[port].m_table[len] = m;
-	len++;
-
-	/* enough pkts to be sent */
-	if (unlikely(len == MAX_PKT_BURST)) {
-		lsi_send_burst(qconf, MAX_PKT_BURST, port);
-		len = 0;
-	}
-
-	qconf->tx_mbufs[port].len = len;
-	return 0;
+	fflush(stdout);
 }
 
 static void
 lsi_simple_forward(struct rte_mbuf *m, unsigned portid)
 {
-	struct ether_hdr *eth;
+	struct rte_ether_hdr *eth;
 	void *tmp;
 	unsigned dst_port = lsi_dst_ports[portid];
+	int sent;
+	struct rte_eth_dev_tx_buffer *buffer;
 
-	eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	/* 02:00:00:00:00:xx */
 	tmp = &eth->d_addr.addr_bytes[0];
 	*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dst_port << 40);
 
 	/* src addr */
-	ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
+	rte_ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
 
-	lsi_send_packet(m, (uint8_t) dst_port);
+	buffer = tx_buffer[dst_port];
+	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
+	if (sent)
+		port_statistics[dst_port].tx += sent;
 }
 
 /* main processing loop */
@@ -275,10 +197,13 @@ lsi_main_loop(void)
 	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 	struct rte_mbuf *m;
 	unsigned lcore_id;
+	unsigned sent;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
 	unsigned i, j, portid, nb_rx;
 	struct lcore_queue_conf *qconf;
-	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
+			BURST_TX_DRAIN_US;
+	struct rte_eth_dev_tx_buffer *buffer;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
@@ -310,15 +235,15 @@ lsi_main_loop(void)
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
 
-			/* this could be optimized (use queueid instead of
-			 * portid), but it is not called so often */
-			for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
-				if (qconf->tx_mbufs[portid].len == 0)
-					continue;
-				lsi_send_burst(&lcore_queue_conf[lcore_id],
-						 qconf->tx_mbufs[portid].len,
-						 (uint8_t) portid);
-				qconf->tx_mbufs[portid].len = 0;
+			for (i = 0; i < qconf->n_rx_port; i++) {
+
+				portid = lsi_dst_ports[qconf->rx_port_list[i]];
+				buffer = tx_buffer[portid];
+
+				sent = rte_eth_tx_buffer_flush(portid, 0, buffer);
+				if (sent)
+					port_statistics[portid].tx += sent;
+
 			}
 
 			/* if timer is enabled */
@@ -363,7 +288,7 @@ lsi_main_loop(void)
 }
 
 static int
-lsi_launch_one_lcore(__attribute__((unused)) void *dummy)
+lsi_launch_one_lcore(__rte_unused void *dummy)
 {
 	lsi_main_loop();
 	return 0;
@@ -389,10 +314,7 @@ lsi_parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -494,7 +416,7 @@ lsi_parse_args(int argc, char **argv)
 		argv[optind-1] = prgname;
 
 	ret = optind-1;
-	optind = 0; /* reset getopt lib */
+	optind = 1; /* reset getopt lib */
 	return ret;
 }
 
@@ -512,18 +434,26 @@ lsi_parse_args(int argc, char **argv)
  *  Pointer to(address of) the parameters.
  *
  * @return
- *  void.
+ *  int.
  */
-static void
-lsi_event_callback(uint8_t port_id, enum rte_eth_event_type type, void *param)
+static int
+lsi_event_callback(uint16_t port_id, enum rte_eth_event_type type, void *param,
+		    void *ret_param)
 {
 	struct rte_eth_link link;
+	int ret;
 
 	RTE_SET_USED(param);
+	RTE_SET_USED(ret_param);
 
 	printf("\n\nIn registered callback...\n");
 	printf("Event type: %s\n", type == RTE_ETH_EVENT_INTR_LSC ? "LSC interrupt" : "unknown event");
-	rte_eth_link_get_nowait(port_id, &link);
+	ret = rte_eth_link_get_nowait(port_id, &link);
+	if (ret < 0) {
+		printf("Failed link get on port %d: %s\n",
+		       port_id, rte_strerror(-ret));
+		return ret;
+	}
 	if (link.link_status) {
 		printf("Port %d Link Up - speed %u Mbps - %s\n\n",
 				port_id, (unsigned)link.link_speed,
@@ -531,16 +461,20 @@ lsi_event_callback(uint8_t port_id, enum rte_eth_event_type type, void *param)
 				("full-duplex") : ("half-duplex"));
 	} else
 		printf("Port %d Link Down\n\n", port_id);
+
+	return 0;
 }
 
 /* Check the link status of all ports in up to 9s, and print them finally */
 static void
-check_all_ports_link_status(uint8_t port_num, uint32_t port_mask)
+check_all_ports_link_status(uint16_t port_num, uint32_t port_mask)
 {
 #define CHECK_INTERVAL 100 /* 100ms */
 #define MAX_CHECK_TIME 90 /* 9s (90 * 100ms) in total */
-	uint8_t portid, count, all_ports_up, print_flag = 0;
+	uint8_t count, all_ports_up, print_flag = 0;
+	uint16_t portid;
 	struct rte_eth_link link;
+	int ret;
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -550,22 +484,28 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask)
 			if ((port_mask & (1 << portid)) == 0)
 				continue;
 			memset(&link, 0, sizeof(link));
-			rte_eth_link_get_nowait(portid, &link);
+			ret = rte_eth_link_get_nowait(portid, &link);
+			if (ret < 0) {
+				all_ports_up = 0;
+				if (print_flag == 1)
+					printf("Port %u link get failed: %s\n",
+						portid, rte_strerror(-ret));
+				continue;
+			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
 				if (link.link_status)
-					printf("Port %d Link Up - speed %u "
-						"Mbps - %s\n", (uint8_t)portid,
-						(unsigned)link.link_speed,
+					printf(
+					"Port%d Link Up. Speed %u Mbps - %s\n",
+						portid, link.link_speed,
 				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex\n"));
+					("full-duplex") : ("half-duplex"));
 				else
-					printf("Port %d Link Down\n",
-							(uint8_t)portid);
+					printf("Port %d Link Down\n", portid);
 				continue;
 			}
 			/* clear all_ports_up flag if any link down */
-			if (link.link_status == 0) {
+			if (link.link_status == ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -592,10 +532,9 @@ int
 main(int argc, char **argv)
 {
 	struct lcore_queue_conf *qconf;
-	struct rte_eth_dev_info dev_info;
 	int ret;
-	uint8_t nb_ports;
-	uint8_t portid, portid_last = 0;
+	uint16_t nb_ports;
+	uint16_t portid, portid_last = 0;
 	unsigned lcore_id, rx_lcore_id;
 	unsigned nb_ports_in_mask = 0;
 
@@ -618,12 +557,9 @@ main(int argc, char **argv)
 	if (lsi_pktmbuf_pool == NULL)
 		rte_panic("Cannot init mbuf pool\n");
 
-	nb_ports = rte_eth_dev_count();
+	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports == 0)
 		rte_panic("No Ethernet port - bye\n");
-
-	if (nb_ports > RTE_MAX_ETHPORTS)
-		nb_ports = RTE_MAX_ETHPORTS;
 
 	/*
 	 * Each logical core is assigned a dedicated TX queue on each port.
@@ -642,8 +578,6 @@ main(int argc, char **argv)
 			portid_last = portid;
 
 		nb_ports_in_mask++;
-
-		rte_eth_dev_info_get(portid, &dev_info);
 	}
 	if (nb_ports_in_mask < 2 || nb_ports_in_mask % 2)
 		rte_exit(EXIT_FAILURE, "Current enabled port number is %u, "
@@ -679,6 +613,11 @@ main(int argc, char **argv)
 
 	/* Initialise each port */
 	for (portid = 0; portid < nb_ports; portid++) {
+		struct rte_eth_rxconf rxq_conf;
+		struct rte_eth_txconf txq_conf;
+		struct rte_eth_conf local_port_conf = port_conf;
+		struct rte_eth_dev_info dev_info;
+
 		/* skip ports that are not enabled */
 		if ((lsi_enabled_port_mask & (1 << portid)) == 0) {
 			printf("Skipping disabled port %u\n", (unsigned) portid);
@@ -687,10 +626,27 @@ main(int argc, char **argv)
 		/* init port */
 		printf("Initializing port %u... ", (unsigned) portid);
 		fflush(stdout);
-		ret = rte_eth_dev_configure(portid, 1, 1, &port_conf);
+
+		ret = rte_eth_dev_info_get(portid, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Error during getting device (port %u) info: %s\n",
+				portid, strerror(-ret));
+
+		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+			local_port_conf.txmode.offloads |=
+				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+		ret = rte_eth_dev_configure(portid, 1, 1, &local_port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
 				  ret, (unsigned) portid);
+
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
+						       &nb_txd);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "rte_eth_dev_adjust_nb_rx_tx_desc: err=%d, port=%u\n",
+				 ret, (unsigned) portid);
 
 		/* register lsi interrupt callback, need to be after
 		 * rte_eth_dev_configure(). if (intr_conf.lsc == 0), no
@@ -700,14 +656,20 @@ main(int argc, char **argv)
 		rte_eth_dev_callback_register(portid,
 			RTE_ETH_EVENT_INTR_LSC, lsi_event_callback, NULL);
 
-		rte_eth_macaddr_get(portid,
+		ret = rte_eth_macaddr_get(portid,
 				    &lsi_ports_eth_addr[portid]);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "rte_eth_macaddr_get: err=%d, port=%u\n",
+				 ret, (unsigned int)portid);
 
 		/* init one RX queue */
 		fflush(stdout);
+		rxq_conf = dev_info.default_rxconf;
+		rxq_conf.offloads = local_port_conf.rxmode.offloads;
 		ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
 					     rte_eth_dev_socket_id(portid),
-					     NULL,
+					     &rxq_conf,
 					     lsi_pktmbuf_pool);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup: err=%d, port=%u\n",
@@ -715,12 +677,31 @@ main(int argc, char **argv)
 
 		/* init one TX queue logical core on each port */
 		fflush(stdout);
+		txq_conf = dev_info.default_txconf;
+		txq_conf.offloads = local_port_conf.txmode.offloads;
 		ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
 				rte_eth_dev_socket_id(portid),
-				NULL);
+				&txq_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%d,port=%u\n",
 				  ret, (unsigned) portid);
+
+		/* Initialize TX buffers */
+		tx_buffer[portid] = rte_zmalloc_socket("tx_buffer",
+				RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
+				rte_eth_dev_socket_id(portid));
+		if (tx_buffer[portid] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n",
+					(unsigned) portid);
+
+		rte_eth_tx_buffer_init(tx_buffer[portid], MAX_PKT_BURST);
+
+		ret = rte_eth_tx_buffer_set_err_callback(tx_buffer[portid],
+				rte_eth_tx_buffer_count_callback,
+				&port_statistics[portid].dropped);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot set error callback for "
+					"tx buffer on port %u\n", (unsigned) portid);
 
 		/* Start device */
 		ret = rte_eth_dev_start(portid);
@@ -728,6 +709,12 @@ main(int argc, char **argv)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d, port=%u\n",
 				  ret, (unsigned) portid);
 		printf("done:\n");
+
+		ret = rte_eth_promiscuous_enable(portid);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"rte_eth_promiscuous_enable: err=%s, port=%u\n",
+				rte_strerror(-ret), portid);
 
 		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
 				(unsigned) portid,

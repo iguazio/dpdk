@@ -1,40 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2013-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013-2016 Intel Corporation
  */
 
 #include <inttypes.h>
 
-#include <rte_ethdev.h>
+#include <rte_ethdev_driver.h>
 #include <rte_common.h>
+#include <rte_net.h>
 #include "fm10k.h"
 #include "base/fm10k_type.h"
 
@@ -65,15 +37,45 @@ static inline void dump_rxd(union fm10k_rx_desc *rxd)
 }
 #endif
 
+#define FM10K_TX_OFFLOAD_MASK (  \
+		PKT_TX_VLAN_PKT |        \
+		PKT_TX_IPV6 |            \
+		PKT_TX_IPV4 |            \
+		PKT_TX_IP_CKSUM |        \
+		PKT_TX_L4_MASK |         \
+		PKT_TX_TCP_SEG)
+
+#define FM10K_TX_OFFLOAD_NOTSUP_MASK \
+		(PKT_TX_OFFLOAD_MASK ^ FM10K_TX_OFFLOAD_MASK)
+
+/* @note: When this function is changed, make corresponding change to
+ * fm10k_dev_supported_ptypes_get()
+ */
 static inline void
 rx_desc_to_ol_flags(struct rte_mbuf *m, const union fm10k_rx_desc *d)
 {
-	uint16_t ptype;
-	static const uint16_t pt_lut[] = { 0,
-		PKT_RX_IPV4_HDR, PKT_RX_IPV4_HDR_EXT,
-		PKT_RX_IPV6_HDR, PKT_RX_IPV6_HDR_EXT,
-		0, 0, 0
+	static const uint32_t
+		ptype_table[FM10K_RXD_PKTTYPE_MASK >> FM10K_RXD_PKTTYPE_SHIFT]
+			__rte_cache_aligned = {
+		[FM10K_PKTTYPE_OTHER] = RTE_PTYPE_L2_ETHER,
+		[FM10K_PKTTYPE_IPV4] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4,
+		[FM10K_PKTTYPE_IPV4_EX] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV4_EXT,
+		[FM10K_PKTTYPE_IPV6] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6,
+		[FM10K_PKTTYPE_IPV6_EX] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV6_EXT,
+		[FM10K_PKTTYPE_IPV4 | FM10K_PKTTYPE_TCP] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_TCP,
+		[FM10K_PKTTYPE_IPV6 | FM10K_PKTTYPE_TCP] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_TCP,
+		[FM10K_PKTTYPE_IPV4 | FM10K_PKTTYPE_UDP] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_UDP,
+		[FM10K_PKTTYPE_IPV6 | FM10K_PKTTYPE_UDP] = RTE_PTYPE_L2_ETHER |
+			RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_UDP,
 	};
+
+	m->packet_type = ptype_table[(d->w.pkt_info & FM10K_RXD_PKTTYPE_MASK)
+						>> FM10K_RXD_PKTTYPE_SHIFT];
 
 	if (d->w.pkt_info & FM10K_RXD_RSSTYPE_MASK)
 		m->ol_flags |= PKT_RX_RSS_HASH;
@@ -82,24 +84,15 @@ rx_desc_to_ol_flags(struct rte_mbuf *m, const union fm10k_rx_desc *d)
 		(FM10K_RXD_STATUS_IPCS | FM10K_RXD_STATUS_IPE)) ==
 		(FM10K_RXD_STATUS_IPCS | FM10K_RXD_STATUS_IPE)))
 		m->ol_flags |= PKT_RX_IP_CKSUM_BAD;
+	else
+		m->ol_flags |= PKT_RX_IP_CKSUM_GOOD;
 
 	if (unlikely((d->d.staterr &
 		(FM10K_RXD_STATUS_L4CS | FM10K_RXD_STATUS_L4E)) ==
 		(FM10K_RXD_STATUS_L4CS | FM10K_RXD_STATUS_L4E)))
 		m->ol_flags |= PKT_RX_L4_CKSUM_BAD;
-
-	if (d->d.staterr & FM10K_RXD_STATUS_VEXT)
-		m->ol_flags |= PKT_RX_VLAN_PKT;
-
-	if (unlikely(d->d.staterr & FM10K_RXD_STATUS_HBO))
-		m->ol_flags |= PKT_RX_HBUF_OVERFLOW;
-
-	if (unlikely(d->d.staterr & FM10K_RXD_STATUS_RXE))
-		m->ol_flags |= PKT_RX_RECIP_ERR;
-
-	ptype = (d->d.data & FM10K_RXD_PKTTYPE_MASK_L3) >>
-						FM10K_RXD_PKTTYPE_SHIFT;
-	m->ol_flags |= pt_lut[(uint8_t)ptype];
+	else
+		m->ol_flags |= PKT_RX_L4_CKSUM_GOOD;
 }
 
 uint16_t
@@ -118,10 +111,10 @@ fm10k_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 	nb_pkts = RTE_MIN(nb_pkts, q->alloc_thresh);
 	for (count = 0; count < nb_pkts; ++count) {
+		if (!(q->hw_ring[next_dd].d.staterr & FM10K_RXD_STATUS_DD))
+			break;
 		mbuf = q->sw_ring[next_dd];
 		desc = q->hw_ring[next_dd];
-		if (!(desc.d.staterr & FM10K_RXD_STATUS_DD))
-			break;
 #ifdef RTE_LIBRTE_FM10K_DEBUG_RX
 		dump_rxd(&desc);
 #endif
@@ -134,6 +127,21 @@ fm10k_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 #endif
 
 		mbuf->hash.rss = desc.d.rss;
+		/**
+		 * Packets in fm10k device always carry at least one VLAN tag.
+		 * For those packets coming in without VLAN tag,
+		 * the port default VLAN tag will be used.
+		 * So, always PKT_RX_VLAN flag is set and vlan_tci
+		 * is valid for each RX packet's mbuf.
+		 */
+		mbuf->ol_flags |= PKT_RX_VLAN | PKT_RX_VLAN_STRIPPED;
+		mbuf->vlan_tci = desc.w.vlan;
+		/**
+		 * mbuf->vlan_tci_outer is an idle field in fm10k driver,
+		 * so it can be selected to store sglort value.
+		 */
+		if (q->rx_ftag_en)
+			mbuf->vlan_tci_outer = rte_le_to_cpu_16(desc.w.sglort);
 
 		rx_pkts[count] = mbuf;
 		if (++next_dd == q->nb_desc) {
@@ -163,7 +171,7 @@ fm10k_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 					q->alloc_thresh);
 
 		if (unlikely(ret != 0)) {
-			uint8_t port = q->port_id;
+			uint16_t port = q->port_id;
 			PMD_RX_LOG(ERR, "Failed to alloc mbuf");
 			/*
 			 * Need to restore next_dd if we cannot allocate new
@@ -217,10 +225,10 @@ fm10k_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 	nb_seg = RTE_MIN(nb_pkts, q->alloc_thresh);
 	for (count = 0; count < nb_seg; count++) {
+		if (!(q->hw_ring[next_dd].d.staterr & FM10K_RXD_STATUS_DD))
+			break;
 		mbuf = q->sw_ring[next_dd];
 		desc = q->hw_ring[next_dd];
-		if (!(desc.d.staterr & FM10K_RXD_STATUS_DD))
-			break;
 #ifdef RTE_LIBRTE_FM10K_DEBUG_RX
 		dump_rxd(&desc);
 #endif
@@ -280,6 +288,22 @@ fm10k_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rx_desc_to_ol_flags(first_seg, &desc);
 #endif
 		first_seg->hash.rss = desc.d.rss;
+		/**
+		 * Packets in fm10k device always carry at least one VLAN tag.
+		 * For those packets coming in without VLAN tag,
+		 * the port default VLAN tag will be used.
+		 * So, always PKT_RX_VLAN flag is set and vlan_tci
+		 * is valid for each RX packet's mbuf.
+		 */
+		first_seg->ol_flags |= PKT_RX_VLAN | PKT_RX_VLAN_STRIPPED;
+		first_seg->vlan_tci = desc.w.vlan;
+		/**
+		 * mbuf->vlan_tci_outer is an idle field in fm10k driver,
+		 * so it can be selected to store sglort value.
+		 */
+		if (q->rx_ftag_en)
+			first_seg->vlan_tci_outer =
+				rte_le_to_cpu_16(desc.w.sglort);
 
 		/* Prefetch data of first segment, if configured to do so. */
 		rte_packet_prefetch((char *)first_seg->buf_addr +
@@ -305,7 +329,7 @@ fm10k_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 					q->alloc_thresh);
 
 		if (unlikely(ret != 0)) {
-			uint8_t port = q->port_id;
+			uint16_t port = q->port_id;
 			PMD_RX_LOG(ERR, "Failed to alloc mbuf");
 			/*
 			 * Need to restore next_dd if we cannot allocate new
@@ -342,6 +366,181 @@ fm10k_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 	return nb_rcv;
 }
 
+uint32_t
+fm10k_dev_rx_queue_count(struct rte_eth_dev *dev, uint16_t rx_queue_id)
+{
+#define FM10K_RXQ_SCAN_INTERVAL 4
+	volatile union fm10k_rx_desc *rxdp;
+	struct fm10k_rx_queue *rxq;
+	uint16_t desc = 0;
+
+	rxq = dev->data->rx_queues[rx_queue_id];
+	rxdp = &rxq->hw_ring[rxq->next_dd];
+	while ((desc < rxq->nb_desc) &&
+		rxdp->w.status & rte_cpu_to_le_16(FM10K_RXD_STATUS_DD)) {
+		/**
+		 * Check the DD bit of a rx descriptor of each group of 4 desc,
+		 * to avoid checking too frequently and downgrading performance
+		 * too much.
+		 */
+		desc += FM10K_RXQ_SCAN_INTERVAL;
+		rxdp += FM10K_RXQ_SCAN_INTERVAL;
+		if (rxq->next_dd + desc >= rxq->nb_desc)
+			rxdp = &rxq->hw_ring[rxq->next_dd + desc -
+				rxq->nb_desc];
+	}
+
+	return desc;
+}
+
+int
+fm10k_dev_rx_descriptor_done(void *rx_queue, uint16_t offset)
+{
+	volatile union fm10k_rx_desc *rxdp;
+	struct fm10k_rx_queue *rxq = rx_queue;
+	uint16_t desc;
+	int ret;
+
+	if (unlikely(offset >= rxq->nb_desc)) {
+		PMD_DRV_LOG(ERR, "Invalid RX descriptor offset %u", offset);
+		return 0;
+	}
+
+	desc = rxq->next_dd + offset;
+	if (desc >= rxq->nb_desc)
+		desc -= rxq->nb_desc;
+
+	rxdp = &rxq->hw_ring[desc];
+
+	ret = !!(rxdp->w.status &
+			rte_cpu_to_le_16(FM10K_RXD_STATUS_DD));
+
+	return ret;
+}
+
+int
+fm10k_dev_rx_descriptor_status(void *rx_queue, uint16_t offset)
+{
+	volatile union fm10k_rx_desc *rxdp;
+	struct fm10k_rx_queue *rxq = rx_queue;
+	uint16_t nb_hold, trigger_last;
+	uint16_t desc;
+	int ret;
+
+	if (unlikely(offset >= rxq->nb_desc)) {
+		PMD_DRV_LOG(ERR, "Invalid RX descriptor offset %u", offset);
+		return 0;
+	}
+
+	if (rxq->next_trigger < rxq->alloc_thresh)
+		trigger_last = rxq->next_trigger +
+					rxq->nb_desc - rxq->alloc_thresh;
+	else
+		trigger_last = rxq->next_trigger - rxq->alloc_thresh;
+
+	if (rxq->next_dd < trigger_last)
+		nb_hold = rxq->next_dd + rxq->nb_desc - trigger_last;
+	else
+		nb_hold = rxq->next_dd - trigger_last;
+
+	if (offset >= rxq->nb_desc - nb_hold)
+		return RTE_ETH_RX_DESC_UNAVAIL;
+
+	desc = rxq->next_dd + offset;
+	if (desc >= rxq->nb_desc)
+		desc -= rxq->nb_desc;
+
+	rxdp = &rxq->hw_ring[desc];
+
+	ret = !!(rxdp->w.status &
+			rte_cpu_to_le_16(FM10K_RXD_STATUS_DD));
+
+	return ret;
+}
+
+int
+fm10k_dev_tx_descriptor_status(void *tx_queue, uint16_t offset)
+{
+	volatile struct fm10k_tx_desc *txdp;
+	struct fm10k_tx_queue *txq = tx_queue;
+	uint16_t desc;
+	uint16_t next_rs = txq->nb_desc;
+	struct fifo rs_tracker = txq->rs_tracker;
+	struct fifo *r = &rs_tracker;
+
+	if (unlikely(offset >= txq->nb_desc))
+		return -EINVAL;
+
+	desc = txq->next_free + offset;
+	/* go to next desc that has the RS bit */
+	desc = (desc / txq->rs_thresh + 1) *
+		txq->rs_thresh - 1;
+
+	if (desc >= txq->nb_desc) {
+		desc -= txq->nb_desc;
+		if (desc >= txq->nb_desc)
+			desc -= txq->nb_desc;
+	}
+
+	r->head = r->list;
+	for ( ; r->head != r->endp; ) {
+		if (*r->head >= desc && *r->head < next_rs)
+			next_rs = *r->head;
+		++r->head;
+	}
+
+	txdp = &txq->hw_ring[next_rs];
+	if (txdp->flags & FM10K_TXD_FLAG_DONE)
+		return RTE_ETH_TX_DESC_DONE;
+
+	return RTE_ETH_TX_DESC_FULL;
+}
+
+/*
+ * Free multiple TX mbuf at a time if they are in the same pool
+ *
+ * @txep: software desc ring index that starts to free
+ * @num: number of descs to free
+ *
+ */
+static inline void tx_free_bulk_mbuf(struct rte_mbuf **txep, int num)
+{
+	struct rte_mbuf *m, *free[RTE_FM10K_TX_MAX_FREE_BUF_SZ];
+	int i;
+	int nb_free = 0;
+
+	if (unlikely(num == 0))
+		return;
+
+	m = rte_pktmbuf_prefree_seg(txep[0]);
+	if (likely(m != NULL)) {
+		free[0] = m;
+		nb_free = 1;
+		for (i = 1; i < num; i++) {
+			m = rte_pktmbuf_prefree_seg(txep[i]);
+			if (likely(m != NULL)) {
+				if (likely(m->pool == free[0]->pool))
+					free[nb_free++] = m;
+				else {
+					rte_mempool_put_bulk(free[0]->pool,
+							(void *)free, nb_free);
+					free[0] = m;
+					nb_free = 1;
+				}
+			}
+			txep[i] = NULL;
+		}
+		rte_mempool_put_bulk(free[0]->pool, (void **)free, nb_free);
+	} else {
+		for (i = 1; i < num; i++) {
+			m = rte_pktmbuf_prefree_seg(txep[i]);
+			if (m != NULL)
+				rte_mempool_put(m->pool, m);
+			txep[i] = NULL;
+		}
+	}
+}
+
 static inline void tx_free_descriptors(struct fm10k_tx_queue *q)
 {
 	uint16_t next_rs, count = 0;
@@ -358,11 +557,7 @@ static inline void tx_free_descriptors(struct fm10k_tx_queue *q)
 	 * including nb_desc */
 	if (q->last_free > next_rs) {
 		count = q->nb_desc - q->last_free;
-		while (q->last_free < q->nb_desc) {
-			rte_pktmbuf_free_seg(q->sw_ring[q->last_free]);
-			q->sw_ring[q->last_free] = NULL;
-			++q->last_free;
-		}
+		tx_free_bulk_mbuf(&q->sw_ring[q->last_free], count);
 		q->last_free = 0;
 	}
 
@@ -370,10 +565,10 @@ static inline void tx_free_descriptors(struct fm10k_tx_queue *q)
 	q->nb_free += count + (next_rs + 1 - q->last_free);
 
 	/* free buffers from last_free, up to and including next_rs */
-	while (q->last_free <= next_rs) {
-		rte_pktmbuf_free_seg(q->sw_ring[q->last_free]);
-		q->sw_ring[q->last_free] = NULL;
-		++q->last_free;
+	if (q->last_free <= next_rs) {
+		count = next_rs - q->last_free + 1;
+		tx_free_bulk_mbuf(&q->sw_ring[q->last_free], count);
+		q->last_free += count;
 	}
 
 	if (q->last_free == q->nb_desc)
@@ -383,7 +578,7 @@ static inline void tx_free_descriptors(struct fm10k_tx_queue *q)
 static inline void tx_xmit_pkt(struct fm10k_tx_queue *q, struct rte_mbuf *mb)
 {
 	uint16_t last_id;
-	uint8_t flags;
+	uint8_t flags, hdrlen;
 
 	/* always set the LAST flag on the last descriptor used to
 	 * transmit the packet */
@@ -405,21 +600,41 @@ static inline void tx_xmit_pkt(struct fm10k_tx_queue *q, struct rte_mbuf *mb)
 	q->nb_free -= mb->nb_segs;
 
 	q->hw_ring[q->next_free].flags = 0;
+	if (q->tx_ftag_en)
+		q->hw_ring[q->next_free].flags |= FM10K_TXD_FLAG_FTAG;
 	/* set checksum flags on first descriptor of packet. SCTP checksum
 	 * offload is not supported, but we do not explicitly check for this
 	 * case in favor of greatly simplified processing. */
-	if (mb->ol_flags & (PKT_TX_IP_CKSUM | PKT_TX_L4_MASK))
+	if (mb->ol_flags & (PKT_TX_IP_CKSUM | PKT_TX_L4_MASK | PKT_TX_TCP_SEG))
 		q->hw_ring[q->next_free].flags |= FM10K_TXD_FLAG_CSUM;
 
 	/* set vlan if requested */
 	if (mb->ol_flags & PKT_TX_VLAN_PKT)
 		q->hw_ring[q->next_free].vlan = mb->vlan_tci;
+	else
+		q->hw_ring[q->next_free].vlan = 0;
 
 	q->sw_ring[q->next_free] = mb;
 	q->hw_ring[q->next_free].buffer_addr =
 			rte_cpu_to_le_64(MBUF_DMA_ADDR(mb));
 	q->hw_ring[q->next_free].buflen =
 			rte_cpu_to_le_16(rte_pktmbuf_data_len(mb));
+
+	if (mb->ol_flags & PKT_TX_TCP_SEG) {
+		hdrlen = mb->l2_len + mb->l3_len + mb->l4_len;
+		hdrlen += (mb->ol_flags & PKT_TX_TUNNEL_MASK) ?
+			  mb->outer_l2_len + mb->outer_l3_len : 0;
+		if (q->hw_ring[q->next_free].flags & FM10K_TXD_FLAG_FTAG)
+			hdrlen += sizeof(struct fm10k_ftag);
+
+		if (likely((hdrlen >= FM10K_TSO_MIN_HEADERLEN) &&
+				(hdrlen <= FM10K_TSO_MAX_HEADERLEN) &&
+				(mb->tso_segsz >= FM10K_TSO_MINMSS))) {
+			q->hw_ring[q->next_free].mss = mb->tso_segsz;
+			q->hw_ring[q->next_free].hdrlen = hdrlen;
+		}
+	}
+
 	if (++q->next_free == q->nb_desc)
 		q->next_free = 0;
 
@@ -435,7 +650,7 @@ static inline void tx_xmit_pkt(struct fm10k_tx_queue *q, struct rte_mbuf *mb)
 			q->next_free = 0;
 	}
 
-	q->hw_ring[last_id].flags = flags;
+	q->hw_ring[last_id].flags |= flags;
 }
 
 uint16_t
@@ -472,4 +687,42 @@ fm10k_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		FM10K_PCI_REG_WRITE(q->tail_ptr, q->next_free);
 
 	return count;
+}
+
+uint16_t
+fm10k_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
+		uint16_t nb_pkts)
+{
+	int i, ret;
+	struct rte_mbuf *m;
+
+	for (i = 0; i < nb_pkts; i++) {
+		m = tx_pkts[i];
+
+		if ((m->ol_flags & PKT_TX_TCP_SEG) &&
+				(m->tso_segsz < FM10K_TSO_MINMSS)) {
+			rte_errno = EINVAL;
+			return i;
+		}
+
+		if (m->ol_flags & FM10K_TX_OFFLOAD_NOTSUP_MASK) {
+			rte_errno = ENOTSUP;
+			return i;
+		}
+
+#ifdef RTE_LIBRTE_ETHDEV_DEBUG
+		ret = rte_validate_tx_offload(m);
+		if (ret != 0) {
+			rte_errno = -ret;
+			return i;
+		}
+#endif
+		ret = rte_net_intel_cksum_prepare(m);
+		if (ret != 0) {
+			rte_errno = -ret;
+			return i;
+		}
+	}
+
+	return i;
 }

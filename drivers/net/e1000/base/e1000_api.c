@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #include "e1000_api.h"
 
@@ -292,7 +263,38 @@ s32 e1000_set_mac_type(struct e1000_hw *hw)
 	case E1000_DEV_ID_PCH_LPT_I217_V:
 	case E1000_DEV_ID_PCH_LPTLP_I218_LM:
 	case E1000_DEV_ID_PCH_LPTLP_I218_V:
+	case E1000_DEV_ID_PCH_I218_LM2:
+	case E1000_DEV_ID_PCH_I218_V2:
+	case E1000_DEV_ID_PCH_I218_LM3:
+	case E1000_DEV_ID_PCH_I218_V3:
 		mac->type = e1000_pch_lpt;
+		break;
+	case E1000_DEV_ID_PCH_SPT_I219_LM:
+	case E1000_DEV_ID_PCH_SPT_I219_V:
+	case E1000_DEV_ID_PCH_SPT_I219_LM2:
+	case E1000_DEV_ID_PCH_SPT_I219_V2:
+	case E1000_DEV_ID_PCH_LBG_I219_LM3:
+	case E1000_DEV_ID_PCH_SPT_I219_LM4:
+	case E1000_DEV_ID_PCH_SPT_I219_V4:
+	case E1000_DEV_ID_PCH_SPT_I219_LM5:
+	case E1000_DEV_ID_PCH_SPT_I219_V5:
+		mac->type = e1000_pch_spt;
+		break;
+	case E1000_DEV_ID_PCH_CNP_I219_LM6:
+	case E1000_DEV_ID_PCH_CNP_I219_V6:
+	case E1000_DEV_ID_PCH_CNP_I219_LM7:
+	case E1000_DEV_ID_PCH_CNP_I219_V7:
+	case E1000_DEV_ID_PCH_ICP_I219_LM8:
+	case E1000_DEV_ID_PCH_ICP_I219_V8:
+	case E1000_DEV_ID_PCH_ICP_I219_LM9:
+	case E1000_DEV_ID_PCH_ICP_I219_V9:
+		mac->type = e1000_pch_cnp;
+		break;
+	case E1000_DEV_ID_PCH_ADL_I219_LM16:
+	case E1000_DEV_ID_PCH_ADL_I219_V16:
+	case E1000_DEV_ID_PCH_ADL_I219_LM17:
+	case E1000_DEV_ID_PCH_ADL_I219_V17:
+		mac->type = e1000_pch_adp;
 		break;
 	case E1000_DEV_ID_82575EB_COPPER:
 	case E1000_DEV_ID_82575EB_FIBER_SERDES:
@@ -330,6 +332,7 @@ s32 e1000_set_mac_type(struct e1000_hw *hw)
 		break;
 	case E1000_DEV_ID_I210_COPPER_FLASHLESS:
 	case E1000_DEV_ID_I210_SERDES_FLASHLESS:
+	case E1000_DEV_ID_I210_SGMII_FLASHLESS:
 	case E1000_DEV_ID_I210_COPPER:
 	case E1000_DEV_ID_I210_COPPER_OEM1:
 	case E1000_DEV_ID_I210_COPPER_IT:
@@ -444,6 +447,9 @@ s32 e1000_setup_init_funcs(struct e1000_hw *hw, bool init_device)
 	case e1000_pchlan:
 	case e1000_pch2lan:
 	case e1000_pch_lpt:
+	case e1000_pch_spt:
+	case e1000_pch_cnp:
+	case e1000_pch_adp:
 		e1000_init_function_pointers_ich8lan(hw);
 		break;
 	case e1000_82575:
@@ -827,10 +833,12 @@ void e1000_config_collision_dist(struct e1000_hw *hw)
  *
  *  Sets a Receive Address Register (RAR) to the specified address.
  **/
-void e1000_rar_set(struct e1000_hw *hw, u8 *addr, u32 index)
+int e1000_rar_set(struct e1000_hw *hw, u8 *addr, u32 index)
 {
 	if (hw->mac.ops.rar_set)
-		hw->mac.ops.rar_set(hw, addr, index);
+		return hw->mac.ops.rar_set(hw, addr, index);
+
+	return E1000_SUCCESS;
 }
 
 /**

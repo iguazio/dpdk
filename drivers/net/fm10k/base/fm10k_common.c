@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013 - 2015 Intel Corporation
+ */
 
 #include "fm10k_common.h"
 
@@ -229,6 +200,9 @@ s32 fm10k_disable_queues_generic(struct fm10k_hw *hw, u16 q_cnt)
 
 	/* clear tx_ready to prevent any false hits for reset */
 	hw->mac.tx_ready = false;
+
+	if (FM10K_REMOVED(hw->hw_addr))
+		return FM10K_SUCCESS;
 
 	/* clear the enable bit for all rings */
 	for (i = 0; i < q_cnt; i++) {
@@ -542,7 +516,7 @@ s32 fm10k_get_host_state_generic(struct fm10k_hw *hw, bool *host_ready)
 		goto out;
 
 	/* if we somehow dropped the Tx enable we should reset */
-	if (hw->mac.tx_ready && !(txdctl & FM10K_TXDCTL_ENABLE)) {
+	if (mac->tx_ready && !(txdctl & FM10K_TXDCTL_ENABLE)) {
 		ret_val = FM10K_ERR_RESET_REQUESTED;
 		goto out;
 	}
@@ -558,8 +532,12 @@ s32 fm10k_get_host_state_generic(struct fm10k_hw *hw, bool *host_ready)
 		goto out;
 
 	/* interface cannot receive traffic without logical ports */
-	if (mac->dglort_map == FM10K_DGLORTMAP_NONE)
+	if (mac->dglort_map == FM10K_DGLORTMAP_NONE) {
+		if (mac->ops.request_lport_map)
+			ret_val = mac->ops.request_lport_map(hw);
+
 		goto out;
+	}
 
 	/* if we passed all the tests above then the switch is ready and we no
 	 * longer need to check for link

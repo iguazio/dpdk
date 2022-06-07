@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <rte_acl.h>
@@ -349,7 +320,7 @@ acl_add_ptr_range(struct acl_build_context *context,
 	for (n = 0; n < UINT8_MAX + 1; n++)
 		if (n >= low && n <= high)
 			bitset.bits[n / (sizeof(bits_t) * 8)] |=
-				1 << (n % (sizeof(bits_t) * 8));
+				1U << (n % (sizeof(bits_t) * CHAR_BIT));
 
 	return acl_add_ptr(context, root, node, &bitset);
 }
@@ -372,7 +343,7 @@ acl_gen_mask(struct rte_acl_bitset *bitset, uint32_t value, uint32_t mask)
 		if ((n & mask) == value) {
 			range++;
 			bitset->bits[n / (sizeof(bits_t) * 8)] |=
-				1 << (n % (sizeof(bits_t) * 8));
+				1U << (n % (sizeof(bits_t) * CHAR_BIT));
 		}
 	}
 	return range;
@@ -807,9 +778,8 @@ acl_build_reset(struct rte_acl_ctx *ctx)
 }
 
 static void
-acl_gen_range(struct acl_build_context *context,
-	const uint8_t *hi, const uint8_t *lo, int size, int level,
-	struct rte_acl_node *root, struct rte_acl_node *end)
+acl_gen_full_range(struct acl_build_context *context, struct rte_acl_node *root,
+	struct rte_acl_node *end, int size, int level)
 {
 	struct rte_acl_node *node, *prev;
 	uint32_t n;
@@ -817,10 +787,71 @@ acl_gen_range(struct acl_build_context *context,
 	prev = root;
 	for (n = size - 1; n > 0; n--) {
 		node = acl_alloc_node(context, level++);
-		acl_add_ptr_range(context, prev, node, lo[n], hi[n]);
+		acl_add_ptr_range(context, prev, node, 0, UINT8_MAX);
 		prev = node;
 	}
-	acl_add_ptr_range(context, prev, end, lo[0], hi[0]);
+	acl_add_ptr_range(context, prev, end, 0, UINT8_MAX);
+}
+
+static void
+acl_gen_range_mdl(struct acl_build_context *context, struct rte_acl_node *root,
+	struct rte_acl_node *end, uint8_t lo, uint8_t hi, int size, int level)
+{
+	struct rte_acl_node *node;
+
+	node = acl_alloc_node(context, level++);
+	acl_add_ptr_range(context, root, node, lo, hi);
+	acl_gen_full_range(context, node, end, size - 1, level);
+}
+
+static void
+acl_gen_range_low(struct acl_build_context *context, struct rte_acl_node *root,
+	struct rte_acl_node *end, const uint8_t *lo, int size, int level)
+{
+	struct rte_acl_node *node;
+	uint32_t n;
+
+	n = size - 1;
+	if (n == 0) {
+		acl_add_ptr_range(context, root, end, lo[0], UINT8_MAX);
+		return;
+	}
+
+	node = acl_alloc_node(context, level++);
+	acl_add_ptr_range(context, root, node, lo[n], lo[n]);
+
+	/* generate lower-bound sub-trie */
+	acl_gen_range_low(context, node, end, lo, n, level);
+
+	/* generate middle sub-trie */
+	if (n > 1 && lo[n - 1] != UINT8_MAX)
+		acl_gen_range_mdl(context, node, end, lo[n - 1] + 1, UINT8_MAX,
+			n, level);
+}
+
+static void
+acl_gen_range_high(struct acl_build_context *context, struct rte_acl_node *root,
+	struct rte_acl_node *end, const uint8_t *hi, int size, int level)
+{
+	struct rte_acl_node *node;
+	uint32_t n;
+
+	n = size - 1;
+	if (n == 0) {
+		acl_add_ptr_range(context, root, end, 0, hi[0]);
+		return;
+	}
+
+	node = acl_alloc_node(context, level++);
+	acl_add_ptr_range(context, root, node, hi[n], hi[n]);
+
+	/* generate upper-bound sub-trie */
+	acl_gen_range_high(context, node, end, hi, n, level);
+
+	/* generate middle sub-trie */
+	if (n > 1 && hi[n - 1] != 0)
+		acl_gen_range_mdl(context, node, end, 0, hi[n - 1] - 1,
+			n, level);
 }
 
 static struct rte_acl_node *
@@ -828,52 +859,56 @@ acl_gen_range_trie(struct acl_build_context *context,
 	const void *min, const void *max,
 	int size, int level, struct rte_acl_node **pend)
 {
-	int32_t n;
-	struct rte_acl_node *root;
-	const uint8_t *lo = (const uint8_t *)min;
-	const uint8_t *hi = (const uint8_t *)max;
+	int32_t k, n;
+	uint8_t hi_ff, lo_00;
+	struct rte_acl_node *node, *prev, *root;
+	const uint8_t *lo;
+	const uint8_t *hi;
 
-	*pend = acl_alloc_node(context, level+size);
+	lo = min;
+	hi = max;
+
+	*pend = acl_alloc_node(context, level + size);
 	root = acl_alloc_node(context, level++);
+	prev = root;
 
-	if (lo[size - 1] == hi[size - 1]) {
-		acl_gen_range(context, hi, lo, size, level, root, *pend);
-	} else {
-		uint8_t limit_lo[64];
-		uint8_t limit_hi[64];
-		uint8_t hi_ff = UINT8_MAX;
-		uint8_t lo_00 = 0;
-
-		memset(limit_lo, 0, RTE_DIM(limit_lo));
-		memset(limit_hi, UINT8_MAX, RTE_DIM(limit_hi));
-
-		for (n = size - 2; n >= 0; n--) {
-			hi_ff = (uint8_t)(hi_ff & hi[n]);
-			lo_00 = (uint8_t)(lo_00 | lo[n]);
-		}
-
-		if (hi_ff != UINT8_MAX) {
-			limit_lo[size - 1] = hi[size - 1];
-			acl_gen_range(context, hi, limit_lo, size, level,
-				root, *pend);
-		}
-
-		if (lo_00 != 0) {
-			limit_hi[size - 1] = lo[size - 1];
-			acl_gen_range(context, limit_hi, lo, size, level,
-				root, *pend);
-		}
-
-		if (hi[size - 1] - lo[size - 1] > 1 ||
-				lo_00 == 0 ||
-				hi_ff == UINT8_MAX) {
-			limit_lo[size-1] = (uint8_t)(lo[size-1] + (lo_00 != 0));
-			limit_hi[size-1] = (uint8_t)(hi[size-1] -
-				(hi_ff != UINT8_MAX));
-			acl_gen_range(context, limit_hi, limit_lo, size,
-				level, root, *pend);
-		}
+	/* build common sub-trie till possible */
+	for (n = size - 1; n > 0 && lo[n] == hi[n]; n--) {
+		node = acl_alloc_node(context, level++);
+		acl_add_ptr_range(context, prev, node, lo[n], hi[n]);
+		prev = node;
 	}
+
+	/* no branch needed, just one sub-trie */
+	if (n == 0) {
+		acl_add_ptr_range(context, prev, *pend, lo[0], hi[0]);
+		return root;
+	}
+
+	/* gather information about divirgent paths */
+	lo_00 = 0;
+	hi_ff = UINT8_MAX;
+	for (k = n - 1; k >= 0; k--) {
+		hi_ff &= hi[k];
+		lo_00 |= lo[k];
+	}
+
+	/* generate left (lower-bound) sub-trie */
+	if (lo_00 != 0)
+		acl_gen_range_low(context, prev, *pend, lo, n + 1, level);
+
+	/* generate right (upper-bound) sub-trie */
+	if (hi_ff != UINT8_MAX)
+		acl_gen_range_high(context, prev, *pend, hi, n + 1, level);
+
+	/* generate sub-trie in the middle */
+	if (lo[n] + 1 != hi[n] || lo_00 == 0 || hi_ff == UINT8_MAX) {
+		lo_00 = lo[n] + (lo_00 != 0);
+		hi_ff = hi[n] - (hi_ff != UINT8_MAX);
+		acl_gen_range_mdl(context, prev, *pend, lo_00, hi_ff,
+			n + 1, level);
+	}
+
 	return root;
 }
 
@@ -886,8 +921,8 @@ acl_gen_mask_trie(struct acl_build_context *context,
 	struct rte_acl_node *root;
 	struct rte_acl_node *node, *prev;
 	struct rte_acl_bitset bits;
-	const uint8_t *val = (const uint8_t *)value;
-	const uint8_t *msk = (const uint8_t *)mask;
+	const uint8_t *val = value;
+	const uint8_t *msk = mask;
 
 	root = acl_alloc_node(context, level++);
 	prev = root;
@@ -1001,7 +1036,7 @@ build_trie(struct acl_build_context *context, struct rte_acl_build_rule *head,
 				sizeof(*end->mrt));
 
 		for (m = context->cfg.num_categories; 0 != m--; ) {
-			if (rule->f->data.category_mask & (1 << m)) {
+			if (rule->f->data.category_mask & (1U << m)) {
 				end->mrt->results[m] = rule->f->data.userdata;
 				end->mrt->priority[m] = rule->f->data.priority;
 			} else {
@@ -1157,42 +1192,100 @@ rule_cmp_wildness(struct rte_acl_build_rule *r1, struct rte_acl_build_rule *r2)
 		int field_index = r1->config->defs[n].field_index;
 
 		if (r1->wildness[field_index] != r2->wildness[field_index])
-			return (r1->wildness[field_index] -
-				r2->wildness[field_index]);
+			return r1->wildness[field_index] -
+				r2->wildness[field_index];
 	}
 	return 0;
 }
 
 /*
+ * Split the rte_acl_build_rule list into two lists.
+ */
+static void
+rule_list_split(struct rte_acl_build_rule *source,
+	struct rte_acl_build_rule **list_a,
+	struct rte_acl_build_rule **list_b)
+{
+	struct rte_acl_build_rule *fast;
+	struct rte_acl_build_rule *slow;
+
+	if (source == NULL || source->next == NULL) {
+		/* length < 2 cases */
+		*list_a = source;
+		*list_b = NULL;
+	} else {
+		slow = source;
+		fast = source->next;
+		/* Advance 'fast' two nodes, and advance 'slow' one node */
+		while (fast != NULL) {
+			fast = fast->next;
+			if (fast != NULL) {
+				slow = slow->next;
+				fast = fast->next;
+			}
+		}
+		/* 'slow' is before the midpoint in the list, so split it in two
+		   at that point. */
+		*list_a = source;
+		*list_b = slow->next;
+		slow->next = NULL;
+	}
+}
+
+/*
+ * Merge two sorted lists.
+ */
+static struct rte_acl_build_rule *
+rule_list_sorted_merge(struct rte_acl_build_rule *a,
+	struct rte_acl_build_rule *b)
+{
+	struct rte_acl_build_rule *result = NULL;
+	struct rte_acl_build_rule **last_next = &result;
+
+	while (1) {
+		if (a == NULL) {
+			*last_next = b;
+			break;
+		} else if (b == NULL) {
+			*last_next = a;
+			break;
+		}
+		if (rule_cmp_wildness(a, b) >= 0) {
+			*last_next = a;
+			last_next = &a->next;
+			a = a->next;
+		} else {
+			*last_next = b;
+			last_next = &b->next;
+			b = b->next;
+		}
+	}
+	return result;
+}
+
+/*
  * Sort list of rules based on the rules wildness.
+ * Use recursive mergesort algorithm.
  */
 static struct rte_acl_build_rule *
 sort_rules(struct rte_acl_build_rule *head)
 {
-	struct rte_acl_build_rule *new_head;
-	struct rte_acl_build_rule *l, *r, **p;
+	struct rte_acl_build_rule *a;
+	struct rte_acl_build_rule *b;
 
-	new_head = NULL;
-	while (head != NULL) {
+	/* Base case -- length 0 or 1 */
+	if (head == NULL || head->next == NULL)
+		return head;
 
-		/* remove element from the head of the old list. */
-		r = head;
-		head = r->next;
-		r->next = NULL;
+	/* Split head into 'a' and 'b' sublists */
+	rule_list_split(head, &a, &b);
 
-		/* walk through new sorted list to find a proper place. */
-		for (p = &new_head;
-				(l = *p) != NULL &&
-				rule_cmp_wildness(l, r) >= 0;
-				p = &l->next)
-			;
+	/* Recursively sort the sublists */
+	a = sort_rules(a);
+	b = sort_rules(b);
 
-		/* insert element into the new sorted list. */
-		r->next = *p;
-		*p = r;
-	}
-
-	return new_head;
+	/* answer = merge the two sorted lists together */
+	return rule_list_sorted_merge(a, b);
 }
 
 static uint32_t

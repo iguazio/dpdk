@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #include <string.h>
@@ -46,27 +17,30 @@ table_test table_tests[] = {
 	test_table_lpm_ipv6,
 	test_table_hash_lru,
 	test_table_hash_ext,
+	test_table_hash_cuckoo,
 };
 
 #define PREPARE_PACKET(mbuf, value) do {				\
 	uint32_t *k32, *signature;					\
 	uint8_t *key;							\
 	mbuf = rte_pktmbuf_alloc(pool);					\
-	signature = RTE_MBUF_METADATA_UINT32_PTR(mbuf, 0);		\
-	key = RTE_MBUF_METADATA_UINT8_PTR(mbuf, 32);			\
+	signature = RTE_MBUF_METADATA_UINT32_PTR(mbuf,			\
+			APP_METADATA_OFFSET(0));			\
+	key = RTE_MBUF_METADATA_UINT8_PTR(mbuf,			\
+			APP_METADATA_OFFSET(32));			\
 	memset(key, 0, 32);						\
 	k32 = (uint32_t *) key;						\
 	k32[0] = (value);						\
-	*signature = pipeline_test_hash(key, 0, 0);			\
+	*signature = pipeline_test_hash(key, NULL, 0, 0);			\
 } while (0)
 
 unsigned n_table_tests = RTE_DIM(table_tests);
 
 /* Function prototypes */
 static int
-test_table_hash_lru_generic(struct rte_table_ops *ops);
+test_table_hash_lru_generic(struct rte_table_ops *ops, uint32_t key_size);
 static int
-test_table_hash_ext_generic(struct rte_table_ops *ops);
+test_table_hash_ext_generic(struct rte_table_ops *ops, uint32_t key_size);
 
 struct rte_bucket_4_8 {
 	/* Cache line 0 */
@@ -203,8 +177,11 @@ test_table_array(void)
 	void *entry_ptr;
 	int key_found;
 
-	/* Create */
-	struct rte_table_array_params array_params;
+	/* Initialize params and create tables */
+	struct rte_table_array_params array_params = {
+		.n_entries = 7,
+		.offset = APP_METADATA_OFFSET(1)
+	};
 
 	table = rte_table_array_ops.f_create(NULL, 0, 1);
 	if (table != NULL)
@@ -223,13 +200,13 @@ test_table_array(void)
 		return -3;
 
 	array_params.n_entries = 1 << 24;
-	array_params.offset = 1;
+	array_params.offset = APP_METADATA_OFFSET(1);
 
 	table = rte_table_array_ops.f_create(&array_params, 0, 1);
-	if (table != NULL)
+	if (table == NULL)
 		return -4;
 
-	array_params.offset = 32;
+	array_params.offset = APP_METADATA_OFFSET(32);
 
 	table = rte_table_array_ops.f_create(&array_params, 0, 1);
 	if (table == NULL)
@@ -317,27 +294,35 @@ test_table_lpm(void)
 	int key_found;
 	uint32_t entry_size = 1;
 
-	/* Create */
-	struct rte_table_lpm_params lpm_params;
+	/* Initialize params and create tables */
+	struct rte_table_lpm_params lpm_params = {
+		.name = "LPM",
+		.n_rules = 1 << 24,
+		.number_tbl8s = 1 << 8,
+		.flags = 0,
+		.entry_unique_size = entry_size,
+		.offset = APP_METADATA_OFFSET(1)
+	};
 
 	table = rte_table_lpm_ops.f_create(NULL, 0, entry_size);
 	if (table != NULL)
 		return -1;
 
-	lpm_params.n_rules = 0;
+	lpm_params.name = NULL;
 
 	table = rte_table_lpm_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
 		return -2;
 
-	lpm_params.n_rules = 1 << 24;
-	lpm_params.offset = 1;
+	lpm_params.name = "LPM";
+	lpm_params.n_rules = 0;
 
 	table = rte_table_lpm_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
 		return -3;
 
-	lpm_params.offset = 32;
+	lpm_params.n_rules = 1 << 24;
+	lpm_params.offset = APP_METADATA_OFFSET(32);
 	lpm_params.entry_unique_size = 0;
 
 	table = rte_table_lpm_ops.f_create(&lpm_params, 0, entry_size);
@@ -451,7 +436,7 @@ test_table_lpm(void)
 	rte_table_lpm_ops.f_lookup(table, mbufs, -1,
 		&result_mask, (void **)entries);
 	if (result_mask != expected_mask)
-		return -21;
+		return -23;
 
 	/* Free resources */
 	for (i = 0; i < RTE_PORT_IN_BURST_SIZE_MAX; i++)
@@ -475,51 +460,64 @@ test_table_lpm_ipv6(void)
 	int key_found;
 	uint32_t entry_size = 1;
 
-	/* Create */
-	struct rte_table_lpm_ipv6_params lpm_params;
+	/* Initialize params and create tables */
+	struct rte_table_lpm_ipv6_params lpm_params = {
+		.name = "LPM",
+		.n_rules = 1 << 24,
+		.number_tbl8s = 1 << 18,
+		.entry_unique_size = entry_size,
+		.offset = APP_METADATA_OFFSET(32)
+	};
 
 	table = rte_table_lpm_ipv6_ops.f_create(NULL, 0, entry_size);
 	if (table != NULL)
 		return -1;
 
-	lpm_params.n_rules = 0;
+	lpm_params.name = NULL;
 
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
 		return -2;
+
+	lpm_params.name = "LPM";
+	lpm_params.n_rules = 0;
+
+	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
+	if (table != NULL)
+		return -3;
 
 	lpm_params.n_rules = 1 << 24;
 	lpm_params.number_tbl8s = 0;
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
-		return -2;
+		return -4;
 
-	lpm_params.number_tbl8s = 1 << 21;
+	lpm_params.number_tbl8s = 1 << 18;
 	lpm_params.entry_unique_size = 0;
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
-		return -2;
+		return -5;
 
 	lpm_params.entry_unique_size = entry_size + 1;
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table != NULL)
-		return -2;
+		return -6;
 
 	lpm_params.entry_unique_size = entry_size;
-	lpm_params.offset = 32;
+	lpm_params.offset = APP_METADATA_OFFSET(32);
 
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table == NULL)
-		return -3;
+		return -7;
 
 	/* Free */
 	status = rte_table_lpm_ipv6_ops.f_free(table);
 	if (status < 0)
-		return -4;
+		return -8;
 
 	status = rte_table_lpm_ipv6_ops.f_free(NULL);
 	if (status == 0)
-		return -5;
+		return -9;
 
 	/* Add */
 	struct rte_table_lpm_ipv6_key lpm_key;
@@ -531,80 +529,80 @@ test_table_lpm_ipv6(void)
 
 	table = rte_table_lpm_ipv6_ops.f_create(&lpm_params, 0, entry_size);
 	if (table == NULL)
-		return -6;
+		return -10;
 
 	status = rte_table_lpm_ipv6_ops.f_add(NULL, &lpm_key, &entry,
 		&key_found, &entry_ptr);
 	if (status == 0)
-		return -7;
+		return -11;
 
 	status = rte_table_lpm_ipv6_ops.f_add(table, NULL, &entry, &key_found,
 		&entry_ptr);
 	if (status == 0)
-		return -8;
+		return -12;
 
 	status = rte_table_lpm_ipv6_ops.f_add(table, &lpm_key, NULL, &key_found,
 		&entry_ptr);
 	if (status == 0)
-		return -9;
+		return -13;
 
 	lpm_key.depth = 0;
 	status = rte_table_lpm_ipv6_ops.f_add(table, &lpm_key, &entry,
 		&key_found, &entry_ptr);
 	if (status == 0)
-		return -10;
+		return -14;
 
 	lpm_key.depth = 129;
 	status = rte_table_lpm_ipv6_ops.f_add(table, &lpm_key, &entry,
 		&key_found, &entry_ptr);
 	if (status == 0)
-		return -11;
+		return -15;
 
 	lpm_key.depth = 16;
 	status = rte_table_lpm_ipv6_ops.f_add(table, &lpm_key, &entry,
 		&key_found, &entry_ptr);
 	if (status != 0)
-		return -12;
+		return -16;
 
 	/* Delete */
 	status = rte_table_lpm_ipv6_ops.f_delete(NULL, &lpm_key, &key_found,
 		NULL);
 	if (status == 0)
-		return -13;
+		return -17;
 
 	status = rte_table_lpm_ipv6_ops.f_delete(table, NULL, &key_found, NULL);
 	if (status == 0)
-		return -14;
+		return -18;
 
 	lpm_key.depth = 0;
 	status = rte_table_lpm_ipv6_ops.f_delete(table, &lpm_key, &key_found,
 		NULL);
 	if (status == 0)
-		return -15;
+		return -19;
 
 	lpm_key.depth = 129;
 	status = rte_table_lpm_ipv6_ops.f_delete(table, &lpm_key, &key_found,
 		NULL);
 	if (status == 0)
-		return -16;
+		return -20;
 
 	lpm_key.depth = 16;
 	status = rte_table_lpm_ipv6_ops.f_delete(table, &lpm_key, &key_found,
 		NULL);
 	if (status != 0)
-		return -17;
+		return -21;
 
 	status = rte_table_lpm_ipv6_ops.f_delete(table, &lpm_key, &key_found,
 		NULL);
 	if (status != 0)
-		return -18;
+		return -22;
 
 	/* Traffic flow */
 	entry = 'A';
 	status = rte_table_lpm_ipv6_ops.f_add(table, &lpm_key, &entry,
 		&key_found, &entry_ptr);
 	if (status < 0)
-		return -19;
+		return -23;
 
 	for (i = 0; i < RTE_PORT_IN_BURST_SIZE_MAX; i++)
 		if (i % 2 == 0) {
@@ -616,7 +614,7 @@ test_table_lpm_ipv6(void)
 	rte_table_lpm_ipv6_ops.f_lookup(table, mbufs, -1,
 		&result_mask, (void **)entries);
 	if (result_mask != expected_mask)
-		return -20;
+		return -24;
 
 	/* Free resources */
 	for (i = 0; i < RTE_PORT_IN_BURST_SIZE_MAX; i++)
@@ -628,7 +626,7 @@ test_table_lpm_ipv6(void)
 }
 
 static int
-test_table_hash_lru_generic(struct rte_table_ops *ops)
+test_table_hash_lru_generic(struct rte_table_ops *ops, uint32_t key_size)
 {
 	int status, i;
 	uint64_t expected_mask = 0, result_mask;
@@ -639,30 +637,25 @@ test_table_hash_lru_generic(struct rte_table_ops *ops)
 	void *entry_ptr;
 	int key_found;
 
-	/* Create */
-	struct rte_table_hash_key8_lru_params hash_params;
+	/* Initialize params and create tables */
+	struct rte_table_hash_params hash_params = {
+		.name = "TABLE",
+		.key_size = key_size,
+		.key_offset = APP_METADATA_OFFSET(32),
+		.key_mask = NULL,
+		.n_keys = 1 << 10,
+		.n_buckets = 1 << 10,
+		.f_hash = pipeline_test_hash,
+		.seed = 0,
+	};
 
-	hash_params.n_entries = 0;
+	hash_params.n_keys = 0;
 
 	table = ops->f_create(&hash_params, 0, 1);
 	if (table != NULL)
 		return -1;
 
-	hash_params.n_entries = 1 << 10;
-	hash_params.signature_offset = 1;
-
-	table = ops->f_create(&hash_params, 0, 1);
-	if (table != NULL)
-		return -2;
-
-	hash_params.signature_offset = 0;
-	hash_params.key_offset = 1;
-
-	table = ops->f_create(&hash_params, 0, 1);
-	if (table != NULL)
-		return -3;
-
-	hash_params.key_offset = 32;
+	hash_params.n_keys = 1 << 10;
 	hash_params.f_hash = NULL;
 
 	table = ops->f_create(&hash_params, 0, 1);
@@ -736,7 +729,7 @@ test_table_hash_lru_generic(struct rte_table_ops *ops)
 }
 
 static int
-test_table_hash_ext_generic(struct rte_table_ops *ops)
+test_table_hash_ext_generic(struct rte_table_ops *ops, uint32_t key_size)
 {
 	int status, i;
 	uint64_t expected_mask = 0, result_mask;
@@ -747,35 +740,32 @@ test_table_hash_ext_generic(struct rte_table_ops *ops)
 	int key_found;
 	void *entry_ptr;
 
-	/* Create */
-	struct rte_table_hash_key8_ext_params hash_params;
+	/* Initialize params and create tables */
+	struct rte_table_hash_params hash_params = {
+		.name = "TABLE",
+		.key_size = key_size,
+		.key_offset = APP_METADATA_OFFSET(32),
+		.key_mask = NULL,
+		.n_keys = 1 << 10,
+		.n_buckets = 1 << 10,
+		.f_hash = pipeline_test_hash,
+		.seed = 0,
+	};
 
-	hash_params.n_entries = 0;
+	hash_params.n_keys = 0;
 
 	table = ops->f_create(&hash_params, 0, 1);
 	if (table != NULL)
 		return -1;
 
-	hash_params.n_entries = 1 << 10;
-	hash_params.n_entries_ext = 0;
-	table = ops->f_create(&hash_params, 0, 1);
-	if (table != NULL)
-		return -2;
-
-	hash_params.n_entries_ext = 1 << 4;
-	hash_params.signature_offset = 1;
-	table = ops->f_create(&hash_params, 0, 1);
-	if (table != NULL)
-		return -2;
-
-	hash_params.signature_offset = 0;
-	hash_params.key_offset = 1;
+	hash_params.n_keys = 1 << 10;
+	hash_params.key_offset = APP_METADATA_OFFSET(1);
 
 	table = ops->f_create(&hash_params, 0, 1);
-	if (table != NULL)
+	if (table == NULL)
 		return -3;
 
-	hash_params.key_offset = 32;
+	hash_params.key_offset = APP_METADATA_OFFSET(32);
 	hash_params.f_hash = NULL;
 
 	table = ops->f_create(&hash_params, 0, 1);
@@ -853,20 +843,21 @@ test_table_hash_lru(void)
 {
 	int status;
 
-	status = test_table_hash_lru_generic(&rte_table_hash_key8_lru_ops);
+	status = test_table_hash_lru_generic(
+		&rte_table_hash_key8_lru_ops,
+		8);
 	if (status < 0)
 		return status;
 
 	status = test_table_hash_lru_generic(
-		&rte_table_hash_key8_lru_dosig_ops);
+		&rte_table_hash_key16_lru_ops,
+		16);
 	if (status < 0)
 		return status;
 
-	status = test_table_hash_lru_generic(&rte_table_hash_key16_lru_ops);
-	if (status < 0)
-		return status;
-
-	status = test_table_hash_lru_generic(&rte_table_hash_key32_lru_ops);
+	status = test_table_hash_lru_generic(
+		&rte_table_hash_key32_lru_ops,
+		32);
 	if (status < 0)
 		return status;
 
@@ -882,22 +873,181 @@ test_table_hash_ext(void)
 {
 	int status;
 
-	status = test_table_hash_ext_generic(&rte_table_hash_key8_ext_ops);
+	status = test_table_hash_ext_generic(&rte_table_hash_key8_ext_ops, 8);
 	if (status < 0)
 		return status;
 
-	status = test_table_hash_ext_generic(
-		&rte_table_hash_key8_ext_dosig_ops);
+	status = test_table_hash_ext_generic(&rte_table_hash_key16_ext_ops, 16);
 	if (status < 0)
 		return status;
 
-	status = test_table_hash_ext_generic(&rte_table_hash_key16_ext_ops);
+	status = test_table_hash_ext_generic(&rte_table_hash_key32_ext_ops, 32);
 	if (status < 0)
 		return status;
 
-	status = test_table_hash_ext_generic(&rte_table_hash_key32_ext_ops);
+	return 0;
+}
+
+
+int
+test_table_hash_cuckoo(void)
+{
+	int status, i;
+	uint64_t expected_mask = 0, result_mask;
+	struct rte_mbuf *mbufs[RTE_PORT_IN_BURST_SIZE_MAX];
+	void *table;
+	char *entries[RTE_PORT_IN_BURST_SIZE_MAX];
+	char entry;
+	void *entry_ptr;
+	int key_found;
+	uint32_t entry_size = 1;
+
+	/* Initialize params and create tables */
+	struct rte_table_hash_cuckoo_params cuckoo_params = {
+		.name = "TABLE",
+		.key_size = 32,
+		.key_offset = APP_METADATA_OFFSET(32),
+		.key_mask = NULL,
+		.n_keys = 1 << 16,
+		.n_buckets = 1 << 16,
+		.f_hash = pipeline_test_hash_cuckoo,
+		.seed = 0,
+	};
+
+	table = rte_table_hash_cuckoo_ops.f_create(NULL, 0, entry_size);
+	if (table != NULL)
+		return -1;
+
+	cuckoo_params.key_size = 0;
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params,
+		0, entry_size);
+	if (table != NULL)
+		return -2;
+
+	cuckoo_params.key_size = 32;
+	cuckoo_params.n_keys = 0;
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params,
+		0, entry_size);
+	if (table != NULL)
+		return -3;
+
+	cuckoo_params.n_keys = 1 << 24;
+	cuckoo_params.f_hash = NULL;
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params,
+		0, entry_size);
+	if (table != NULL)
+		return -4;
+
+	cuckoo_params.f_hash = pipeline_test_hash_cuckoo;
+	cuckoo_params.name = NULL;
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params,
+		0, entry_size);
+	if (table != NULL)
+		return -5;
+
+	cuckoo_params.name = "CUCKOO";
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params,
+		0, entry_size);
+	if (table == NULL)
+		return -6;
+
+	/* Free */
+	status = rte_table_hash_cuckoo_ops.f_free(table);
 	if (status < 0)
-		return status;
+		return -7;
+
+	status = rte_table_hash_cuckoo_ops.f_free(NULL);
+	if (status == 0)
+		return -8;
+
+	/* Add */
+	uint8_t key_cuckoo[32];
+	uint32_t *kcuckoo = (uint32_t *) &key_cuckoo;
+
+	memset(key_cuckoo, 0, 32);
+	kcuckoo[0] = rte_be_to_cpu_32(0xadadadad);
+
+	table = rte_table_hash_cuckoo_ops.f_create(&cuckoo_params, 0, 1);
+	if (table == NULL)
+		return -9;
+
+	entry = 'A';
+	status = rte_table_hash_cuckoo_ops.f_add(NULL, &key_cuckoo,
+		&entry, &key_found, &entry_ptr);
+	if (status == 0)
+		return -10;
+
+	status = rte_table_hash_cuckoo_ops.f_add(table, NULL, &entry,
+		&key_found, &entry_ptr);
+	if (status == 0)
+		return -11;
+
+	status = rte_table_hash_cuckoo_ops.f_add(table, &key_cuckoo,
+		NULL, &key_found, &entry_ptr);
+	if (status == 0)
+		return -12;
+
+	status = rte_table_hash_cuckoo_ops.f_add(table, &key_cuckoo,
+		&entry, &key_found, &entry_ptr);
+	if (status != 0)
+		return -13;
+
+	status = rte_table_hash_cuckoo_ops.f_add(table, &key_cuckoo,
+		&entry, &key_found, &entry_ptr);
+	if (status != 0)
+		return -14;
+
+	/* Delete */
+	status = rte_table_hash_cuckoo_ops.f_delete(NULL, &key_cuckoo,
+		&key_found, NULL);
+	if (status == 0)
+		return -15;
+
+	status = rte_table_hash_cuckoo_ops.f_delete(table, NULL,
+		&key_found, NULL);
+	if (status == 0)
+		return -16;
+
+	status = rte_table_hash_cuckoo_ops.f_delete(table, &key_cuckoo,
+		&key_found, NULL);
+	if (status != 0)
+		return -17;
+
+	status = rte_table_hash_cuckoo_ops.f_delete(table, &key_cuckoo,
+		&key_found, NULL);
+	if (status != -ENOENT)
+		return -18;
+
+	/* Traffic flow */
+	entry = 'A';
+	status = rte_table_hash_cuckoo_ops.f_add(table, &key_cuckoo,
+		&entry, &key_found,
+		&entry_ptr);
+	if (status < 0)
+		return -19;
+
+	for (i = 0; i < RTE_PORT_IN_BURST_SIZE_MAX; i++)
+		if (i % 2 == 0) {
+			expected_mask |= (uint64_t)1 << i;
+			PREPARE_PACKET(mbufs[i], 0xadadadad);
+		} else
+			PREPARE_PACKET(mbufs[i], 0xadadadab);
+
+	rte_table_hash_cuckoo_ops.f_lookup(table, mbufs, -1,
+		&result_mask, (void **)entries);
+	if (result_mask != expected_mask)
+		return -20;
+
+	/* Free resources */
+	for (i = 0; i < RTE_PORT_IN_BURST_SIZE_MAX; i++)
+		rte_pktmbuf_free(mbufs[i]);
+
+	status = rte_table_hash_cuckoo_ops.f_free(table);
 
 	return 0;
 }

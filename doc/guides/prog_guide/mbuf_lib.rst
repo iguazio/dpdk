@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 .. _Mbuf_Library:
 
@@ -37,9 +10,8 @@ The mbuf library provides the ability to allocate and free buffers (mbufs)
 that may be used by the DPDK application to store message buffers.
 The message buffers are stored in a mempool, using the :ref:`Mempool Library <Mempool_Library>`.
 
-A rte_mbuf struct can carry network packet buffers
-or generic control buffers (indicated by the CTRL_MBUF_FLAG).
-This can be extended to other types.
+A rte_mbuf struct generally carries network packet buffers, but it can actually
+be any data (control data, events, ...).
 The rte_mbuf header structure is kept as small as possible and currently uses
 just two cache lines, with the most frequently used fields being on the first
 of the two cache lines.
@@ -95,13 +67,13 @@ Buffers Stored in Memory Pools
 The Buffer Manager uses the :ref:`Mempool Library <Mempool_Library>` to allocate buffers.
 Therefore, it ensures that the packet header is interleaved optimally across the channels and ranks for L3 processing.
 An mbuf contains a field indicating the pool that it originated from.
-When calling rte_ctrlmbuf_free(m) or rte_pktmbuf_free(m), the mbuf returns to its original pool.
+When calling rte_pktmbuf_free(m), the mbuf returns to its original pool.
 
 Constructors
 ------------
 
-Packet and control mbuf constructors are provided by the API.
-The rte_pktmbuf_init() and rte_ctrlmbuf_init() functions initialize some fields in the mbuf structure that
+Packet mbuf constructors are provided by the API.
+The rte_pktmbuf_init() function initializes some fields in the mbuf structure that
 are not modified by the user once created (mbuf type, origin pool, buffer start address, and so on).
 This function is given as a callback function to the rte_mempool_create() function at pool creation time.
 
@@ -175,8 +147,8 @@ a vxlan-encapsulated tcp packet:
     set out_ip checksum to 0 in the packet
     set out_udp checksum to pseudo header using rte_ipv4_phdr_cksum()
 
-   This is supported on hardware advertising DEV_TX_OFFLOAD_IPV4_CKSUM
-   and DEV_TX_OFFLOAD_UDP_CKSUM.
+  This is supported on hardware advertising DEV_TX_OFFLOAD_IPV4_CKSUM
+  and DEV_TX_OFFLOAD_UDP_CKSUM.
 
 - calculate checksum of in_ip::
 
@@ -228,12 +200,37 @@ a vxlan-encapsulated tcp packet:
     set in_ip checksum to 0 in the packet
     set in_tcp checksum to pseudo header using rte_ipv4_phdr_cksum()
 
-   This is supported on hardware advertising DEV_TX_OFFLOAD_IPV4_CKSUM,
-   DEV_TX_OFFLOAD_UDP_CKSUM and DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM.
+  This is supported on hardware advertising DEV_TX_OFFLOAD_IPV4_CKSUM,
+  DEV_TX_OFFLOAD_UDP_CKSUM and DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM.
 
 The list of flags and their precise meaning is described in the mbuf API
 documentation (rte_mbuf.h). Also refer to the testpmd source code
 (specifically the csumonly.c file) for details.
+
+Dynamic fields and flags
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The size of the mbuf is constrained and limited;
+while the amount of metadata to save for each packet is quite unlimited.
+The most basic networking information already find their place
+in the existing mbuf fields and flags.
+
+If new features need to be added, the new fields and flags should fit
+in the "dynamic space", by registering some room in the mbuf structure:
+
+dynamic field
+   named area in the mbuf structure,
+   with a given size (at least 1 byte) and alignment constraint.
+
+dynamic flag
+   named bit in the mbuf structure,
+   stored in the field ``ol_flags``.
+
+The dynamic fields and flags are managed with the functions ``rte_mbuf_dyn*``.
+
+It is not possible to unregister fields or flags.
+
+.. _direct_indirect_buffer:
 
 Direct and Indirect Buffers
 ---------------------------
@@ -251,7 +248,8 @@ Similarly, whenever the indirect buffer is detached, the reference counter on th
 If the resulting reference counter is equal to 0, the direct buffer is freed since it is no longer in use.
 
 There are a few things to remember when dealing with indirect buffers.
-First of all, it is not possible to attach an indirect buffer to another indirect buffer.
+First of all, an indirect buffer is never attached to another indirect buffer.
+Attempting to attach buffer A to indirect buffer B that is attached to C, makes rte_pktmbuf_attach() automatically attach A to C, effectively cloning B.
 Secondly, for a buffer to become indirect, its reference counter must be equal to 1,
 that is, it must not be already referenced by another indirect buffer.
 Finally, it is not possible to reattach an indirect buffer to the direct buffer (unless it is detached first).

@@ -1,41 +1,13 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #include "e1000_mbx.h"
 
 /**
  *  e1000_null_mbx_check_for_flag - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @mbx_id: id of mailbox to read
  **/
 STATIC s32 e1000_null_mbx_check_for_flag(struct e1000_hw E1000_UNUSEDARG *hw,
 					 u16 E1000_UNUSEDARG mbx_id)
@@ -49,6 +21,9 @@ STATIC s32 e1000_null_mbx_check_for_flag(struct e1000_hw E1000_UNUSEDARG *hw,
 /**
  *  e1000_null_mbx_transact - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @msg: The message buffer
+ *  @size: Length of buffer
+ *  @mbx_id: id of mailbox to read
  **/
 STATIC s32 e1000_null_mbx_transact(struct e1000_hw E1000_UNUSEDARG *hw,
 				   u32 E1000_UNUSEDARG *msg,
@@ -430,15 +405,21 @@ STATIC s32 e1000_check_for_rst_vf(struct e1000_hw *hw,
 STATIC s32 e1000_obtain_mbx_lock_vf(struct e1000_hw *hw)
 {
 	s32 ret_val = -E1000_ERR_MBX;
+	int count = 10;
 
 	DEBUGFUNC("e1000_obtain_mbx_lock_vf");
 
-	/* Take ownership of the buffer */
-	E1000_WRITE_REG(hw, E1000_V2PMAILBOX(0), E1000_V2PMAILBOX_VFU);
+	do {
+		/* Take ownership of the buffer */
+		E1000_WRITE_REG(hw, E1000_V2PMAILBOX(0), E1000_V2PMAILBOX_VFU);
 
-	/* reserve mailbox for vf use */
-	if (e1000_read_v2p_mailbox(hw) & E1000_V2PMAILBOX_VFU)
-		ret_val = E1000_SUCCESS;
+		/* reserve mailbox for vf use */
+		if (e1000_read_v2p_mailbox(hw) & E1000_V2PMAILBOX_VFU) {
+			ret_val = E1000_SUCCESS;
+			break;
+		}
+		usec_delay(1000);
+	} while (count-- > 0);
 
 	return ret_val;
 }
@@ -645,18 +626,26 @@ STATIC s32 e1000_obtain_mbx_lock_pf(struct e1000_hw *hw, u16 vf_number)
 {
 	s32 ret_val = -E1000_ERR_MBX;
 	u32 p2v_mailbox;
+	int count = 10;
 
 	DEBUGFUNC("e1000_obtain_mbx_lock_pf");
 
-	/* Take ownership of the buffer */
-	E1000_WRITE_REG(hw, E1000_P2VMAILBOX(vf_number), E1000_P2VMAILBOX_PFU);
+	do {
+		/* Take ownership of the buffer */
+		E1000_WRITE_REG(hw, E1000_P2VMAILBOX(vf_number),
+				E1000_P2VMAILBOX_PFU);
 
-	/* reserve mailbox for vf use */
-	p2v_mailbox = E1000_READ_REG(hw, E1000_P2VMAILBOX(vf_number));
-	if (p2v_mailbox & E1000_P2VMAILBOX_PFU)
-		ret_val = E1000_SUCCESS;
+		/* reserve mailbox for pf use */
+		p2v_mailbox = E1000_READ_REG(hw, E1000_P2VMAILBOX(vf_number));
+		if (p2v_mailbox & E1000_P2VMAILBOX_PFU) {
+			ret_val = E1000_SUCCESS;
+			break;
+		}
+		usec_delay(1000);
+	} while (count-- > 0);
 
 	return ret_val;
+
 }
 
 /**
@@ -770,6 +759,7 @@ s32 e1000_init_mbx_params_pf(struct e1000_hw *hw)
 		mbx->stats.reqs = 0;
 		mbx->stats.acks = 0;
 		mbx->stats.rsts = 0;
+		/* Fall through */
 	default:
 		return E1000_SUCCESS;
 	}

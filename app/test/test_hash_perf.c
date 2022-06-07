@@ -1,604 +1,637 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2015 Intel Corporation
  */
 
 #include <stdio.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdarg.h>
-#include <errno.h>
-#include <sys/queue.h>
+#include <inttypes.h>
 
-#include <rte_common.h>
 #include <rte_lcore.h>
-#include <rte_malloc.h>
 #include <rte_cycles.h>
+#include <rte_malloc.h>
+#include <rte_hash.h>
+#include <rte_hash_crc.h>
+#include <rte_jhash.h>
+#include <rte_fbk_hash.h>
 #include <rte_random.h>
-#include <rte_memory.h>
-#include <rte_memzone.h>
-#include <rte_eal.h>
-#include <rte_ip.h>
 #include <rte_string_fns.h>
 
 #include "test.h"
 
-#include <rte_hash.h>
-#include <rte_fbk_hash.h>
-#include <rte_jhash.h>
-#include <rte_hash_crc.h>
+#define MAX_ENTRIES (1 << 19)
+#define KEYS_TO_ADD (MAX_ENTRIES)
+#define ADD_PERCENT 0.75 /* 75% table utilization */
+#define NUM_LOOKUPS (KEYS_TO_ADD * 5) /* Loop among keys added, several times */
+/* BUCKET_SIZE should be same as RTE_HASH_BUCKET_ENTRIES in rte_hash library */
+#define BUCKET_SIZE 8
+#define NUM_BUCKETS (MAX_ENTRIES / BUCKET_SIZE)
+#define MAX_KEYSIZE 64
+#define NUM_KEYSIZES 10
+#define NUM_SHUFFLES 10
+#define BURST_SIZE 16
 
-/* Types of hash table performance test that can be performed */
-enum hash_test_t {
-	ADD_ON_EMPTY,		/*< Add keys to empty table */
-	DELETE_ON_EMPTY,	/*< Attempt to delete keys from empty table */
-	LOOKUP_ON_EMPTY,	/*< Attempt to find keys in an empty table */
-	ADD_UPDATE,		/*< Add/update keys in a full table */
-	DELETE,			/*< Delete keys from a full table */
-	LOOKUP			/*< Find keys in a full table */
+enum operations {
+	ADD = 0,
+	LOOKUP,
+	LOOKUP_MULTI,
+	DELETE,
+	NUM_OPERATIONS
 };
 
-/* Function type for hash table operations. */
-typedef int32_t (*hash_operation)(const struct rte_hash *h, const void *key);
-
-/* Structure to hold parameters used to run a hash table performance test */
-struct tbl_perf_test_params {
-	enum hash_test_t test_type;
-	uint32_t num_iterations;
-	uint32_t entries;
-	uint32_t bucket_entries;
-	uint32_t key_len;
-	rte_hash_function hash_func;
-	uint32_t hash_func_init_val;
+static uint32_t hashtest_key_lens[] = {
+	/* standard key sizes */
+	4, 8, 16, 32, 48, 64,
+	/* IPv4 SRC + DST + protocol, unpadded */
+	9,
+	/* IPv4 5-tuple, unpadded */
+	13,
+	/* IPv6 5-tuple, unpadded */
+	37,
+	/* IPv6 5-tuple, padded to 8-byte boundary */
+	40
 };
 
-#define ITERATIONS 10000
-#define LOCAL_FBK_HASH_ENTRIES_MAX (1 << 15)
+struct rte_hash *h[NUM_KEYSIZES];
 
-/*******************************************************************************
- * Hash table performance test configuration section.
- */
-struct tbl_perf_test_params tbl_perf_params[] =
+/* Array that stores if a slot is full */
+static uint8_t slot_taken[MAX_ENTRIES];
+
+/* Array to store number of cycles per operation */
+static uint64_t cycles[NUM_KEYSIZES][NUM_OPERATIONS][2][2];
+
+/* Array to store all input keys */
+static uint8_t keys[KEYS_TO_ADD][MAX_KEYSIZE];
+
+/* Array to store the precomputed hash for 'keys' */
+static hash_sig_t signatures[KEYS_TO_ADD];
+
+/* Array to store how many busy entries have each bucket */
+static uint8_t buckets[NUM_BUCKETS];
+
+/* Array to store the positions where keys are added */
+static int32_t positions[KEYS_TO_ADD];
+
+/* Parameters used for hash table in unit test functions. */
+static struct rte_hash_parameters ut_params = {
+	.entries = MAX_ENTRIES,
+	.hash_func = rte_jhash,
+	.hash_func_init_val = 0,
+};
+
+static int
+create_table(unsigned int with_data, unsigned int table_index,
+		unsigned int with_locks, unsigned int ext)
 {
-/* Small table, add */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |     HashFunc | InitVal */
-{ ADD_ON_EMPTY,        1024,     1024,           1,      16,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      16,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      16,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      16,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      16,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      32,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      32,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      32,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      32,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      32,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      48,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      48,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      48,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      48,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      48,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      64,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      64,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      64,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      64,     rte_jhash,  0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      64,     rte_jhash,  0},
-/* Small table, update */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |     HashFunc | InitVal */
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      16,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      16,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      16,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      16,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      16,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      32,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      32,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      32,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      32,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      32,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      48,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      48,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      48,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      48,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      48,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      64,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      64,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      64,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      64,     rte_jhash,  0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      64,     rte_jhash,  0},
-/* Small table, lookup */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |     HashFunc | InitVal */
-{       LOOKUP,  ITERATIONS,     1024,           1,      16,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      16,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      16,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      16,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      16,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      32,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      32,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      32,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      32,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      32,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      48,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      48,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      48,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      48,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      48,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      64,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      64,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      64,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      64,     rte_jhash,  0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      64,     rte_jhash,  0},
-/* Big table, add */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      16,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      16,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      16,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      16,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      16,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      32,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      32,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      32,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      32,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      32,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      48,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      48,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      48,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      48,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      48,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      64,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      64,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      64,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      64,    rte_jhash,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      64,    rte_jhash,   0},
-/* Big table, update */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      16,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      16,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      16,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      16,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      16,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      32,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      32,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      32,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      32,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      32,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      48,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      48,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      48,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      48,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      48,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      64,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      64,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      64,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      64,    rte_jhash,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      64,    rte_jhash,   0},
-/* Big table, lookup */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{       LOOKUP,  ITERATIONS,  1048576,           1,      16,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      16,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      16,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      16,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      16,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      32,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      32,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      32,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      32,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      32,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      48,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      48,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      48,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      48,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      48,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      64,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      64,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      64,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      64,    rte_jhash,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      64,    rte_jhash,   0},
-/* Small table, add */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{ ADD_ON_EMPTY,        1024,     1024,           1,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           1,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           2,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           4,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,           8,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,        1024,     1024,          16,      64, rte_hash_crc,   0},
-/* Small table, update */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           1,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           2,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           4,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,           8,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,     1024,          16,      64, rte_hash_crc,   0},
-/* Small table, lookup */
-/*  Test type | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{       LOOKUP,  ITERATIONS,     1024,           1,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           1,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           2,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           4,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,           8,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,     1024,          16,      64, rte_hash_crc,   0},
-/* Big table, add */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen |    HashFunc | InitVal */
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      16, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      32, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      48, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           1,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           2,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           4,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,           8,      64, rte_hash_crc,   0},
-{ ADD_ON_EMPTY,     1048576,  1048576,          16,      64, rte_hash_crc,   0},
-/* Big table, update */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen | HashFunc | InitVal */
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      16, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      32, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      48, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           1,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           2,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           4,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,           8,      64, rte_hash_crc,   0},
-{   ADD_UPDATE,  ITERATIONS,  1048576,          16,      64, rte_hash_crc,   0},
-/* Big table, lookup */
-/* Test type  | Iterations | Entries | BucketSize | KeyLen | HashFunc | InitVal */
-{       LOOKUP,  ITERATIONS,  1048576,           1,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      16, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      32, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      48, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           1,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           2,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           4,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,           8,      64, rte_hash_crc,   0},
-{       LOOKUP,  ITERATIONS,  1048576,          16,      64, rte_hash_crc,   0},
-};
+	char name[RTE_HASH_NAMESIZE];
 
-/******************************************************************************/
+	if (with_data)
+		/* Table will store 8-byte data */
+		snprintf(name, sizeof(name), "test_hash%u_data",
+				hashtest_key_lens[table_index]);
+	else
+		snprintf(name, sizeof(name), "test_hash%u",
+				hashtest_key_lens[table_index]);
 
-/*
- * Check condition and return an error if true. Assumes that "handle" is the
- * name of the hash structure pointer to be freed.
- */
-#define RETURN_IF_ERROR(cond, str, ...) do {				\
-	if (cond) {							\
-		printf("ERROR line %d: " str "\n", __LINE__, ##__VA_ARGS__); \
-		if (handle) rte_hash_free(handle);			\
-		return -1;						\
-	}								\
-} while(0)
 
-#define RETURN_IF_ERROR_FBK(cond, str, ...) do {				\
-	if (cond) {							\
-		printf("ERROR line %d: " str "\n", __LINE__, ##__VA_ARGS__); \
-		if (handle) rte_fbk_hash_free(handle);			\
-		rte_free(keys);						\
-		return -1;						\
-	}								\
-} while(0)
+	if (with_locks)
+		ut_params.extra_flag =
+			RTE_HASH_EXTRA_FLAGS_TRANS_MEM_SUPPORT
+				| RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY;
+	else
+		ut_params.extra_flag = 0;
 
-/*
- * Find average of array of numbers.
- */
-static double
-get_avg(const uint32_t *array, uint32_t size)
+	if (ext)
+		ut_params.extra_flag |= RTE_HASH_EXTRA_FLAGS_EXT_TABLE;
+
+	ut_params.name = name;
+	ut_params.key_len = hashtest_key_lens[table_index];
+	ut_params.socket_id = rte_socket_id();
+	h[table_index] = rte_hash_find_existing(name);
+	if (h[table_index] != NULL)
+		/*
+		 * If table was already created, free it to create it again,
+		 * so we force it is empty
+		 */
+		rte_hash_free(h[table_index]);
+	h[table_index] = rte_hash_create(&ut_params);
+	if (h[table_index] == NULL) {
+		printf("Error creating table\n");
+		return -1;
+	}
+	return 0;
+
+}
+
+/* Shuffle the keys that have been added, so lookups will be totally random */
+static void
+shuffle_input_keys(unsigned int table_index, unsigned int ext)
 {
-	double sum = 0;
 	unsigned i;
-	for (i = 0; i < size; i++)
-		sum += array[i];
-	return sum / (double)size;
-}
+	uint32_t swap_idx;
+	uint8_t temp_key[MAX_KEYSIZE];
+	hash_sig_t temp_signature;
+	int32_t temp_position;
+	unsigned int keys_to_add;
 
-/*
- * To help print out name of hash functions.
- */
-static const char *get_hash_name(rte_hash_function f)
-{
-	if (f == rte_jhash)
-		return "jhash";
+	if (!ext)
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+	else
+		keys_to_add = KEYS_TO_ADD;
 
-	if (f == rte_hash_crc)
-		return "rte_hash_crc";
+	for (i = keys_to_add - 1; i > 0; i--) {
+		swap_idx = rte_rand() % i;
 
-	return "UnknownHash";
-}
+		memcpy(temp_key, keys[i], hashtest_key_lens[table_index]);
+		temp_signature = signatures[i];
+		temp_position = positions[i];
 
-/*
- * Do a single performance test, of one type of operation.
- *
- * @param h
- *   hash table to run test on
- * @param func
- *   function to call (add, delete or lookup function)
- * @param avg_occupancy
- *   The average number of entries in each bucket of the hash table
- * @param invalid_pos_count
- *   The amount of errors (e.g. due to a full bucket).
- * @return
- *   The average number of ticks per hash function call. A negative number
- *   signifies failure.
- */
-static double
-run_single_tbl_perf_test(const struct rte_hash *h, hash_operation func,
-		const struct tbl_perf_test_params *params, double *avg_occupancy,
-		uint32_t *invalid_pos_count)
-{
-	uint64_t begin, end, ticks = 0;
-	uint8_t *key = NULL;
-	uint32_t *bucket_occupancies = NULL;
-	uint32_t num_buckets, i, j;
-	int32_t pos;
+		memcpy(keys[i], keys[swap_idx], hashtest_key_lens[table_index]);
+		signatures[i] = signatures[swap_idx];
+		positions[i] = positions[swap_idx];
 
-	/* Initialise */
-	num_buckets = params->entries / params->bucket_entries;
-	key = rte_zmalloc("hash key",
-			  params->key_len * sizeof(uint8_t), 16);
-	if (key == NULL)
-		return -1;
-
-	bucket_occupancies = rte_calloc("bucket occupancies",
-					num_buckets, sizeof(uint32_t), 16);
-	if (bucket_occupancies == NULL) {
-		rte_free(key);
-		return -1;
-	}
-
-	ticks = 0;
-	*invalid_pos_count = 0;
-
-	for (i = 0; i < params->num_iterations; i++) {
-		/* Prepare inputs for the current iteration */
-		for (j = 0; j < params->key_len; j++)
-			key[j] = (uint8_t) rte_rand();
-
-		/* Perform operation, and measure time it takes */
-		begin = rte_rdtsc();
-		pos = func(h, key);
-		end = rte_rdtsc();
-		ticks += end - begin;
-
-		/* Other work per iteration */
-		if (pos < 0)
-			*invalid_pos_count += 1;
-		else
-			bucket_occupancies[pos / params->bucket_entries]++;
-	}
-	*avg_occupancy = get_avg(bucket_occupancies, num_buckets);
-
-	rte_free(bucket_occupancies);
-	rte_free(key);
-
-	return (double)ticks / params->num_iterations;
-}
-
-/*
- * To help print out what tests are being done.
- */
-static const char *
-get_tbl_perf_test_desc(enum hash_test_t type)
-{
-	switch (type){
-	case ADD_ON_EMPTY: return "Add on Empty";
-	case DELETE_ON_EMPTY: return "Delete on Empty";
-	case LOOKUP_ON_EMPTY: return "Lookup on Empty";
-	case ADD_UPDATE: return "Add Update";
-	case DELETE: return "Delete";
-	case LOOKUP: return "Lookup";
-	default: return "UNKNOWN";
+		memcpy(keys[swap_idx], temp_key, hashtest_key_lens[table_index]);
+		signatures[swap_idx] = temp_signature;
+		positions[swap_idx] = temp_position;
 	}
 }
 
 /*
- * Run a hash table performance test based on params.
+ * Looks for random keys which
+ * ALL can fit in hash table (no errors)
  */
 static int
-run_tbl_perf_test(struct tbl_perf_test_params *params)
+get_input_keys(unsigned int with_pushes, unsigned int table_index,
+							unsigned int ext)
 {
-	static unsigned calledCount = 5;
-	struct rte_hash_parameters hash_params = {
-		.entries = params->entries,
-		.bucket_entries = params->bucket_entries,
-		.key_len = params->key_len,
-		.hash_func = params->hash_func,
-		.hash_func_init_val = params->hash_func_init_val,
-		.socket_id = rte_socket_id(),
-	};
-	struct rte_hash *handle;
-	double avg_occupancy = 0, ticks = 0;
-	uint32_t num_iterations, invalid_pos;
-	char name[RTE_HASH_NAMESIZE];
-	char hashname[RTE_HASH_NAMESIZE];
+	unsigned i, j;
+	unsigned bucket_idx, incr, success = 1;
+	uint8_t k = 0;
+	int32_t ret;
+	const uint32_t bucket_bitmask = NUM_BUCKETS - 1;
+	unsigned int keys_to_add;
 
-	snprintf(name, 32, "test%u", calledCount++);
-	hash_params.name = name;
+	if (!ext)
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+	else
+		keys_to_add = KEYS_TO_ADD;
+	/* Reset all arrays */
+	for (i = 0; i < MAX_ENTRIES; i++)
+		slot_taken[i] = 0;
 
-	handle = rte_hash_create(&hash_params);
-	RETURN_IF_ERROR(handle == NULL, "hash creation failed");
+	for (i = 0; i < NUM_BUCKETS; i++)
+		buckets[i] = 0;
 
-	switch (params->test_type){
-	case ADD_ON_EMPTY:
-		ticks = run_single_tbl_perf_test(handle, rte_hash_add_key,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	case DELETE_ON_EMPTY:
-		ticks = run_single_tbl_perf_test(handle, rte_hash_del_key,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	case LOOKUP_ON_EMPTY:
-		ticks = run_single_tbl_perf_test(handle, rte_hash_lookup,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	case ADD_UPDATE:
-		num_iterations = params->num_iterations;
-		params->num_iterations = params->entries;
-		run_single_tbl_perf_test(handle, rte_hash_add_key, params,
-				&avg_occupancy, &invalid_pos);
-		params->num_iterations = num_iterations;
-		ticks = run_single_tbl_perf_test(handle, rte_hash_add_key,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	case DELETE:
-		num_iterations = params->num_iterations;
-		params->num_iterations = params->entries;
-		run_single_tbl_perf_test(handle, rte_hash_add_key, params,
-				&avg_occupancy, &invalid_pos);
+	for (j = 0; j < hashtest_key_lens[table_index]; j++)
+		keys[0][j] = 0;
 
-		params->num_iterations = num_iterations;
-		ticks = run_single_tbl_perf_test(handle, rte_hash_del_key,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	case LOOKUP:
-		num_iterations = params->num_iterations;
-		params->num_iterations = params->entries;
-		run_single_tbl_perf_test(handle, rte_hash_add_key, params,
-				&avg_occupancy, &invalid_pos);
+	/*
+	 * Add only entries that are not duplicated and that fits in the table
+	 * (cannot store more than BUCKET_SIZE entries in a bucket).
+	 * Regardless a key has been added correctly or not (success),
+	 * the next one to try will be increased by 1.
+	 */
+	for (i = 0; i < keys_to_add;) {
+		incr = 0;
+		if (i != 0) {
+			keys[i][0] = ++k;
+			/* Overflow, need to increment the next byte */
+			if (keys[i][0] == 0)
+				incr = 1;
+			for (j = 1; j < hashtest_key_lens[table_index]; j++) {
+				/* Do not increase next byte */
+				if (incr == 0)
+					if (success == 1)
+						keys[i][j] = keys[i - 1][j];
+					else
+						keys[i][j] = keys[i][j];
+				/* Increase next byte by one */
+				else {
+					if (success == 1)
+						keys[i][j] = keys[i-1][j] + 1;
+					else
+						keys[i][j] = keys[i][j] + 1;
+					if (keys[i][j] == 0)
+						incr = 1;
+					else
+						incr = 0;
+				}
+			}
+		}
+		success = 0;
+		signatures[i] = rte_hash_hash(h[table_index], keys[i]);
+		bucket_idx = signatures[i] & bucket_bitmask;
+		/*
+		 * If we are not inserting keys in secondary location,
+		 * when bucket is full, do not try to insert the key
+		 */
+		if (with_pushes == 0)
+			if (buckets[bucket_idx] == BUCKET_SIZE)
+				continue;
 
-		params->num_iterations = num_iterations;
-		ticks = run_single_tbl_perf_test(handle, rte_hash_lookup,
-				params, &avg_occupancy, &invalid_pos);
-		break;
-	default: return -1;
+		/* If key can be added, leave in successful key arrays "keys" */
+		ret = rte_hash_add_key_with_hash(h[table_index], keys[i],
+						signatures[i]);
+		if (ret >= 0) {
+			/* If key is already added, ignore the entry and do not store */
+			if (slot_taken[ret])
+				continue;
+			else {
+				/* Store the returned position and mark slot as taken */
+				slot_taken[ret] = 1;
+				positions[i] = ret;
+				buckets[bucket_idx]++;
+				success = 1;
+				i++;
+			}
+		}
 	}
 
-	snprintf(hashname, RTE_HASH_NAMESIZE, "%s", get_hash_name(params->hash_func));
+	/* Reset the table, so we can measure the time to add all the entries */
+	rte_hash_free(h[table_index]);
+	h[table_index] = rte_hash_create(&ut_params);
 
-	printf("%-12s, %-15s, %-16u, %-7u, %-18u, %-8u, %-19.2f, %.2f\n",
-		hashname,
-		get_tbl_perf_test_desc(params->test_type),
-		(unsigned) params->key_len,
-		(unsigned) params->entries,
-		(unsigned) params->bucket_entries,
-		(unsigned) invalid_pos,
-		avg_occupancy,
-		ticks
-	);
-
-	/* Free */
-	rte_hash_free(handle);
 	return 0;
 }
 
-/*
- * Run all hash table performance tests.
- */
-static int run_all_tbl_perf_tests(void)
+static int
+timed_adds(unsigned int with_hash, unsigned int with_data,
+				unsigned int table_index, unsigned int ext)
 {
 	unsigned i;
+	const uint64_t start_tsc = rte_rdtsc();
+	void *data;
+	int32_t ret;
+	unsigned int keys_to_add;
+	if (!ext)
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+	else
+		keys_to_add = KEYS_TO_ADD;
 
-	printf(" *** Hash table performance test results ***\n");
-	printf("Hash Func.  , Operation      , Key size (bytes), Entries, "
-	       "Entries per bucket, Errors  , Avg. bucket entries, Ticks/Op.\n");
+	for (i = 0; i < keys_to_add; i++) {
+		data = (void *) ((uintptr_t) signatures[i]);
+		if (with_hash && with_data) {
+			ret = rte_hash_add_key_with_hash_data(h[table_index],
+						(const void *) keys[i],
+						signatures[i], data);
+			if (ret < 0) {
+				printf("H+D: Failed to add key number %u\n", i);
+				return -1;
+			}
+		} else if (with_hash && !with_data) {
+			ret = rte_hash_add_key_with_hash(h[table_index],
+						(const void *) keys[i],
+						signatures[i]);
+			if (ret >= 0)
+				positions[i] = ret;
+			else {
+				printf("H: Failed to add key number %u\n", i);
+				return -1;
+			}
+		} else if (!with_hash && with_data) {
+			ret = rte_hash_add_key_data(h[table_index],
+						(const void *) keys[i],
+						data);
+			if (ret < 0) {
+				printf("D: Failed to add key number %u\n", i);
+				return -1;
+			}
+		} else {
+			ret = rte_hash_add_key(h[table_index], keys[i]);
+			if (ret >= 0)
+				positions[i] = ret;
+			else {
+				printf("Failed to add key number %u\n", i);
+				return -1;
+			}
+		}
+	}
 
-	/* Loop through every combination of test parameters */
-	for (i = 0;
-	     i < sizeof(tbl_perf_params) / sizeof(struct tbl_perf_test_params);
-	     i++) {
+	const uint64_t end_tsc = rte_rdtsc();
+	const uint64_t time_taken = end_tsc - start_tsc;
 
-		/* Perform test */
-		if (run_tbl_perf_test(&tbl_perf_params[i]) < 0)
+	cycles[table_index][ADD][with_hash][with_data] = time_taken/keys_to_add;
+
+	return 0;
+}
+
+static int
+timed_lookups(unsigned int with_hash, unsigned int with_data,
+				unsigned int table_index, unsigned int ext)
+{
+	unsigned i, j;
+	const uint64_t start_tsc = rte_rdtsc();
+	void *ret_data;
+	void *expected_data;
+	int32_t ret;
+	unsigned int keys_to_add, num_lookups;
+
+	if (!ext) {
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+		num_lookups = NUM_LOOKUPS * ADD_PERCENT;
+	} else {
+		keys_to_add = KEYS_TO_ADD;
+		num_lookups = NUM_LOOKUPS;
+	}
+	for (i = 0; i < num_lookups / keys_to_add; i++) {
+		for (j = 0; j < keys_to_add; j++) {
+			if (with_hash && with_data) {
+				ret = rte_hash_lookup_with_hash_data(h[table_index],
+							(const void *) keys[j],
+							signatures[j], &ret_data);
+				if (ret < 0) {
+					printf("Key number %u was not found\n", j);
+					return -1;
+				}
+				expected_data = (void *) ((uintptr_t) signatures[j]);
+				if (ret_data != expected_data) {
+					printf("Data returned for key number %u is %p,"
+					       " but should be %p\n", j, ret_data,
+						expected_data);
+					return -1;
+				}
+			} else if (with_hash && !with_data) {
+				ret = rte_hash_lookup_with_hash(h[table_index],
+							(const void *) keys[j],
+							signatures[j]);
+				if (ret < 0 || ret != positions[j]) {
+					printf("Key looked up in %d, should be in %d\n",
+						ret, positions[j]);
+					return -1;
+				}
+			} else if (!with_hash && with_data) {
+				ret = rte_hash_lookup_data(h[table_index],
+							(const void *) keys[j], &ret_data);
+				if (ret < 0) {
+					printf("Key number %u was not found\n", j);
+					return -1;
+				}
+				expected_data = (void *) ((uintptr_t) signatures[j]);
+				if (ret_data != expected_data) {
+					printf("Data returned for key number %u is %p,"
+					       " but should be %p\n", j, ret_data,
+						expected_data);
+					return -1;
+				}
+			} else {
+				ret = rte_hash_lookup(h[table_index], keys[j]);
+				if (ret < 0 || ret != positions[j]) {
+					printf("Key looked up in %d, should be in %d\n",
+						ret, positions[j]);
+					return -1;
+				}
+			}
+		}
+	}
+
+	const uint64_t end_tsc = rte_rdtsc();
+	const uint64_t time_taken = end_tsc - start_tsc;
+
+	cycles[table_index][LOOKUP][with_hash][with_data] = time_taken/num_lookups;
+
+	return 0;
+}
+
+static int
+timed_lookups_multi(unsigned int with_hash, unsigned int with_data,
+		unsigned int table_index, unsigned int ext)
+{
+	unsigned i, j, k;
+	int32_t positions_burst[BURST_SIZE];
+	const void *keys_burst[BURST_SIZE];
+	void *expected_data[BURST_SIZE];
+	void *ret_data[BURST_SIZE];
+	uint64_t hit_mask;
+	int ret;
+	unsigned int keys_to_add, num_lookups;
+
+	if (!ext) {
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+		num_lookups = NUM_LOOKUPS * ADD_PERCENT;
+	} else {
+		keys_to_add = KEYS_TO_ADD;
+		num_lookups = NUM_LOOKUPS;
+	}
+
+	const uint64_t start_tsc = rte_rdtsc();
+
+	for (i = 0; i < num_lookups/keys_to_add; i++) {
+		for (j = 0; j < keys_to_add/BURST_SIZE; j++) {
+			for (k = 0; k < BURST_SIZE; k++)
+				keys_burst[k] = keys[j * BURST_SIZE + k];
+			if (!with_hash && with_data) {
+				ret = rte_hash_lookup_bulk_data(h[table_index],
+					(const void **) keys_burst,
+					BURST_SIZE,
+					&hit_mask,
+					ret_data);
+				if (ret != BURST_SIZE) {
+					printf("Expect to find %u keys,"
+					       " but found %d\n", BURST_SIZE, ret);
+					return -1;
+				}
+				for (k = 0; k < BURST_SIZE; k++) {
+					if ((hit_mask & (1ULL << k))  == 0) {
+						printf("Key number %u not found\n",
+							j * BURST_SIZE + k);
+						return -1;
+					}
+					expected_data[k] = (void *) ((uintptr_t) signatures[j * BURST_SIZE + k]);
+					if (ret_data[k] != expected_data[k]) {
+						printf("Data returned for key number %u is %p,"
+						       " but should be %p\n", j * BURST_SIZE + k,
+							ret_data[k], expected_data[k]);
+						return -1;
+					}
+				}
+			} else if (with_hash && with_data) {
+				ret = rte_hash_lookup_with_hash_bulk_data(
+					h[table_index],
+					(const void **)keys_burst,
+					&signatures[j * BURST_SIZE],
+					BURST_SIZE, &hit_mask, ret_data);
+				if (ret != BURST_SIZE) {
+					printf("Expect to find %u keys,"
+					       " but found %d\n",
+						BURST_SIZE, ret);
+					return -1;
+				}
+				for (k = 0; k < BURST_SIZE; k++) {
+					if ((hit_mask & (1ULL << k))  == 0) {
+						printf("Key number %u"
+							" not found\n",
+							j * BURST_SIZE + k);
+						return -1;
+					}
+					expected_data[k] =
+						(void *)((uintptr_t)signatures[
+						j * BURST_SIZE + k]);
+					if (ret_data[k] != expected_data[k]) {
+						printf("Data returned for key"
+							" number %u is %p,"
+							" but should be %p\n",
+							j * BURST_SIZE + k,
+							ret_data[k],
+							expected_data[k]);
+						return -1;
+					}
+				}
+			} else if (with_hash && !with_data) {
+				ret = rte_hash_lookup_with_hash_bulk(
+					h[table_index],
+					(const void **)keys_burst,
+					&signatures[j * BURST_SIZE],
+					BURST_SIZE, positions_burst);
+				for (k = 0; k < BURST_SIZE; k++) {
+					if (positions_burst[k] !=
+							positions[j *
+							BURST_SIZE + k]) {
+						printf("Key looked up in %d, should be in %d\n",
+							positions_burst[k],
+							positions[j *
+							BURST_SIZE + k]);
+						return -1;
+					}
+				}
+			} else {
+				rte_hash_lookup_bulk(h[table_index],
+						(const void **) keys_burst,
+						BURST_SIZE,
+						positions_burst);
+				for (k = 0; k < BURST_SIZE; k++) {
+					if (positions_burst[k] != positions[j * BURST_SIZE + k]) {
+						printf("Key looked up in %d, should be in %d\n",
+							positions_burst[k],
+							positions[j * BURST_SIZE + k]);
+						return -1;
+					}
+				}
+			}
+		}
+	}
+
+	const uint64_t end_tsc = rte_rdtsc();
+	const uint64_t time_taken = end_tsc - start_tsc;
+
+	cycles[table_index][LOOKUP_MULTI][with_hash][with_data] =
+		time_taken/num_lookups;
+
+	return 0;
+}
+
+static int
+timed_deletes(unsigned int with_hash, unsigned int with_data,
+				unsigned int table_index, unsigned int ext)
+{
+	unsigned i;
+	const uint64_t start_tsc = rte_rdtsc();
+	int32_t ret;
+	unsigned int keys_to_add;
+	if (!ext)
+		keys_to_add = KEYS_TO_ADD * ADD_PERCENT;
+	else
+		keys_to_add = KEYS_TO_ADD;
+
+	for (i = 0; i < keys_to_add; i++) {
+		/* There are no delete functions with data, so just call two functions */
+		if (with_hash)
+			ret = rte_hash_del_key_with_hash(h[table_index],
+							(const void *) keys[i],
+							signatures[i]);
+		else
+			ret = rte_hash_del_key(h[table_index],
+							(const void *) keys[i]);
+		if (ret >= 0)
+			positions[i] = ret;
+		else {
+			printf("Failed to delete key number %u\n", i);
 			return -1;
+		}
+	}
+
+	const uint64_t end_tsc = rte_rdtsc();
+	const uint64_t time_taken = end_tsc - start_tsc;
+
+	cycles[table_index][DELETE][with_hash][with_data] = time_taken/keys_to_add;
+
+	return 0;
+}
+
+static void
+free_table(unsigned table_index)
+{
+	rte_hash_free(h[table_index]);
+}
+
+static void
+reset_table(unsigned table_index)
+{
+	rte_hash_reset(h[table_index]);
+}
+
+static int
+run_all_tbl_perf_tests(unsigned int with_pushes, unsigned int with_locks,
+						unsigned int ext)
+{
+	unsigned i, j, with_data, with_hash;
+
+	printf("Measuring performance, please wait");
+	fflush(stdout);
+
+	for (with_data = 0; with_data <= 1; with_data++) {
+		for (i = 0; i < NUM_KEYSIZES; i++) {
+			if (create_table(with_data, i, with_locks, ext) < 0)
+				return -1;
+
+			if (get_input_keys(with_pushes, i, ext) < 0)
+				return -1;
+			for (with_hash = 0; with_hash <= 1; with_hash++) {
+				if (timed_adds(with_hash, with_data, i, ext) < 0)
+					return -1;
+
+				for (j = 0; j < NUM_SHUFFLES; j++)
+					shuffle_input_keys(i, ext);
+
+				if (timed_lookups(with_hash, with_data, i, ext) < 0)
+					return -1;
+
+				if (timed_lookups_multi(with_hash, with_data,
+						i, ext) < 0)
+					return -1;
+
+				if (timed_deletes(with_hash, with_data, i, ext) < 0)
+					return -1;
+
+				/* Print a dot to show progress on operations */
+				printf(".");
+				fflush(stdout);
+
+				reset_table(i);
+			}
+			free_table(i);
+		}
+	}
+
+	printf("\nResults (in CPU cycles/operation)\n");
+	printf("-----------------------------------\n");
+	for (with_data = 0; with_data <= 1; with_data++) {
+		if (with_data)
+			printf("\n Operations with 8-byte data\n");
+		else
+			printf("\n Operations without data\n");
+		for (with_hash = 0; with_hash <= 1; with_hash++) {
+			if (with_hash)
+				printf("\nWith pre-computed hash values\n");
+			else
+				printf("\nWithout pre-computed hash values\n");
+
+			printf("\n%-18s%-18s%-18s%-18s%-18s\n",
+			"Keysize", "Add", "Lookup", "Lookup_bulk", "Delete");
+			for (i = 0; i < NUM_KEYSIZES; i++) {
+				printf("%-18d", hashtest_key_lens[i]);
+				for (j = 0; j < NUM_OPERATIONS; j++)
+					printf("%-18"PRIu64, cycles[i][j][with_hash][with_data]);
+				printf("\n");
+			}
+		}
 	}
 	return 0;
 }
@@ -624,28 +657,34 @@ fbk_hash_perf_test(void)
 	uint64_t lookup_time = 0;
 	unsigned added = 0;
 	unsigned value = 0;
+	uint32_t key;
+	uint16_t val;
 	unsigned i, j;
 
 	handle = rte_fbk_hash_create(&params);
-	RETURN_IF_ERROR_FBK(handle == NULL, "fbk hash creation failed");
+	if (handle == NULL) {
+		printf("Error creating table\n");
+		return -1;
+	}
 
 	keys = rte_zmalloc(NULL, ENTRIES * sizeof(*keys), 0);
-	RETURN_IF_ERROR_FBK(keys == NULL,
-		"fbk hash: memory allocation for key store failed");
+	if (keys == NULL) {
+		printf("fbk hash: memory allocation for key store failed\n");
+		return -1;
+	}
 
 	/* Generate random keys and values. */
 	for (i = 0; i < ENTRIES; i++) {
-		uint32_t key = (uint32_t)rte_rand();
+		key = (uint32_t)rte_rand();
 		key = ((uint64_t)key << 32) | (uint64_t)rte_rand();
-		uint16_t val = (uint16_t)rte_rand();
+		val = (uint16_t)rte_rand();
 
 		if (rte_fbk_hash_add_key(handle, key, val) == 0) {
 			keys[added] = key;
 			added++;
 		}
-		if (added > (LOAD_FACTOR * ENTRIES)) {
+		if (added > (LOAD_FACTOR * ENTRIES))
 			break;
-		}
 	}
 
 	for (i = 0; i < TEST_ITERATIONS; i++) {
@@ -653,15 +692,14 @@ fbk_hash_perf_test(void)
 		uint64_t end;
 
 		/* Generate random indexes into keys[] array. */
-		for (j = 0; j < TEST_SIZE; j++) {
+		for (j = 0; j < TEST_SIZE; j++)
 			indexes[j] = rte_rand() % added;
-		}
 
 		begin = rte_rdtsc();
 		/* Do lookups */
-		for (j = 0; j < TEST_SIZE; j++) {
+		for (j = 0; j < TEST_SIZE; j++)
 			value += rte_fbk_hash_lookup(handle, keys[indexes[j]]);
-		}
+
 		end = rte_rdtsc();
 		lookup_time += (double)(end - begin);
 	}
@@ -681,22 +719,34 @@ fbk_hash_perf_test(void)
 	return 0;
 }
 
-/*
- * Do all unit and performance tests.
- */
 static int
 test_hash_perf(void)
 {
-	if (run_all_tbl_perf_tests() < 0)
+	unsigned int with_pushes, with_locks;
+	for (with_locks = 0; with_locks <= 1; with_locks++) {
+		if (with_locks)
+			printf("\nWith locks in the code\n");
+		else
+			printf("\nWithout locks in the code\n");
+		for (with_pushes = 0; with_pushes <= 1; with_pushes++) {
+			if (with_pushes == 0)
+				printf("\nALL ELEMENTS IN PRIMARY LOCATION\n");
+			else
+				printf("\nELEMENTS IN PRIMARY OR SECONDARY LOCATION\n");
+			if (run_all_tbl_perf_tests(with_pushes, with_locks, 0) < 0)
+				return -1;
+		}
+	}
+
+	printf("\n EXTENDABLE BUCKETS PERFORMANCE\n");
+
+	if (run_all_tbl_perf_tests(1, 0, 1) < 0)
 		return -1;
 
 	if (fbk_hash_perf_test() < 0)
 		return -1;
+
 	return 0;
 }
 
-static struct test_command hash_perf_cmd = {
-	.command = "hash_perf_autotest",
-	.callback = test_hash_perf,
-};
-REGISTER_TEST_COMMAND(hash_perf_cmd);
+REGISTER_TEST_COMMAND(hash_perf_autotest, test_hash_perf);

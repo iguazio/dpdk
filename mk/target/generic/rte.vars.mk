@@ -1,33 +1,5 @@
-#   BSD LICENSE
-#
-#   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-#   All rights reserved.
-#
-#   Redistribution and use in source and binary forms, with or without
-#   modification, are permitted provided that the following conditions
-#   are met:
-#
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in
-#       the documentation and/or other materials provided with the
-#       distribution.
-#     * Neither the name of Intel Corporation nor the names of its
-#       contributors may be used to endorse or promote products derived
-#       from this software without specific prior written permission.
-#
-#   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-#   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-#   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-#   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-#   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-#   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-#   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-#   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-#   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-#   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-#   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright(c) 2010-2014 Intel Corporation
 
 #
 # This .mk is the generic target rte.var.mk ; it includes .mk for
@@ -36,65 +8,61 @@
 #
 
 #
-# machine:
-#
-#   - can define ARCH variable (overriden by cmdline value)
-#   - can define CROSS variable (overriden by cmdline value)
-#   - define MACHINE_CFLAGS variable (overriden by cmdline value)
-#   - define MACHINE_LDFLAGS variable (overriden by cmdline value)
-#   - define MACHINE_ASFLAGS variable (overriden by cmdline value)
-#   - can define CPU_CFLAGS variable (overriden by cmdline value) that
-#     overrides the one defined in arch.
-#   - can define CPU_LDFLAGS variable (overriden by cmdline value) that
-#     overrides the one defined in arch.
-#   - can define CPU_ASFLAGS variable (overriden by cmdline value) that
-#     overrides the one defined in arch.
-#
-# examples for RTE_MACHINE: default, pc, bensley, tylesburg, ...
-#
-include $(RTE_SDK)/mk/machine/$(RTE_MACHINE)/rte.vars.mk
-
-#
-# arch:
-#
-#   - define ARCH variable (overriden by cmdline or by previous
-#     optional define in machine .mk)
-#   - define CROSS variable (overriden by cmdline or previous define
-#     in machine .mk)
-#   - define CPU_CFLAGS variable (overriden by cmdline or previous
-#     define in machine .mk)
-#   - define CPU_LDFLAGS variable (overriden by cmdline or previous
-#     define in machine .mk)
-#   - define CPU_ASFLAGS variable (overriden by cmdline or previous
-#     define in machine .mk)
-#   - may override any previously defined variable
-#
-# examples for RTE_ARCH: i686, x86_64
-#
-include $(RTE_SDK)/mk/arch/$(RTE_ARCH)/rte.vars.mk
-
-#
 # toolchain:
 #
 #   - define CC, LD, AR, AS, ...
-#   - define TOOLCHAIN_CFLAGS variable (overriden by cmdline value)
-#   - define TOOLCHAIN_LDFLAGS variable (overriden by cmdline value)
-#   - define TOOLCHAIN_ASFLAGS variable (overriden by cmdline value)
+#   - define TOOLCHAIN_CFLAGS variable (overridden by cmdline value)
+#   - define TOOLCHAIN_LDFLAGS variable (overridden by cmdline value)
+#   - define TOOLCHAIN_ASFLAGS variable (overridden by cmdline value)
 #   - may override any previously defined variable
-#
-# examples for RTE_TOOLCHAIN: gcc, icc
 #
 include $(RTE_SDK)/mk/toolchain/$(RTE_TOOLCHAIN)/rte.vars.mk
 
 #
-# exec-env:
+# machine:
 #
-#   - define EXECENV_CFLAGS variable (overriden by cmdline)
-#   - define EXECENV_LDFLAGS variable (overriden by cmdline)
-#   - define EXECENV_ASFLAGS variable (overriden by cmdline)
+#   - can define ARCH variable (overridden by cmdline value)
+#   - can define CROSS variable (overridden by cmdline value)
+#   - define MACHINE_CFLAGS variable (overridden by cmdline value)
+#   - define MACHINE_LDFLAGS variable (overridden by cmdline value)
+#   - define MACHINE_ASFLAGS variable (overridden by cmdline value)
+#   - can define CPU_CFLAGS variable (overridden by cmdline value) that
+#     overrides the one defined in arch.
+#   - can define CPU_LDFLAGS variable (overridden by cmdline value) that
+#     overrides the one defined in arch.
+#   - can define CPU_ASFLAGS variable (overridden by cmdline value) that
+#     overrides the one defined in arch.
+#
+ifneq ($(wildcard $(RTE_SDK)/mk/machine/$(RTE_MACHINE)/rte.vars.mk),)
+include $(RTE_SDK)/mk/machine/$(RTE_MACHINE)/rte.vars.mk
+else
+MACHINE_CFLAGS := -march=$(RTE_MACHINE)
+endif
+
+#
+# arch:
+#
+#   - define ARCH variable (overridden by cmdline or by previous
+#     optional define in machine .mk)
+#   - define CROSS variable (overridden by cmdline or previous define
+#     in machine .mk)
+#   - define CPU_CFLAGS variable (overridden by cmdline or previous
+#     define in machine .mk)
+#   - define CPU_LDFLAGS variable (overridden by cmdline or previous
+#     define in machine .mk)
+#   - define CPU_ASFLAGS variable (overridden by cmdline or previous
+#     define in machine .mk)
 #   - may override any previously defined variable
 #
-# examples for RTE_EXEC_ENV: linuxapp, bsdapp
+include $(RTE_SDK)/mk/arch/$(RTE_ARCH)/rte.vars.mk
+
+#
+# exec-env:
+#
+#   - define EXECENV_CFLAGS variable (overridden by cmdline)
+#   - define EXECENV_LDFLAGS variable (overridden by cmdline)
+#   - define EXECENV_ASFLAGS variable (overridden by cmdline)
+#   - may override any previously defined variable
 #
 include $(RTE_SDK)/mk/exec-env/$(RTE_EXEC_ENV)/rte.vars.mk
 
@@ -122,6 +90,14 @@ ASFLAGS += $(TARGET_ASFLAGS)
 CFLAGS += -I$(RTE_OUTPUT)/include
 LDFLAGS += -L$(RTE_OUTPUT)/lib
 
+# add in flag for supporting function versioning. The define is used in meson
+# builds to ensure that the user has properly flagged the unit in question as
+# using function versioning so it can be built twice - once for static lib and
+# then a second time for the shared lib. Since make only builds one library
+# type at a time, such precautions aren't necessary, so we can globally define
+# the flag
+CFLAGS += -DRTE_USE_FUNCTION_VERSIONING
+
 # always include rte_config.h: the one in $(RTE_OUTPUT)/include is
 # the configuration of SDK when $(BUILDING_RTE_SDK) is true, or the
 # configuration of the application if $(BUILDING_RTE_SDK) is not
@@ -129,9 +105,8 @@ LDFLAGS += -L$(RTE_OUTPUT)/lib
 ifeq ($(BUILDING_RTE_SDK),1)
 # building sdk
 CFLAGS += -include $(RTE_OUTPUT)/include/rte_config.h
-ifeq ($(CONFIG_RTE_INSECURE_FUNCTION_WARNING),y)
-CFLAGS += -include rte_warnings.h
-endif
+CFLAGS += -DALLOW_EXPERIMENTAL_API
+CFLAGS += -DALLOW_INTERNAL_API
 else
 # if we are building an external application, include SDK's lib and
 # includes too
@@ -140,10 +115,15 @@ ifneq ($(wildcard $(RTE_OUTPUT)/include/rte_config.h),)
 CFLAGS += -include $(RTE_OUTPUT)/include/rte_config.h
 endif
 CFLAGS += -include $(RTE_SDK_BIN)/include/rte_config.h
-ifeq ($(CONFIG_RTE_INSECURE_FUNCTION_WARNING),y)
-CFLAGS += -include rte_warnings.h
-endif
 LDFLAGS += -L$(RTE_SDK_BIN)/lib
+endif
+
+# always define _GNU_SOURCE
+CFLAGS += -D_GNU_SOURCE
+
+# define __BSD_VISIBLE when building for FreeBSD
+ifeq ($(CONFIG_RTE_EXEC_ENV_FREEBSD),y)
+CFLAGS += -D__BSD_VISIBLE
 endif
 
 export CFLAGS

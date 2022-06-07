@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #ifndef _RTE_ACL_H_
@@ -117,10 +88,8 @@ enum {
 	RTE_ACL_TYPE_SHIFT = 29,
 	RTE_ACL_MAX_INDEX = RTE_LEN2MASK(RTE_ACL_TYPE_SHIFT, uint32_t),
 	RTE_ACL_MAX_PRIORITY = RTE_ACL_MAX_INDEX,
-	RTE_ACL_MIN_PRIORITY = 0,
+	RTE_ACL_MIN_PRIORITY = 1,
 };
-
-#define	RTE_ACL_INVALID_USERDATA	0
 
 #define	RTE_ACL_MASKLEN_TO_BITMASK(v, s)	\
 ((v) == 0 ? (v) : (typeof(v))((uint64_t)-1 << ((s) * CHAR_BIT - (v))))
@@ -144,7 +113,7 @@ struct rte_acl_rule_data {
 	struct rte_acl_field field[fld_num];         \
 }
 
-RTE_ACL_RULE_DEF(rte_acl_rule, 0);
+RTE_ACL_RULE_DEF(rte_acl_rule,);
 
 #define	RTE_ACL_RULE_SZ(fld_num)	\
 	(sizeof(struct rte_acl_rule) + sizeof(struct rte_acl_field) * (fld_num))
@@ -270,6 +239,8 @@ enum rte_acl_classify_alg {
 	RTE_ACL_CLASSIFY_SCALAR = 1,  /**< generic implementation. */
 	RTE_ACL_CLASSIFY_SSE = 2,     /**< requires SSE4.1 support. */
 	RTE_ACL_CLASSIFY_AVX2 = 3,    /**< requires AVX2 support. */
+	RTE_ACL_CLASSIFY_NEON = 4,    /**< requires NEON support. */
+	RTE_ACL_CLASSIFY_ALTIVEC = 5,    /**< requires ALTIVEC support. */
 	RTE_ACL_CLASSIFY_NUM          /* should always be the last one. */
 };
 
@@ -379,110 +350,6 @@ rte_acl_dump(const struct rte_acl_ctx *ctx);
  */
 void
 rte_acl_list_dump(void);
-
-/**
- * Legacy support for 7-tuple IPv4 and VLAN rule.
- * This structure and corresponding API is deprecated.
- */
-struct rte_acl_ipv4vlan_rule {
-	struct rte_acl_rule_data data; /**< Miscellaneous data for the rule. */
-	uint8_t proto;                 /**< IPv4 protocol ID. */
-	uint8_t proto_mask;            /**< IPv4 protocol ID mask. */
-	uint16_t vlan;                 /**< VLAN ID. */
-	uint16_t vlan_mask;            /**< VLAN ID mask. */
-	uint16_t domain;               /**< VLAN domain. */
-	uint16_t domain_mask;          /**< VLAN domain mask. */
-	uint32_t src_addr;             /**< IPv4 source address. */
-	uint32_t src_mask_len;         /**< IPv4 source address mask. */
-	uint32_t dst_addr;             /**< IPv4 destination address. */
-	uint32_t dst_mask_len;         /**< IPv4 destination address mask. */
-	uint16_t src_port_low;         /**< L4 source port low. */
-	uint16_t src_port_high;        /**< L4 source port high. */
-	uint16_t dst_port_low;         /**< L4 destination port low. */
-	uint16_t dst_port_high;        /**< L4 destination port high. */
-};
-
-/**
- * Specifies fields layout inside rte_acl_rule for rte_acl_ipv4vlan_rule.
- */
-enum {
-	RTE_ACL_IPV4VLAN_PROTO_FIELD,
-	RTE_ACL_IPV4VLAN_VLAN1_FIELD,
-	RTE_ACL_IPV4VLAN_VLAN2_FIELD,
-	RTE_ACL_IPV4VLAN_SRC_FIELD,
-	RTE_ACL_IPV4VLAN_DST_FIELD,
-	RTE_ACL_IPV4VLAN_SRCP_FIELD,
-	RTE_ACL_IPV4VLAN_DSTP_FIELD,
-	RTE_ACL_IPV4VLAN_NUM_FIELDS
-};
-
-/**
- * Macro to define rule size for rte_acl_ipv4vlan_rule.
- */
-#define	RTE_ACL_IPV4VLAN_RULE_SZ	\
-	RTE_ACL_RULE_SZ(RTE_ACL_IPV4VLAN_NUM_FIELDS)
-
-/*
- * That effectively defines order of IPV4VLAN classifications:
- *  - PROTO
- *  - VLAN (TAG and DOMAIN)
- *  - SRC IP ADDRESS
- *  - DST IP ADDRESS
- *  - PORTS (SRC and DST)
- */
-enum {
-	RTE_ACL_IPV4VLAN_PROTO,
-	RTE_ACL_IPV4VLAN_VLAN,
-	RTE_ACL_IPV4VLAN_SRC,
-	RTE_ACL_IPV4VLAN_DST,
-	RTE_ACL_IPV4VLAN_PORTS,
-	RTE_ACL_IPV4VLAN_NUM
-};
-
-/**
- * Add ipv4vlan rules to an existing ACL context.
- * This function is not multi-thread safe.
- *
- * @param ctx
- *   ACL context to add patterns to.
- * @param rules
- *   Array of rules to add to the ACL context.
- *   Note that all fields in rte_acl_ipv4vlan_rule structures are expected
- *   to be in host byte order.
- * @param num
- *   Number of elements in the input array of rules.
- * @return
- *   - -ENOMEM if there is no space in the ACL context for these rules.
- *   - -EINVAL if the parameters are invalid.
- *   - Zero if operation completed successfully.
- */
-int
-rte_acl_ipv4vlan_add_rules(struct rte_acl_ctx *ctx,
-	const struct rte_acl_ipv4vlan_rule *rules,
-	uint32_t num);
-
-/**
- * Analyze set of ipv4vlan rules and build required internal
- * run-time structures.
- * This function is not multi-thread safe.
- *
- * @param ctx
- *   ACL context to build.
- * @param layout
- *   Layout of input data to search through.
- * @param num_categories
- *   Maximum number of categories to use in that build.
- * @return
- *   - -ENOMEM if couldn't allocate enough memory.
- *   - -EINVAL if the parameters are invalid.
- *   - Negative error code if operation failed.
- *   - Zero if operation completed successfully.
- */
-int
-rte_acl_ipv4vlan_build(struct rte_acl_ctx *ctx,
-	const uint32_t layout[RTE_ACL_IPV4VLAN_NUM],
-	uint32_t num_categories);
-
 
 #ifdef __cplusplus
 }

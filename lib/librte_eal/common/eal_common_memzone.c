@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdlib.h>
@@ -44,105 +15,74 @@
 #include <rte_memory.h>
 #include <rte_memzone.h>
 #include <rte_eal.h>
-#include <rte_eal_memconfig.h>
 #include <rte_per_lcore.h>
 #include <rte_errno.h>
 #include <rte_string_fns.h>
 #include <rte_common.h>
+#include <rte_eal_trace.h>
 
+#include "malloc_heap.h"
+#include "malloc_elem.h"
 #include "eal_private.h"
-
-/* internal copy of free memory segments */
-static struct rte_memseg *free_memseg = NULL;
+#include "eal_memcfg.h"
 
 static inline const struct rte_memzone *
 memzone_lookup_thread_unsafe(const char *name)
 {
-	const struct rte_mem_config *mcfg;
-	unsigned i = 0;
+	struct rte_mem_config *mcfg;
+	struct rte_fbarray *arr;
+	const struct rte_memzone *mz;
+	int i = 0;
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
+	arr = &mcfg->memzones;
 
 	/*
 	 * the algorithm is not optimal (linear), but there are few
 	 * zones and this function should be called at init only
 	 */
-	for (i = 0; i < RTE_MAX_MEMZONE && mcfg->memzone[i].addr != NULL; i++) {
-		if (!strncmp(name, mcfg->memzone[i].name, RTE_MEMZONE_NAMESIZE))
-			return &mcfg->memzone[i];
+	i = rte_fbarray_find_next_used(arr, 0);
+	while (i >= 0) {
+		mz = rte_fbarray_get(arr, i);
+		if (mz->addr != NULL &&
+				!strncmp(name, mz->name, RTE_MEMZONE_NAMESIZE))
+			return mz;
+		i = rte_fbarray_find_next_used(arr, i + 1);
 	}
-
 	return NULL;
-}
-
-/*
- * Return a pointer to a correctly filled memzone descriptor. If the
- * allocation cannot be done, return NULL.
- */
-const struct rte_memzone *
-rte_memzone_reserve(const char *name, size_t len, int socket_id,
-		      unsigned flags)
-{
-	return rte_memzone_reserve_aligned(name,
-			len, socket_id, flags, RTE_CACHE_LINE_SIZE);
-}
-
-/*
- * Helper function for memzone_reserve_aligned_thread_unsafe().
- * Calculate address offset from the start of the segment.
- * Align offset in that way that it satisfy istart alignmnet and
- * buffer of the  requested length would not cross specified boundary.
- */
-static inline phys_addr_t
-align_phys_boundary(const struct rte_memseg *ms, size_t len, size_t align,
-	size_t bound)
-{
-	phys_addr_t addr_offset, bmask, end, start;
-	size_t step;
-
-	step = RTE_MAX(align, bound);
-	bmask = ~((phys_addr_t)bound - 1);
-
-	/* calculate offset to closest alignment */
-	start = RTE_ALIGN_CEIL(ms->phys_addr, align);
-	addr_offset = start - ms->phys_addr;
-
-	while (addr_offset + len < ms->len) {
-
-		/* check, do we meet boundary condition */
-		end = start + len - (len != 0);
-		if ((start & bmask) == (end & bmask))
-			break;
-
-		/* calculate next offset */
-		start = RTE_ALIGN_CEIL(start + 1, step);
-		addr_offset = start - ms->phys_addr;
-	}
-
-	return addr_offset;
 }
 
 static const struct rte_memzone *
 memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
-		int socket_id, unsigned flags, unsigned align, unsigned bound)
+		int socket_id, unsigned int flags, unsigned int align,
+		unsigned int bound)
 {
+	struct rte_memzone *mz;
 	struct rte_mem_config *mcfg;
-	unsigned i = 0;
-	int memseg_idx = -1;
-	uint64_t addr_offset, seg_offset = 0;
+	struct rte_fbarray *arr;
+	void *mz_addr;
 	size_t requested_len;
-	size_t memseg_len = 0;
-	phys_addr_t memseg_physaddr;
-	void *memseg_addr;
+	int mz_idx;
+	bool contig;
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
+	arr = &mcfg->memzones;
 
 	/* no more room in config */
-	if (mcfg->memzone_idx >= RTE_MAX_MEMZONE) {
-		RTE_LOG(ERR, EAL, "%s(): No more room in config\n", __func__);
+	if (arr->count >= arr->len) {
+		RTE_LOG(ERR, EAL,
+		"%s(): Number of requested memzone segments exceeds RTE_MAX_MEMZONE\n",
+			__func__);
 		rte_errno = ENOSPC;
+		return NULL;
+	}
+
+	if (strlen(name) > sizeof(mz->name) - 1) {
+		RTE_LOG(DEBUG, EAL, "%s(): memzone <%s>: name too long\n",
+			__func__, name);
+		rte_errno = ENAMETOOLONG;
 		return NULL;
 	}
 
@@ -166,196 +106,93 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 	if (align < RTE_CACHE_LINE_SIZE)
 		align = RTE_CACHE_LINE_SIZE;
 
-
 	/* align length on cache boundary. Check for overflow before doing so */
 	if (len > SIZE_MAX - RTE_CACHE_LINE_MASK) {
 		rte_errno = EINVAL; /* requested size too big */
 		return NULL;
 	}
 
-	len += RTE_CACHE_LINE_MASK;
-	len &= ~((size_t) RTE_CACHE_LINE_MASK);
+	len = RTE_ALIGN_CEIL(len, RTE_CACHE_LINE_SIZE);
 
 	/* save minimal requested  length */
 	requested_len = RTE_MAX((size_t)RTE_CACHE_LINE_SIZE,  len);
 
 	/* check that boundary condition is valid */
-	if (bound != 0 &&
-			(requested_len > bound || !rte_is_power_of_2(bound))) {
+	if (bound != 0 && (requested_len > bound || !rte_is_power_of_2(bound))) {
 		rte_errno = EINVAL;
 		return NULL;
 	}
 
-	/* find the smallest segment matching requirements */
-	for (i = 0; i < RTE_MAX_MEMSEG; i++) {
-		/* last segment */
-		if (free_memseg[i].addr == NULL)
-			break;
-
-		/* empty segment, skip it */
-		if (free_memseg[i].len == 0)
-			continue;
-
-		/* bad socket ID */
-		if (socket_id != SOCKET_ID_ANY &&
-		    free_memseg[i].socket_id != SOCKET_ID_ANY &&
-		    socket_id != free_memseg[i].socket_id)
-			continue;
-
-		/*
-		 * calculate offset to closest alignment that
-		 * meets boundary conditions.
-		 */
-		addr_offset = align_phys_boundary(free_memseg + i,
-			requested_len, align, bound);
-
-		/* check len */
-		if ((requested_len + addr_offset) > free_memseg[i].len)
-			continue;
-
-		/* check flags for hugepage sizes */
-		if ((flags & RTE_MEMZONE_2MB) &&
-				free_memseg[i].hugepage_sz == RTE_PGSIZE_1G)
-			continue;
-		if ((flags & RTE_MEMZONE_1GB) &&
-				free_memseg[i].hugepage_sz == RTE_PGSIZE_2M)
-			continue;
-		if ((flags & RTE_MEMZONE_16MB) &&
-				free_memseg[i].hugepage_sz == RTE_PGSIZE_16G)
-			continue;
-		if ((flags & RTE_MEMZONE_16GB) &&
-				free_memseg[i].hugepage_sz == RTE_PGSIZE_16M)
-			continue;
-
-		/* this segment is the best until now */
-		if (memseg_idx == -1) {
-			memseg_idx = i;
-			memseg_len = free_memseg[i].len;
-			seg_offset = addr_offset;
-		}
-		/* find the biggest contiguous zone */
-		else if (len == 0) {
-			if (free_memseg[i].len > memseg_len) {
-				memseg_idx = i;
-				memseg_len = free_memseg[i].len;
-				seg_offset = addr_offset;
-			}
-		}
-		/*
-		 * find the smallest (we already checked that current
-		 * zone length is > len
-		 */
-		else if (free_memseg[i].len + align < memseg_len ||
-				(free_memseg[i].len <= memseg_len + align &&
-				addr_offset < seg_offset)) {
-			memseg_idx = i;
-			memseg_len = free_memseg[i].len;
-			seg_offset = addr_offset;
-		}
+	if ((socket_id != SOCKET_ID_ANY) && socket_id < 0) {
+		rte_errno = EINVAL;
+		return NULL;
 	}
 
-	/* no segment found */
-	if (memseg_idx == -1) {
-		/*
-		 * If RTE_MEMZONE_SIZE_HINT_ONLY flag is specified,
-		 * try allocating again without the size parameter otherwise -fail.
-		 */
-		if ((flags & RTE_MEMZONE_SIZE_HINT_ONLY)  &&
-		    ((flags & RTE_MEMZONE_1GB) || (flags & RTE_MEMZONE_2MB)
-		|| (flags & RTE_MEMZONE_16MB) || (flags & RTE_MEMZONE_16GB)))
-			return memzone_reserve_aligned_thread_unsafe(name,
-				len, socket_id, 0, align, bound);
+	/* only set socket to SOCKET_ID_ANY if we aren't allocating for an
+	 * external heap.
+	 */
+	if (!rte_eal_has_hugepages() && socket_id < RTE_MAX_NUMA_NODES)
+		socket_id = SOCKET_ID_ANY;
 
+	contig = (flags & RTE_MEMZONE_IOVA_CONTIG) != 0;
+	/* malloc only cares about size flags, remove contig flag from flags */
+	flags &= ~RTE_MEMZONE_IOVA_CONTIG;
+
+	if (len == 0 && bound == 0) {
+		/* no size constraints were placed, so use malloc elem len */
+		requested_len = 0;
+		mz_addr = malloc_heap_alloc_biggest(NULL, socket_id, flags,
+				align, contig);
+	} else {
+		if (len == 0)
+			requested_len = bound;
+		/* allocate memory on heap */
+		mz_addr = malloc_heap_alloc(NULL, requested_len, socket_id,
+				flags, align, bound, contig);
+	}
+	if (mz_addr == NULL) {
 		rte_errno = ENOMEM;
 		return NULL;
 	}
 
-	/* save aligned physical and virtual addresses */
-	memseg_physaddr = free_memseg[memseg_idx].phys_addr + seg_offset;
-	memseg_addr = RTE_PTR_ADD(free_memseg[memseg_idx].addr,
-			(uintptr_t) seg_offset);
-
-	/* if we are looking for a biggest memzone */
-	if (len == 0) {
-		if (bound == 0)
-			requested_len = memseg_len - seg_offset;
-		else
-			requested_len = RTE_ALIGN_CEIL(memseg_physaddr + 1,
-				bound) - memseg_physaddr;
-	}
-
-	/* set length to correct value */
-	len = (size_t)seg_offset + requested_len;
-
-	/* update our internal state */
-	free_memseg[memseg_idx].len -= len;
-	free_memseg[memseg_idx].phys_addr += len;
-	free_memseg[memseg_idx].addr =
-		(char *)free_memseg[memseg_idx].addr + len;
+	struct malloc_elem *elem = malloc_elem_from_data(mz_addr);
 
 	/* fill the zone in config */
-	struct rte_memzone *mz = &mcfg->memzone[mcfg->memzone_idx++];
-	snprintf(mz->name, sizeof(mz->name), "%s", name);
-	mz->phys_addr = memseg_physaddr;
-	mz->addr = memseg_addr;
-	mz->len = requested_len;
-	mz->hugepage_sz = free_memseg[memseg_idx].hugepage_sz;
-	mz->socket_id = free_memseg[memseg_idx].socket_id;
+	mz_idx = rte_fbarray_find_next_free(arr, 0);
+
+	if (mz_idx < 0) {
+		mz = NULL;
+	} else {
+		rte_fbarray_set_used(arr, mz_idx);
+		mz = rte_fbarray_get(arr, mz_idx);
+	}
+
+	if (mz == NULL) {
+		RTE_LOG(ERR, EAL, "%s(): Cannot find free memzone\n", __func__);
+		malloc_heap_free(elem);
+		rte_errno = ENOSPC;
+		return NULL;
+	}
+
+	strlcpy(mz->name, name, sizeof(mz->name));
+	mz->iova = rte_malloc_virt2iova(mz_addr);
+	mz->addr = mz_addr;
+	mz->len = requested_len == 0 ?
+			elem->size - elem->pad - MALLOC_ELEM_OVERHEAD :
+			requested_len;
+	mz->hugepage_sz = elem->msl->page_sz;
+	mz->socket_id = elem->msl->socket_id;
 	mz->flags = 0;
-	mz->memseg_id = memseg_idx;
 
 	return mz;
 }
 
-/*
- * Return a pointer to a correctly filled memzone descriptor (with a
- * specified alignment). If the allocation cannot be done, return NULL.
- */
-const struct rte_memzone *
-rte_memzone_reserve_aligned(const char *name, size_t len,
-		int socket_id, unsigned flags, unsigned align)
+static const struct rte_memzone *
+rte_memzone_reserve_thread_safe(const char *name, size_t len, int socket_id,
+		unsigned int flags, unsigned int align, unsigned int bound)
 {
 	struct rte_mem_config *mcfg;
 	const struct rte_memzone *mz = NULL;
-
-	/* both sizes cannot be explicitly called for */
-	if (((flags & RTE_MEMZONE_1GB) && (flags & RTE_MEMZONE_2MB))
-		|| ((flags & RTE_MEMZONE_16MB) && (flags & RTE_MEMZONE_16GB))) {
-		rte_errno = EINVAL;
-		return NULL;
-	}
-
-	/* get pointer to global configuration */
-	mcfg = rte_eal_get_configuration()->mem_config;
-
-	rte_rwlock_write_lock(&mcfg->mlock);
-
-	mz = memzone_reserve_aligned_thread_unsafe(
-		name, len, socket_id, flags, align, 0);
-
-	rte_rwlock_write_unlock(&mcfg->mlock);
-
-	return mz;
-}
-
-/*
- * Return a pointer to a correctly filled memzone descriptor (with a
- * specified alignment and boundary).
- * If the allocation cannot be done, return NULL.
- */
-const struct rte_memzone *
-rte_memzone_reserve_bounded(const char *name, size_t len,
-		int socket_id, unsigned flags, unsigned align, unsigned bound)
-{
-	struct rte_mem_config *mcfg;
-	const struct rte_memzone *mz = NULL;
-
-	/* both sizes cannot be explicitly called for */
-	if (((flags & RTE_MEMZONE_1GB) && (flags & RTE_MEMZONE_2MB))
-		|| ((flags & RTE_MEMZONE_16MB) && (flags & RTE_MEMZONE_16GB))) {
-		rte_errno = EINVAL;
-		return NULL;
-	}
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
@@ -365,11 +202,93 @@ rte_memzone_reserve_bounded(const char *name, size_t len,
 	mz = memzone_reserve_aligned_thread_unsafe(
 		name, len, socket_id, flags, align, bound);
 
+	rte_eal_trace_memzone_reserve(name, len, socket_id, flags, align,
+		bound, mz);
+
 	rte_rwlock_write_unlock(&mcfg->mlock);
 
 	return mz;
 }
 
+/*
+ * Return a pointer to a correctly filled memzone descriptor (with a
+ * specified alignment and boundary). If the allocation cannot be done,
+ * return NULL.
+ */
+const struct rte_memzone *
+rte_memzone_reserve_bounded(const char *name, size_t len, int socket_id,
+			    unsigned flags, unsigned align, unsigned bound)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id, flags,
+					       align, bound);
+}
+
+/*
+ * Return a pointer to a correctly filled memzone descriptor (with a
+ * specified alignment). If the allocation cannot be done, return NULL.
+ */
+const struct rte_memzone *
+rte_memzone_reserve_aligned(const char *name, size_t len, int socket_id,
+			    unsigned flags, unsigned align)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id, flags,
+					       align, 0);
+}
+
+/*
+ * Return a pointer to a correctly filled memzone descriptor. If the
+ * allocation cannot be done, return NULL.
+ */
+const struct rte_memzone *
+rte_memzone_reserve(const char *name, size_t len, int socket_id,
+		    unsigned flags)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id,
+					       flags, RTE_CACHE_LINE_SIZE, 0);
+}
+
+int
+rte_memzone_free(const struct rte_memzone *mz)
+{
+	char name[RTE_MEMZONE_NAMESIZE];
+	struct rte_mem_config *mcfg;
+	struct rte_fbarray *arr;
+	struct rte_memzone *found_mz;
+	int ret = 0;
+	void *addr = NULL;
+	unsigned idx;
+
+	if (mz == NULL)
+		return -EINVAL;
+
+	rte_strlcpy(name, mz->name, RTE_MEMZONE_NAMESIZE);
+	mcfg = rte_eal_get_configuration()->mem_config;
+	arr = &mcfg->memzones;
+
+	rte_rwlock_write_lock(&mcfg->mlock);
+
+	idx = rte_fbarray_find_idx(arr, mz);
+	found_mz = rte_fbarray_get(arr, idx);
+
+	if (found_mz == NULL) {
+		ret = -EINVAL;
+	} else if (found_mz->addr == NULL) {
+		RTE_LOG(ERR, EAL, "Memzone is not allocated\n");
+		ret = -EINVAL;
+	} else {
+		addr = found_mz->addr;
+		memset(found_mz, 0, sizeof(*found_mz));
+		rte_fbarray_set_free(arr, idx);
+	}
+
+	rte_rwlock_write_unlock(&mcfg->mlock);
+
+	if (addr != NULL)
+		rte_free(addr);
+
+	rte_eal_trace_memzone_free(name, addr, ret);
+	return ret;
+}
 
 /*
  * Lookup for the memzone identified by the given name
@@ -388,73 +307,65 @@ rte_memzone_lookup(const char *name)
 
 	rte_rwlock_read_unlock(&mcfg->mlock);
 
+	rte_eal_trace_memzone_lookup(name, memzone);
 	return memzone;
+}
+
+static void
+dump_memzone(const struct rte_memzone *mz, void *arg)
+{
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct rte_memseg_list *msl = NULL;
+	void *cur_addr, *mz_end;
+	struct rte_memseg *ms;
+	int mz_idx, ms_idx;
+	size_t page_sz;
+	FILE *f = arg;
+
+	mz_idx = rte_fbarray_find_idx(&mcfg->memzones, mz);
+
+	fprintf(f, "Zone %u: name:<%s>, len:0x%zx, virt:%p, "
+				"socket_id:%"PRId32", flags:%"PRIx32"\n",
+			mz_idx,
+			mz->name,
+			mz->len,
+			mz->addr,
+			mz->socket_id,
+			mz->flags);
+
+	/* go through each page occupied by this memzone */
+	msl = rte_mem_virt2memseg_list(mz->addr);
+	if (!msl) {
+		RTE_LOG(DEBUG, EAL, "Skipping bad memzone\n");
+		return;
+	}
+	page_sz = (size_t)mz->hugepage_sz;
+	cur_addr = RTE_PTR_ALIGN_FLOOR(mz->addr, page_sz);
+	mz_end = RTE_PTR_ADD(cur_addr, mz->len);
+
+	fprintf(f, "physical segments used:\n");
+	ms_idx = RTE_PTR_DIFF(mz->addr, msl->base_va) / page_sz;
+	ms = rte_fbarray_get(&msl->memseg_arr, ms_idx);
+
+	do {
+		fprintf(f, "  addr: %p iova: 0x%" PRIx64 " "
+				"len: 0x%zx "
+				"pagesz: 0x%zx\n",
+			cur_addr, ms->iova, ms->len, page_sz);
+
+		/* advance VA to next page */
+		cur_addr = RTE_PTR_ADD(cur_addr, page_sz);
+
+		/* memzones occupy contiguous segments */
+		++ms;
+	} while (cur_addr < mz_end);
 }
 
 /* Dump all reserved memory zones on console */
 void
 rte_memzone_dump(FILE *f)
 {
-	struct rte_mem_config *mcfg;
-	unsigned i = 0;
-
-	/* get pointer to global configuration */
-	mcfg = rte_eal_get_configuration()->mem_config;
-
-	rte_rwlock_read_lock(&mcfg->mlock);
-	/* dump all zones */
-	for (i=0; i<RTE_MAX_MEMZONE; i++) {
-		if (mcfg->memzone[i].addr == NULL)
-			break;
-		fprintf(f, "Zone %u: name:<%s>, phys:0x%"PRIx64", len:0x%zx"
-		       ", virt:%p, socket_id:%"PRId32", flags:%"PRIx32"\n", i,
-		       mcfg->memzone[i].name,
-		       mcfg->memzone[i].phys_addr,
-		       mcfg->memzone[i].len,
-		       mcfg->memzone[i].addr,
-		       mcfg->memzone[i].socket_id,
-		       mcfg->memzone[i].flags);
-	}
-	rte_rwlock_read_unlock(&mcfg->mlock);
-}
-
-/*
- * called by init: modify the free memseg list to have cache-aligned
- * addresses and cache-aligned lengths
- */
-static int
-memseg_sanitize(struct rte_memseg *memseg)
-{
-	unsigned phys_align;
-	unsigned virt_align;
-	unsigned off;
-
-	phys_align = memseg->phys_addr & RTE_CACHE_LINE_MASK;
-	virt_align = (unsigned long)memseg->addr & RTE_CACHE_LINE_MASK;
-
-	/*
-	 * sanity check: phys_addr and addr must have the same
-	 * alignment
-	 */
-	if (phys_align != virt_align)
-		return -1;
-
-	/* memseg is really too small, don't bother with it */
-	if (memseg->len < (2 * RTE_CACHE_LINE_SIZE)) {
-		memseg->len = 0;
-		return 0;
-	}
-
-	/* align start address */
-	off = (RTE_CACHE_LINE_SIZE - phys_align) & RTE_CACHE_LINE_MASK;
-	memseg->phys_addr += off;
-	memseg->addr = (char *)memseg->addr + off;
-	memseg->len -= off;
-
-	/* align end address */
-	memseg->len &= ~((uint64_t)RTE_CACHE_LINE_MASK);
-
-	return 0;
+	rte_memzone_walk(dump_memzone, f);
 }
 
 /*
@@ -464,54 +375,27 @@ int
 rte_eal_memzone_init(void)
 {
 	struct rte_mem_config *mcfg;
-	const struct rte_memseg *memseg;
-	unsigned i = 0;
+	int ret = 0;
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
 
-	/* mirror the runtime memsegs from config */
-	free_memseg = mcfg->free_memseg;
-
-	/* secondary processes don't need to initialise anything */
-	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
-		return 0;
-
-	memseg = rte_eal_get_physmem_layout();
-	if (memseg == NULL) {
-		RTE_LOG(ERR, EAL, "%s(): Cannot get physical layout\n", __func__);
-		return -1;
-	}
-
 	rte_rwlock_write_lock(&mcfg->mlock);
 
-	/* fill in uninitialized free_memsegs */
-	for (i = 0; i < RTE_MAX_MEMSEG; i++) {
-		if (memseg[i].addr == NULL)
-			break;
-		if (free_memseg[i].addr != NULL)
-			continue;
-		memcpy(&free_memseg[i], &memseg[i], sizeof(struct rte_memseg));
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY &&
+			rte_fbarray_init(&mcfg->memzones, "memzone",
+			RTE_MAX_MEMZONE, sizeof(struct rte_memzone))) {
+		RTE_LOG(ERR, EAL, "Cannot allocate memzone list\n");
+		ret = -1;
+	} else if (rte_eal_process_type() == RTE_PROC_SECONDARY &&
+			rte_fbarray_attach(&mcfg->memzones)) {
+		RTE_LOG(ERR, EAL, "Cannot attach to memzone list\n");
+		ret = -1;
 	}
-
-	/* make all zones cache-aligned */
-	for (i = 0; i < RTE_MAX_MEMSEG; i++) {
-		if (free_memseg[i].addr == NULL)
-			break;
-		if (memseg_sanitize(&free_memseg[i]) < 0) {
-			RTE_LOG(ERR, EAL, "%s(): Sanity check failed\n", __func__);
-			rte_rwlock_write_unlock(&mcfg->mlock);
-			return -1;
-		}
-	}
-
-	/* delete all zones */
-	mcfg->memzone_idx = 0;
-	memset(mcfg->memzone, 0, sizeof(mcfg->memzone));
 
 	rte_rwlock_write_unlock(&mcfg->mlock);
 
-	return 0;
+	return ret;
 }
 
 /* Walk all reserved memory zones */
@@ -519,14 +403,18 @@ void rte_memzone_walk(void (*func)(const struct rte_memzone *, void *),
 		      void *arg)
 {
 	struct rte_mem_config *mcfg;
-	unsigned i;
+	struct rte_fbarray *arr;
+	int i;
 
 	mcfg = rte_eal_get_configuration()->mem_config;
+	arr = &mcfg->memzones;
 
 	rte_rwlock_read_lock(&mcfg->mlock);
-	for (i=0; i<RTE_MAX_MEMZONE; i++) {
-		if (mcfg->memzone[i].addr != NULL)
-			(*func)(&mcfg->memzone[i], arg);
+	i = rte_fbarray_find_next_used(arr, 0);
+	while (i >= 0) {
+		struct rte_memzone *mz = rte_fbarray_get(arr, i);
+		(*func)(mz, arg);
+		i = rte_fbarray_find_next_used(arr, i + 1);
 	}
 	rte_rwlock_read_unlock(&mcfg->mlock);
 }

@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2017 Intel Corporation
  */
 
 #include <stdio.h>
@@ -36,367 +7,502 @@
 #include <string.h>
 #include <rte_mbuf.h>
 #include <rte_memory.h>
+#include <rte_cycles.h>
 #include <rte_memzone.h>
 #include <rte_errno.h>
 #include <rte_string_fns.h>
 #include <rte_eal_memconfig.h>
+#include <rte_pause.h>
+#include <rte_tailq.h>
+
 #include "rte_distributor.h"
+#include "rte_distributor_single.h"
+#include "distributor_private.h"
 
-#define NO_FLAGS 0
-#define RTE_DISTRIB_PREFIX "DT_"
+TAILQ_HEAD(rte_dist_burst_list, rte_distributor);
 
-/* we will use the bottom four bits of pointer for flags, shifting out
- * the top four bits to make room (since a 64-bit pointer actually only uses
- * 48 bits). An arithmetic-right-shift will then appropriately restore the
- * original pointer value with proper sign extension into the top bits. */
-#define RTE_DISTRIB_FLAG_BITS 4
-#define RTE_DISTRIB_FLAGS_MASK (0x0F)
-#define RTE_DISTRIB_NO_BUF 0       /**< empty flags: no buffer requested */
-#define RTE_DISTRIB_GET_BUF (1)    /**< worker requests a buffer, returns old */
-#define RTE_DISTRIB_RETURN_BUF (2) /**< worker returns a buffer, no request */
-
-#define RTE_DISTRIB_BACKLOG_SIZE 8
-#define RTE_DISTRIB_BACKLOG_MASK (RTE_DISTRIB_BACKLOG_SIZE - 1)
-
-#define RTE_DISTRIB_MAX_RETURNS 128
-#define RTE_DISTRIB_RETURNS_MASK (RTE_DISTRIB_MAX_RETURNS - 1)
-
-/**
- * Maximum number of workers allowed.
- * Be aware of increasing the limit, becaus it is limited by how we track
- * in-flight tags. See @in_flight_bitmask and @rte_distributor_process
- */
-#define RTE_DISTRIB_MAX_WORKERS	64
-
-/**
- * Buffer structure used to pass the pointer data between cores. This is cache
- * line aligned, but to improve performance and prevent adjacent cache-line
- * prefetches of buffers for other workers, e.g. when worker 1's buffer is on
- * the next cache line to worker 0, we pad this out to three cache lines.
- * Only 64-bits of the memory is actually used though.
- */
-union rte_distributor_buffer {
-	volatile int64_t bufptr64;
-	char pad[RTE_CACHE_LINE_SIZE*3];
-} __rte_cache_aligned;
-
-struct rte_distributor_backlog {
-	unsigned start;
-	unsigned count;
-	int64_t pkts[RTE_DISTRIB_BACKLOG_SIZE];
+static struct rte_tailq_elem rte_dist_burst_tailq = {
+	.name = "RTE_DIST_BURST",
 };
-
-struct rte_distributor_returned_pkts {
-	unsigned start;
-	unsigned count;
-	struct rte_mbuf *mbufs[RTE_DISTRIB_MAX_RETURNS];
-};
-
-struct rte_distributor {
-	TAILQ_ENTRY(rte_distributor) next;    /**< Next in list. */
-
-	char name[RTE_DISTRIBUTOR_NAMESIZE];  /**< Name of the ring. */
-	unsigned num_workers;                 /**< Number of workers polling */
-
-	uint32_t in_flight_tags[RTE_DISTRIB_MAX_WORKERS];
-		/**< Tracks the tag being processed per core */
-	uint64_t in_flight_bitmask;
-		/**< on/off bits for in-flight tags.
-		 * Note that if RTE_DISTRIB_MAX_WORKERS is larger than 64 then
-		 * the bitmask has to expand.
-		 */
-
-	struct rte_distributor_backlog backlog[RTE_DISTRIB_MAX_WORKERS];
-
-	union rte_distributor_buffer bufs[RTE_DISTRIB_MAX_WORKERS];
-
-	struct rte_distributor_returned_pkts returns;
-};
-
-TAILQ_HEAD(rte_distributor_list, rte_distributor);
-
-static struct rte_tailq_elem rte_distributor_tailq = {
-	.name = "RTE_DISTRIBUTOR",
-};
-EAL_REGISTER_TAILQ(rte_distributor_tailq)
+EAL_REGISTER_TAILQ(rte_dist_burst_tailq)
 
 /**** APIs called by workers ****/
 
+/**** Burst Packet APIs called by workers ****/
+
 void
 rte_distributor_request_pkt(struct rte_distributor *d,
-		unsigned worker_id, struct rte_mbuf *oldpkt)
+		unsigned int worker_id, struct rte_mbuf **oldpkt,
+		unsigned int count)
 {
-	union rte_distributor_buffer *buf = &d->bufs[worker_id];
-	int64_t req = (((int64_t)(uintptr_t)oldpkt) << RTE_DISTRIB_FLAG_BITS)
-			| RTE_DISTRIB_GET_BUF;
-	while (unlikely(buf->bufptr64 & RTE_DISTRIB_FLAGS_MASK))
+	struct rte_distributor_buffer *buf = &(d->bufs[worker_id]);
+	unsigned int i;
+
+	volatile int64_t *retptr64;
+
+	if (unlikely(d->alg_type == RTE_DIST_ALG_SINGLE)) {
+		rte_distributor_request_pkt_single(d->d_single,
+			worker_id, oldpkt[0]);
+		return;
+	}
+
+	retptr64 = &(buf->retptr64[0]);
+	/* Spin while handshake bits are set (scheduler clears it).
+	 * Sync with worker on GET_BUF flag.
+	 */
+	while (unlikely(__atomic_load_n(retptr64, __ATOMIC_ACQUIRE)
+			& RTE_DISTRIB_GET_BUF)) {
 		rte_pause();
-	buf->bufptr64 = req;
+		uint64_t t = rte_rdtsc()+100;
+
+		while (rte_rdtsc() < t)
+			rte_pause();
+	}
+
+	/*
+	 * OK, if we've got here, then the scheduler has just cleared the
+	 * handshake bits. Populate the retptrs with returning packets.
+	 */
+
+	for (i = count; i < RTE_DIST_BURST_SIZE; i++)
+		buf->retptr64[i] = 0;
+
+	/* Set Return bit for each packet returned */
+	for (i = count; i-- > 0; )
+		buf->retptr64[i] =
+			(((int64_t)(uintptr_t)(oldpkt[i])) <<
+			RTE_DISTRIB_FLAG_BITS) | RTE_DISTRIB_RETURN_BUF;
+
+	/*
+	 * Finally, set the GET_BUF  to signal to distributor that cache
+	 * line is ready for processing
+	 * Sync with distributor to release retptrs
+	 */
+	__atomic_store_n(retptr64, *retptr64 | RTE_DISTRIB_GET_BUF,
+			__ATOMIC_RELEASE);
 }
 
-struct rte_mbuf *
+int
 rte_distributor_poll_pkt(struct rte_distributor *d,
-		unsigned worker_id)
+		unsigned int worker_id, struct rte_mbuf **pkts)
 {
-	union rte_distributor_buffer *buf = &d->bufs[worker_id];
-	if (buf->bufptr64 & RTE_DISTRIB_GET_BUF)
-		return NULL;
+	struct rte_distributor_buffer *buf = &d->bufs[worker_id];
+	uint64_t ret;
+	int count = 0;
+	unsigned int i;
+
+	if (unlikely(d->alg_type == RTE_DIST_ALG_SINGLE)) {
+		pkts[0] = rte_distributor_poll_pkt_single(d->d_single,
+			worker_id);
+		return (pkts[0]) ? 1 : 0;
+	}
+
+	/* If bit is set, return
+	 * Sync with distributor to acquire bufptrs
+	 */
+	if (__atomic_load_n(&(buf->bufptr64[0]), __ATOMIC_ACQUIRE)
+		& RTE_DISTRIB_GET_BUF)
+		return -1;
 
 	/* since bufptr64 is signed, this should be an arithmetic shift */
-	int64_t ret = buf->bufptr64 >> RTE_DISTRIB_FLAG_BITS;
-	return (struct rte_mbuf *)((uintptr_t)ret);
+	for (i = 0; i < RTE_DIST_BURST_SIZE; i++) {
+		if (likely(buf->bufptr64[i] & RTE_DISTRIB_VALID_BUF)) {
+			ret = buf->bufptr64[i] >> RTE_DISTRIB_FLAG_BITS;
+			pkts[count++] = (struct rte_mbuf *)((uintptr_t)(ret));
+		}
+	}
+
+	/*
+	 * so now we've got the contents of the cacheline into an  array of
+	 * mbuf pointers, so toggle the bit so scheduler can start working
+	 * on the next cacheline while we're working.
+	 * Sync with distributor on GET_BUF flag. Release bufptrs.
+	 */
+	__atomic_store_n(&(buf->bufptr64[0]),
+		buf->bufptr64[0] | RTE_DISTRIB_GET_BUF, __ATOMIC_RELEASE);
+
+	return count;
 }
 
-struct rte_mbuf *
+int
 rte_distributor_get_pkt(struct rte_distributor *d,
-		unsigned worker_id, struct rte_mbuf *oldpkt)
+		unsigned int worker_id, struct rte_mbuf **pkts,
+		struct rte_mbuf **oldpkt, unsigned int return_count)
 {
-	struct rte_mbuf *ret;
-	rte_distributor_request_pkt(d, worker_id, oldpkt);
-	while ((ret = rte_distributor_poll_pkt(d, worker_id)) == NULL)
-		rte_pause();
-	return ret;
+	int count;
+
+	if (unlikely(d->alg_type == RTE_DIST_ALG_SINGLE)) {
+		if (return_count <= 1) {
+			pkts[0] = rte_distributor_get_pkt_single(d->d_single,
+				worker_id, oldpkt[0]);
+			return (pkts[0]) ? 1 : 0;
+		} else
+			return -EINVAL;
+	}
+
+	rte_distributor_request_pkt(d, worker_id, oldpkt, return_count);
+
+	count = rte_distributor_poll_pkt(d, worker_id, pkts);
+	while (count == -1) {
+		uint64_t t = rte_rdtsc() + 100;
+
+		while (rte_rdtsc() < t)
+			rte_pause();
+
+		count = rte_distributor_poll_pkt(d, worker_id, pkts);
+	}
+	return count;
 }
 
 int
 rte_distributor_return_pkt(struct rte_distributor *d,
-		unsigned worker_id, struct rte_mbuf *oldpkt)
+		unsigned int worker_id, struct rte_mbuf **oldpkt, int num)
 {
-	union rte_distributor_buffer *buf = &d->bufs[worker_id];
-	uint64_t req = (((int64_t)(uintptr_t)oldpkt) << RTE_DISTRIB_FLAG_BITS)
-			| RTE_DISTRIB_RETURN_BUF;
-	buf->bufptr64 = req;
+	struct rte_distributor_buffer *buf = &d->bufs[worker_id];
+	unsigned int i;
+
+	if (unlikely(d->alg_type == RTE_DIST_ALG_SINGLE)) {
+		if (num == 1)
+			return rte_distributor_return_pkt_single(d->d_single,
+				worker_id, oldpkt[0]);
+		else
+			return -EINVAL;
+	}
+
+	/* Sync with distributor to acquire retptrs */
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	for (i = 0; i < RTE_DIST_BURST_SIZE; i++)
+		/* Switch off the return bit first */
+		buf->retptr64[i] &= ~RTE_DISTRIB_RETURN_BUF;
+
+	for (i = num; i-- > 0; )
+		buf->retptr64[i] = (((int64_t)(uintptr_t)oldpkt[i]) <<
+			RTE_DISTRIB_FLAG_BITS) | RTE_DISTRIB_RETURN_BUF;
+
+	/* set the GET_BUF but even if we got no returns.
+	 * Sync with distributor on GET_BUF flag. Release retptrs.
+	 */
+	__atomic_store_n(&(buf->retptr64[0]),
+		buf->retptr64[0] | RTE_DISTRIB_GET_BUF, __ATOMIC_RELEASE);
+
 	return 0;
 }
 
 /**** APIs called on distributor core ***/
 
-/* as name suggests, adds a packet to the backlog for a particular worker */
-static int
-add_to_backlog(struct rte_distributor_backlog *bl, int64_t item)
-{
-	if (bl->count == RTE_DISTRIB_BACKLOG_SIZE)
-		return -1;
-
-	bl->pkts[(bl->start + bl->count++) & (RTE_DISTRIB_BACKLOG_MASK)]
-			= item;
-	return 0;
-}
-
-/* takes the next packet for a worker off the backlog */
-static int64_t
-backlog_pop(struct rte_distributor_backlog *bl)
-{
-	bl->count--;
-	return bl->pkts[bl->start++ & RTE_DISTRIB_BACKLOG_MASK];
-}
-
 /* stores a packet returned from a worker inside the returns array */
 static inline void
 store_return(uintptr_t oldbuf, struct rte_distributor *d,
-		unsigned *ret_start, unsigned *ret_count)
+		unsigned int *ret_start, unsigned int *ret_count)
 {
-	/* store returns in a circular buffer - code is branch-free */
+	if (!oldbuf)
+		return;
+	/* store returns in a circular buffer */
 	d->returns.mbufs[(*ret_start + *ret_count) & RTE_DISTRIB_RETURNS_MASK]
 			= (void *)oldbuf;
-	*ret_start += (*ret_count == RTE_DISTRIB_RETURNS_MASK) & !!(oldbuf);
-	*ret_count += (*ret_count != RTE_DISTRIB_RETURNS_MASK) & !!(oldbuf);
+	*ret_start += (*ret_count == RTE_DISTRIB_RETURNS_MASK);
+	*ret_count += (*ret_count != RTE_DISTRIB_RETURNS_MASK);
 }
 
-static inline void
-handle_worker_shutdown(struct rte_distributor *d, unsigned wkr)
-{
-	d->in_flight_tags[wkr] = 0;
-	d->in_flight_bitmask &= ~(1UL << wkr);
-	d->bufs[wkr].bufptr64 = 0;
-	if (unlikely(d->backlog[wkr].count != 0)) {
-		/* On return of a packet, we need to move the
-		 * queued packets for this core elsewhere.
-		 * Easiest solution is to set things up for
-		 * a recursive call. That will cause those
-		 * packets to be queued up for the next free
-		 * core, i.e. it will return as soon as a
-		 * core becomes free to accept the first
-		 * packet, as subsequent ones will be added to
-		 * the backlog for that core.
-		 */
-		struct rte_mbuf *pkts[RTE_DISTRIB_BACKLOG_SIZE];
-		unsigned i;
-		struct rte_distributor_backlog *bl = &d->backlog[wkr];
-
-		for (i = 0; i < bl->count; i++) {
-			unsigned idx = (bl->start + i) &
-					RTE_DISTRIB_BACKLOG_MASK;
-			pkts[i] = (void *)((uintptr_t)(bl->pkts[idx] >>
-					RTE_DISTRIB_FLAG_BITS));
-		}
-		/* recursive call.
-		 * Note that the tags were set before first level call
-		 * to rte_distributor_process.
-		 */
-		rte_distributor_process(d, pkts, i);
-		bl->count = bl->start = 0;
-	}
-}
-
-/* this function is called when process() fn is called without any new
- * packets. It goes through all the workers and clears any returned packets
- * to do a partial flush.
+/*
+ * Match then flow_ids (tags) of the incoming packets to the flow_ids
+ * of the inflight packets (both inflight on the workers and in each worker
+ * backlog). This will then allow us to pin those packets to the relevant
+ * workers to give us our atomic flow pinning.
  */
-static int
-process_returns(struct rte_distributor *d)
+void
+find_match_scalar(struct rte_distributor *d,
+			uint16_t *data_ptr,
+			uint16_t *output_ptr)
 {
-	unsigned wkr;
-	unsigned flushed = 0;
-	unsigned ret_start = d->returns.start,
-			ret_count = d->returns.count;
+	struct rte_distributor_backlog *bl;
+	uint16_t i, j, w;
 
-	for (wkr = 0; wkr < d->num_workers; wkr++) {
+	/*
+	 * Function overview:
+	 * 1. Loop through all worker ID's
+	 * 2. Compare the current inflights to the incoming tags
+	 * 3. Compare the current backlog to the incoming tags
+	 * 4. Add any matches to the output
+	 */
 
-		const int64_t data = d->bufs[wkr].bufptr64;
-		uintptr_t oldbuf = 0;
+	for (j = 0 ; j < RTE_DIST_BURST_SIZE; j++)
+		output_ptr[j] = 0;
 
-		if (data & RTE_DISTRIB_GET_BUF) {
-			flushed++;
-			if (d->backlog[wkr].count)
-				d->bufs[wkr].bufptr64 =
-						backlog_pop(&d->backlog[wkr]);
-			else {
-				d->bufs[wkr].bufptr64 = RTE_DISTRIB_GET_BUF;
-				d->in_flight_tags[wkr] = 0;
-				d->in_flight_bitmask &= ~(1UL << wkr);
-			}
-			oldbuf = data >> RTE_DISTRIB_FLAG_BITS;
-		} else if (data & RTE_DISTRIB_RETURN_BUF) {
-			handle_worker_shutdown(d, wkr);
-			oldbuf = data >> RTE_DISTRIB_FLAG_BITS;
-		}
+	for (i = 0; i < d->num_workers; i++) {
+		bl = &d->backlog[i];
 
-		store_return(oldbuf, d, &ret_start, &ret_count);
+		for (j = 0; j < RTE_DIST_BURST_SIZE ; j++)
+			for (w = 0; w < RTE_DIST_BURST_SIZE; w++)
+				if (d->in_flight_tags[i][j] == data_ptr[w]) {
+					output_ptr[j] = i+1;
+					break;
+				}
+		for (j = 0; j < RTE_DIST_BURST_SIZE; j++)
+			for (w = 0; w < RTE_DIST_BURST_SIZE; w++)
+				if (bl->tags[j] == data_ptr[w]) {
+					output_ptr[j] = i+1;
+					break;
+				}
 	}
 
-	d->returns.start = ret_start;
-	d->returns.count = ret_count;
-
-	return flushed;
+	/*
+	 * At this stage, the output contains 8 16-bit values, with
+	 * each non-zero value containing the worker ID on which the
+	 * corresponding flow is pinned to.
+	 */
 }
+
+
+/*
+ * When the handshake bits indicate that there are packets coming
+ * back from the worker, this function is called to copy and store
+ * the valid returned pointers (store_return).
+ */
+static unsigned int
+handle_returns(struct rte_distributor *d, unsigned int wkr)
+{
+	struct rte_distributor_buffer *buf = &(d->bufs[wkr]);
+	uintptr_t oldbuf;
+	unsigned int ret_start = d->returns.start,
+			ret_count = d->returns.count;
+	unsigned int count = 0;
+	unsigned int i;
+
+	/* Sync on GET_BUF flag. Acquire retptrs. */
+	if (__atomic_load_n(&(buf->retptr64[0]), __ATOMIC_ACQUIRE)
+		& RTE_DISTRIB_GET_BUF) {
+		for (i = 0; i < RTE_DIST_BURST_SIZE; i++) {
+			if (buf->retptr64[i] & RTE_DISTRIB_RETURN_BUF) {
+				oldbuf = ((uintptr_t)(buf->retptr64[i] >>
+					RTE_DISTRIB_FLAG_BITS));
+				/* store returns in a circular buffer */
+				store_return(oldbuf, d, &ret_start, &ret_count);
+				count++;
+				buf->retptr64[i] &= ~RTE_DISTRIB_RETURN_BUF;
+			}
+		}
+		d->returns.start = ret_start;
+		d->returns.count = ret_count;
+		/* Clear for the worker to populate with more returns.
+		 * Sync with distributor on GET_BUF flag. Release retptrs.
+		 */
+		__atomic_store_n(&(buf->retptr64[0]), 0, __ATOMIC_RELEASE);
+	}
+	return count;
+}
+
+/*
+ * This function releases a burst (cache line) to a worker.
+ * It is called from the process function when a cacheline is
+ * full to make room for more packets for that worker, or when
+ * all packets have been assigned to bursts and need to be flushed
+ * to the workers.
+ * It also needs to wait for any outstanding packets from the worker
+ * before sending out new packets.
+ */
+static unsigned int
+release(struct rte_distributor *d, unsigned int wkr)
+{
+	struct rte_distributor_buffer *buf = &(d->bufs[wkr]);
+	unsigned int i;
+
+	/* Sync with worker on GET_BUF flag */
+	while (!(__atomic_load_n(&(d->bufs[wkr].bufptr64[0]), __ATOMIC_ACQUIRE)
+		& RTE_DISTRIB_GET_BUF))
+		rte_pause();
+
+	handle_returns(d, wkr);
+
+	buf->count = 0;
+
+	for (i = 0; i < d->backlog[wkr].count; i++) {
+		d->bufs[wkr].bufptr64[i] = d->backlog[wkr].pkts[i] |
+				RTE_DISTRIB_GET_BUF | RTE_DISTRIB_VALID_BUF;
+		d->in_flight_tags[wkr][i] = d->backlog[wkr].tags[i];
+	}
+	buf->count = i;
+	for ( ; i < RTE_DIST_BURST_SIZE ; i++) {
+		buf->bufptr64[i] = RTE_DISTRIB_GET_BUF;
+		d->in_flight_tags[wkr][i] = 0;
+	}
+
+	d->backlog[wkr].count = 0;
+
+	/* Clear the GET bit.
+	 * Sync with worker on GET_BUF flag. Release bufptrs.
+	 */
+	__atomic_store_n(&(buf->bufptr64[0]),
+		buf->bufptr64[0] & ~RTE_DISTRIB_GET_BUF, __ATOMIC_RELEASE);
+	return  buf->count;
+
+}
+
 
 /* process a set of packets to distribute them to workers */
 int
 rte_distributor_process(struct rte_distributor *d,
-		struct rte_mbuf **mbufs, unsigned num_mbufs)
+		struct rte_mbuf **mbufs, unsigned int num_mbufs)
 {
-	unsigned next_idx = 0;
-	unsigned wkr = 0;
+	unsigned int next_idx = 0;
+	static unsigned int wkr;
 	struct rte_mbuf *next_mb = NULL;
 	int64_t next_value = 0;
-	uint32_t new_tag = 0;
-	unsigned ret_start = d->returns.start,
-			ret_count = d->returns.count;
+	uint16_t new_tag = 0;
+	uint16_t flows[RTE_DIST_BURST_SIZE] __rte_cache_aligned;
+	unsigned int i, j, w, wid;
 
-	if (unlikely(num_mbufs == 0))
-		return process_returns(d);
+	if (d->alg_type == RTE_DIST_ALG_SINGLE) {
+		/* Call the old API */
+		return rte_distributor_process_single(d->d_single,
+			mbufs, num_mbufs);
+	}
 
-	while (next_idx < num_mbufs || next_mb != NULL) {
+	if (unlikely(num_mbufs == 0)) {
+		/* Flush out all non-full cache-lines to workers. */
+		for (wid = 0 ; wid < d->num_workers; wid++) {
+			/* Sync with worker on GET_BUF flag. */
+			if (__atomic_load_n(&(d->bufs[wid].bufptr64[0]),
+				__ATOMIC_ACQUIRE) & RTE_DISTRIB_GET_BUF) {
+				release(d, wid);
+				handle_returns(d, wid);
+			}
+		}
+		return 0;
+	}
 
-		int64_t data = d->bufs[wkr].bufptr64;
-		uintptr_t oldbuf = 0;
+	while (next_idx < num_mbufs) {
+		uint16_t matches[RTE_DIST_BURST_SIZE];
+		unsigned int pkts;
 
-		if (!next_mb) {
+		/* Sync with worker on GET_BUF flag. */
+		if (__atomic_load_n(&(d->bufs[wkr].bufptr64[0]),
+			__ATOMIC_ACQUIRE) & RTE_DISTRIB_GET_BUF)
+			d->bufs[wkr].count = 0;
+
+		if ((num_mbufs - next_idx) < RTE_DIST_BURST_SIZE)
+			pkts = num_mbufs - next_idx;
+		else
+			pkts = RTE_DIST_BURST_SIZE;
+
+		for (i = 0; i < pkts; i++) {
+			if (mbufs[next_idx + i]) {
+				/* flows have to be non-zero */
+				flows[i] = mbufs[next_idx + i]->hash.usr | 1;
+			} else
+				flows[i] = 0;
+		}
+		for (; i < RTE_DIST_BURST_SIZE; i++)
+			flows[i] = 0;
+
+		switch (d->dist_match_fn) {
+		case RTE_DIST_MATCH_VECTOR:
+			find_match_vec(d, &flows[0], &matches[0]);
+			break;
+		default:
+			find_match_scalar(d, &flows[0], &matches[0]);
+		}
+
+		/*
+		 * Matches array now contain the intended worker ID (+1) of
+		 * the incoming packets. Any zeroes need to be assigned
+		 * workers.
+		 */
+
+		for (j = 0; j < pkts; j++) {
+
 			next_mb = mbufs[next_idx++];
-			next_value = (((int64_t)(uintptr_t)next_mb)
-					<< RTE_DISTRIB_FLAG_BITS);
+			next_value = (((int64_t)(uintptr_t)next_mb) <<
+					RTE_DISTRIB_FLAG_BITS);
 			/*
-			 * User is advocated to set tag vaue for each
+			 * User is advocated to set tag value for each
 			 * mbuf before calling rte_distributor_process.
 			 * User defined tags are used to identify flows,
 			 * or sessions.
 			 */
-			new_tag = next_mb->hash.usr;
+			/* flows MUST be non-zero */
+			new_tag = (uint16_t)(next_mb->hash.usr) | 1;
 
 			/*
-			 * Note that if RTE_DISTRIB_MAX_WORKERS is larger than 64
-			 * then the size of match has to be expanded.
+			 * Uncommenting the next line will cause the find_match
+			 * function to be optimized out, making this function
+			 * do parallel (non-atomic) distribution
 			 */
-			uint64_t match = 0;
-			unsigned i;
-			/*
-			 * to scan for a match use "xor" and "not" to get a 0/1
-			 * value, then use shifting to merge to single "match"
-			 * variable, where a one-bit indicates a match for the
-			 * worker given by the bit-position
-			 */
-			for (i = 0; i < d->num_workers; i++)
-				match |= (!(d->in_flight_tags[i] ^ new_tag)
-					<< i);
+			/* matches[j] = 0; */
 
-			/* Only turned-on bits are considered as match */
-			match &= d->in_flight_bitmask;
+			if (matches[j]) {
+				struct rte_distributor_backlog *bl =
+						&d->backlog[matches[j]-1];
+				if (unlikely(bl->count ==
+						RTE_DIST_BURST_SIZE)) {
+					release(d, matches[j]-1);
+				}
 
-			if (match) {
-				next_mb = NULL;
-				unsigned worker = __builtin_ctzl(match);
-				if (add_to_backlog(&d->backlog[worker],
-						next_value) < 0)
-					next_idx--;
+				/* Add to worker that already has flow */
+				unsigned int idx = bl->count++;
+
+				bl->tags[idx] = new_tag;
+				bl->pkts[idx] = next_value;
+
+			} else {
+				struct rte_distributor_backlog *bl =
+						&d->backlog[wkr];
+				if (unlikely(bl->count ==
+						RTE_DIST_BURST_SIZE)) {
+					release(d, wkr);
+				}
+
+				/* Add to current worker worker */
+				unsigned int idx = bl->count++;
+
+				bl->tags[idx] = new_tag;
+				bl->pkts[idx] = next_value;
+				/*
+				 * Now that we've just added an unpinned flow
+				 * to a worker, we need to ensure that all
+				 * other packets with that same flow will go
+				 * to the same worker in this burst.
+				 */
+				for (w = j; w < pkts; w++)
+					if (flows[w] == new_tag)
+						matches[w] = wkr+1;
 			}
 		}
-
-		if ((data & RTE_DISTRIB_GET_BUF) &&
-				(d->backlog[wkr].count || next_mb)) {
-
-			if (d->backlog[wkr].count)
-				d->bufs[wkr].bufptr64 =
-						backlog_pop(&d->backlog[wkr]);
-
-			else {
-				d->bufs[wkr].bufptr64 = next_value;
-				d->in_flight_tags[wkr] = new_tag;
-				d->in_flight_bitmask |= (1UL << wkr);
-				next_mb = NULL;
-			}
-			oldbuf = data >> RTE_DISTRIB_FLAG_BITS;
-		} else if (data & RTE_DISTRIB_RETURN_BUF) {
-			handle_worker_shutdown(d, wkr);
-			oldbuf = data >> RTE_DISTRIB_FLAG_BITS;
-		}
-
-		/* store returns in a circular buffer */
-		store_return(oldbuf, d, &ret_start, &ret_count);
-
-		if (++wkr == d->num_workers)
+		wkr++;
+		if (wkr >= d->num_workers)
 			wkr = 0;
 	}
-	/* to finish, check all workers for backlog and schedule work for them
-	 * if they are ready */
-	for (wkr = 0; wkr < d->num_workers; wkr++)
-		if (d->backlog[wkr].count &&
-				(d->bufs[wkr].bufptr64 & RTE_DISTRIB_GET_BUF)) {
 
-			int64_t oldbuf = d->bufs[wkr].bufptr64 >>
-					RTE_DISTRIB_FLAG_BITS;
-			store_return(oldbuf, d, &ret_start, &ret_count);
+	/* Flush out all non-full cache-lines to workers. */
+	for (wid = 0 ; wid < d->num_workers; wid++)
+		/* Sync with worker on GET_BUF flag. */
+		if ((__atomic_load_n(&(d->bufs[wid].bufptr64[0]),
+			__ATOMIC_ACQUIRE) & RTE_DISTRIB_GET_BUF))
+			release(d, wid);
 
-			d->bufs[wkr].bufptr64 = backlog_pop(&d->backlog[wkr]);
-		}
-
-	d->returns.start = ret_start;
-	d->returns.count = ret_count;
 	return num_mbufs;
 }
 
 /* return to the caller, packets returned from workers */
 int
 rte_distributor_returned_pkts(struct rte_distributor *d,
-		struct rte_mbuf **mbufs, unsigned max_mbufs)
+		struct rte_mbuf **mbufs, unsigned int max_mbufs)
 {
 	struct rte_distributor_returned_pkts *returns = &d->returns;
-	unsigned retval = (max_mbufs < returns->count) ?
+	unsigned int retval = (max_mbufs < returns->count) ?
 			max_mbufs : returns->count;
-	unsigned i;
+	unsigned int i;
+
+	if (d->alg_type == RTE_DIST_ALG_SINGLE) {
+		/* Call the old API */
+		return rte_distributor_returned_pkts_single(d->d_single,
+				mbufs, max_mbufs);
+	}
 
 	for (i = 0; i < retval; i++) {
-		unsigned idx = (returns->start + i) & RTE_DISTRIB_RETURNS_MASK;
+		unsigned int idx = (returns->start + i) &
+				RTE_DISTRIB_RETURNS_MASK;
+
 		mbufs[i] = returns->mbufs[idx];
 	}
 	returns->start += i;
@@ -405,14 +511,14 @@ rte_distributor_returned_pkts(struct rte_distributor *d,
 	return retval;
 }
 
-/* return the number of packets in-flight in a distributor, i.e. packets
- * being workered on or queued up in a backlog. */
-static inline unsigned
+/*
+ * Return the number of packets in-flight in a distributor, i.e. packets
+ * being worked on or queued up in a backlog.
+ */
+static inline unsigned int
 total_outstanding(const struct rte_distributor *d)
 {
-	unsigned wkr, total_outstanding;
-
-	total_outstanding = __builtin_popcountl(d->in_flight_bitmask);
+	unsigned int wkr, total_outstanding = 0;
 
 	for (wkr = 0; wkr < d->num_workers; wkr++)
 		total_outstanding += d->backlog[wkr].count;
@@ -420,15 +526,37 @@ total_outstanding(const struct rte_distributor *d)
 	return total_outstanding;
 }
 
-/* flush the distributor, so that there are no outstanding packets in flight or
- * queued up. */
+/*
+ * Flush the distributor, so that there are no outstanding packets in flight or
+ * queued up.
+ */
 int
 rte_distributor_flush(struct rte_distributor *d)
 {
-	const unsigned flushed = total_outstanding(d);
+	unsigned int flushed;
+	unsigned int wkr;
+
+	if (d->alg_type == RTE_DIST_ALG_SINGLE) {
+		/* Call the old API */
+		return rte_distributor_flush_single(d->d_single);
+	}
+
+	flushed = total_outstanding(d);
 
 	while (total_outstanding(d) > 0)
 		rte_distributor_process(d, NULL, 0);
+
+	/* wait 10ms to allow all worker drain the pkts */
+	rte_delay_us(10000);
+
+	/*
+	 * Send empty burst to all workers to allow them to exit
+	 * gracefully, should they need to.
+	 */
+	rte_distributor_process(d, NULL, 0);
+
+	for (wkr = 0; wkr < d->num_workers; wkr++)
+		handle_returns(d, wkr);
 
 	return flushed;
 }
@@ -437,32 +565,61 @@ rte_distributor_flush(struct rte_distributor *d)
 void
 rte_distributor_clear_returns(struct rte_distributor *d)
 {
-	d->returns.start = d->returns.count = 0;
-#ifndef __OPTIMIZE__
-	memset(d->returns.mbufs, 0, sizeof(d->returns.mbufs));
-#endif
+	unsigned int wkr;
+
+	if (d->alg_type == RTE_DIST_ALG_SINGLE) {
+		/* Call the old API */
+		rte_distributor_clear_returns_single(d->d_single);
+		return;
+	}
+
+	/* throw away returns, so workers can exit */
+	for (wkr = 0; wkr < d->num_workers; wkr++)
+		/* Sync with worker. Release retptrs. */
+		__atomic_store_n(&(d->bufs[wkr].retptr64[0]), 0,
+				__ATOMIC_RELEASE);
 }
 
 /* creates a distributor instance */
 struct rte_distributor *
 rte_distributor_create(const char *name,
-		unsigned socket_id,
-		unsigned num_workers)
+		unsigned int socket_id,
+		unsigned int num_workers,
+		unsigned int alg_type)
 {
 	struct rte_distributor *d;
-	struct rte_distributor_list *distributor_list;
+	struct rte_dist_burst_list *dist_burst_list;
 	char mz_name[RTE_MEMZONE_NAMESIZE];
 	const struct rte_memzone *mz;
+	unsigned int i;
+
+	/* TODO Reorganise function properly around RTE_DIST_ALG_SINGLE/BURST */
 
 	/* compilation-time checks */
 	RTE_BUILD_BUG_ON((sizeof(*d) & RTE_CACHE_LINE_MASK) != 0);
 	RTE_BUILD_BUG_ON((RTE_DISTRIB_MAX_WORKERS & 7) != 0);
-	RTE_BUILD_BUG_ON(RTE_DISTRIB_MAX_WORKERS >
-				sizeof(d->in_flight_bitmask) * CHAR_BIT);
 
-	if (name == NULL || num_workers >= RTE_DISTRIB_MAX_WORKERS) {
+	if (name == NULL || num_workers >=
+		(unsigned int)RTE_MIN(RTE_DISTRIB_MAX_WORKERS, RTE_MAX_LCORE)) {
 		rte_errno = EINVAL;
 		return NULL;
+	}
+
+	if (alg_type == RTE_DIST_ALG_SINGLE) {
+		d = malloc(sizeof(struct rte_distributor));
+		if (d == NULL) {
+			rte_errno = ENOMEM;
+			return NULL;
+		}
+		d->d_single = rte_distributor_create_single(name,
+				socket_id, num_workers);
+		if (d->d_single == NULL) {
+			free(d);
+			/* rte_errno will have been set */
+			return NULL;
+		}
+		d->alg_type = alg_type;
+		return d;
 	}
 
 	snprintf(mz_name, sizeof(mz_name), RTE_DISTRIB_PREFIX"%s", name);
@@ -473,15 +630,29 @@ rte_distributor_create(const char *name,
 	}
 
 	d = mz->addr;
-	snprintf(d->name, sizeof(d->name), "%s", name);
+	strlcpy(d->name, name, sizeof(d->name));
 	d->num_workers = num_workers;
+	d->alg_type = alg_type;
 
-	distributor_list = RTE_TAILQ_CAST(rte_distributor_tailq.head,
-					  rte_distributor_list);
+	d->dist_match_fn = RTE_DIST_MATCH_SCALAR;
+#if defined(RTE_ARCH_X86)
+	d->dist_match_fn = RTE_DIST_MATCH_VECTOR;
+#endif
 
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
-	TAILQ_INSERT_TAIL(distributor_list, d, next);
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	/*
+	 * Set up the backlog tags so they're pointing at the second cache
+	 * line for performance during flow matching
+	 */
+	for (i = 0 ; i < num_workers ; i++)
+		d->backlog[i].tags = &d->in_flight_tags[i][RTE_DIST_BURST_SIZE];
+
+	dist_burst_list = RTE_TAILQ_CAST(rte_dist_burst_tailq.head,
+					  rte_dist_burst_list);
+
+
+	rte_mcfg_tailq_write_lock();
+	TAILQ_INSERT_TAIL(dist_burst_list, d, next);
+	rte_mcfg_tailq_write_unlock();
 
 	return d;
 }

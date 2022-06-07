@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2015 Intel Corporation
  */
 
 #include <stdio.h>
@@ -54,26 +25,30 @@
  * e.g.: key size = 4, key = 0x03020100
  *       key size = 8, key = 0x0706050403020100
  */
-static uint32_t hash_values_jhash[2][10] = {{
+static uint32_t hash_values_jhash[2][12] = {{
+	0x8ba9414b, 0xdf0d39c9,
 	0xe4cf1d42, 0xd4ccb93c, 0x5e84eafc, 0x21362cfe,
 	0x2f4775ab, 0x9ff036cc, 0xeca51474, 0xbc9d6816,
 	0x12926a31, 0x1c9fa888
 },
 {
+	0x5c62c303, 0x1b8cf784,
 	0x8270ac65, 0x05fa6668, 0x762df861, 0xda088f2f,
 	0x59614cd4, 0x7a94f690, 0xdc1e4993, 0x30825494,
 	0x91d0e462, 0x768087fc
 }
 };
-static uint32_t hash_values_crc[2][10] = {{
+static uint32_t hash_values_crc[2][12] = {{
+	0x00000000, 0xf26b8303,
 	0x91545164, 0x06040eb1, 0x9bb99201, 0xcc4c4fe4,
-	0x14a90993, 0xf8a5dd8c, 0xc62beb31, 0x32bf340e,
-	0x72f9d22b, 0x4a11475e
+	0x14a90993, 0xf8a5dd8c, 0xcaa1ad0b, 0x7ac1e03e,
+	0x43f44466, 0x4a11475e
 },
 {
+	0xbdfd3980, 0x70204542,
 	0x98cd4c70, 0xd52c702f, 0x41fc0e1c, 0x3905f65c,
-	0x94bff47f, 0x1bab102d, 0xd2911ed7, 0xe8faa813,
-	0x6bea184b, 0x53028d3e
+	0x94bff47f, 0x1bab102d, 0xf4a2c645, 0xbf441539,
+	0x789c104f, 0x53028d3e
 }
 };
 
@@ -85,10 +60,11 @@ static uint32_t hash_values_crc[2][10] = {{
  * from the array entries is tested.
  */
 #define HASHTEST_ITERATIONS 1000000
-
+#define MAX_KEYSIZE 64
 static rte_hash_function hashtest_funcs[] = {rte_jhash, rte_hash_crc};
 static uint32_t hashtest_initvals[] = {0, 0xdeadbeef};
 static uint32_t hashtest_key_lens[] = {
+	1, 2,                 /* Unusual key sizes */
 	4, 8, 16, 32, 48, 64, /* standard key sizes */
 	9,                    /* IPv4 SRC + DST + protocol, unpadded */
 	13,                   /* IPv4 5-tuple, unpadded */
@@ -119,7 +95,7 @@ static void
 run_hash_func_perf_test(uint32_t key_len, uint32_t init_val,
 		rte_hash_function f)
 {
-	static uint8_t key[HASHTEST_ITERATIONS][RTE_HASH_KEY_LENGTH_MAX];
+	static uint8_t key[HASHTEST_ITERATIONS][MAX_KEYSIZE];
 	uint64_t ticks, start, end;
 	unsigned i, j;
 
@@ -176,10 +152,10 @@ verify_precalculated_hash_func_tests(void)
 	for (i = 0; i < 64; i++)
 		key[i] = (uint8_t) i;
 
-	for (i = 0; i < sizeof(hashtest_key_lens) / sizeof(uint32_t); i++) {
-		for (j = 0; j < sizeof(hashtest_initvals) / sizeof(uint32_t); j++) {
+	for (i = 0; i < RTE_DIM(hashtest_key_lens); i++) {
+		for (j = 0; j < RTE_DIM(hashtest_initvals); j++) {
 			hash = rte_jhash(key, hashtest_key_lens[i],
-					hashtest_initvals[j]);
+					 hashtest_initvals[j]);
 			if (hash != hash_values_jhash[j][i]) {
 				printf("jhash for %u bytes with initial value 0x%x."
 				       "Expected 0x%x, but got 0x%x\n",
@@ -216,8 +192,8 @@ verify_jhash_32bits(void)
 	for (i = 0; i < 64; i++)
 		key[i] = rand() & 0xff;
 
-	for (i = 0; i < sizeof(hashtest_key_lens) / sizeof(uint32_t); i++) {
-		for (j = 0; j < sizeof(hashtest_initvals) / sizeof(uint32_t); j++) {
+	for (i = 0; i < RTE_DIM(hashtest_key_lens); i++) {
+		for (j = 0; j < RTE_DIM(hashtest_initvals); j++) {
 			/* Key size must be multiple of 4 (32 bits) */
 			if ((hashtest_key_lens[i] & 0x3) == 0) {
 				hash = rte_jhash(key, hashtest_key_lens[i],
@@ -314,8 +290,4 @@ test_hash_functions(void)
 	return 0;
 }
 
-static struct test_command hash_functions_cmd = {
-	.command = "hash_functions_autotest",
-	.callback = test_hash_functions,
-};
-REGISTER_TEST_COMMAND(hash_functions_cmd);
+REGISTER_TEST_COMMAND(hash_functions_autotest, test_hash_functions);

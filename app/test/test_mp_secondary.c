@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -41,11 +12,7 @@
 #include <inttypes.h>
 #include <sys/queue.h>
 #include <errno.h>
-#include <stdarg.h>
-#include <inttypes.h>
 #include <string.h>
-#include <stdlib.h>
-#include <stdarg.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <libgen.h>
@@ -80,34 +47,7 @@
 
 #include "process.h"
 
-#define launch_proc(ARGV) process_dup(ARGV, \
-		sizeof(ARGV)/(sizeof(ARGV[0])), __func__)
-
-#ifdef RTE_EXEC_ENV_LINUXAPP
-static char*
-get_current_prefix(char * prefix, int size)
-{
-	char path[PATH_MAX] = {0};
-	char buf[PATH_MAX] = {0};
-
-	/* get file for config (fd is always 3) */
-	snprintf(path, sizeof(path), "/proc/self/fd/%d", 3);
-
-	/* return NULL on error */
-	if (readlink(path, buf, sizeof(buf)) == -1)
-		return NULL;
-
-	/* get the basename */
-	snprintf(buf, sizeof(buf), "%s", basename(buf));
-
-	/* copy string all the way from second char up to start of _config */
-	snprintf(prefix, size, "%.*s",
-			(int)(strnlen(buf, sizeof(buf)) - sizeof("_config")),
-			&buf[1]);
-
-	return prefix;
-}
-#endif
+#define launch_proc(ARGV) process_dup(ARGV, RTE_DIM(ARGV), __func__)
 
 /*
  * This function is called in the primary i.e. main test, to spawn off secondary
@@ -119,7 +59,7 @@ run_secondary_instances(void)
 	int ret = 0;
 	char coremask[10];
 
-#ifdef RTE_EXEC_ENV_LINUXAPP
+#ifdef RTE_EXEC_ENV_LINUX
 	char tmp[PATH_MAX] = {0};
 	char prefix[PATH_MAX] = {0};
 
@@ -145,7 +85,7 @@ run_secondary_instances(void)
 			prgname, "-c", coremask, "--proc-type=ERROR",
 			prefix
 	};
-#ifdef RTE_EXEC_ENV_LINUXAPP
+#ifdef RTE_EXEC_ENV_LINUX
 	/* bad case, using invalid file prefix */
 	const char *argv4[]  = {
 			prgname, "-c", coremask, "--proc-type=secondary",
@@ -157,10 +97,17 @@ run_secondary_instances(void)
 			(1 << rte_get_master_lcore()));
 
 	ret |= launch_proc(argv1);
+	printf("### Testing rte_mp_disable() reject:\n");
+	if (rte_mp_disable()) {
+		printf("Error: rte_mp_disable() has been accepted\n");
+		ret |= -1;
+	} else {
+		printf("# Checked rte_mp_disable() is refused\n");
+	}
 	ret |= launch_proc(argv2);
 
 	ret |= !(launch_proc(argv3));
-#ifdef RTE_EXEC_ENV_LINUXAPP
+#ifdef RTE_EXEC_ENV_LINUX
 	ret |= !(launch_proc(argv4));
 #endif
 
@@ -232,21 +179,18 @@ run_object_creation_tests(void)
 
 #ifdef RTE_LIBRTE_LPM
 	rte_errno=0;
-	if ((rte_lpm_create("test_lpm", size, rte_socket_id(), 0) != NULL) &&
+	struct rte_lpm_config config;
+
+	config.max_rules = rte_socket_id();
+	config.number_tbl8s = 256;
+	config.flags = 0;
+	if ((rte_lpm_create("test_lpm", size, &config) != NULL) &&
 	    (rte_lpm_find_existing("test_lpm") == NULL)){
 		printf("Error: unexpected return value from rte_lpm_create()\n");
 		return -1;
 	}
 	printf("# Checked rte_lpm_create() OK\n");
 #endif
-
-	/* Run a test_pci call */
-	if (test_pci() != 0) {
-		printf("PCI scan failed in secondary\n");
-		if (getuid() == 0) /* pci scans can fail as non-root */
-			return -1;
-	} else
-		printf("PCI scan succeeded in secondary\n");
 
 	return 0;
 }
@@ -260,11 +204,6 @@ int
 test_mp_secondary(void)
 {
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
-		if (!test_pci_run) {
-			printf("=== Running pre-requisite test of test_pci\n");
-			test_pci();
-			printf("=== Requisite test done\n");
-		}
 		return run_secondary_instances();
 	}
 
@@ -273,8 +212,4 @@ test_mp_secondary(void)
 	return run_object_creation_tests();
 }
 
-static struct test_command multiprocess_cmd = {
-	.command = "multiprocess_autotest",
-	.callback = test_mp_secondary,
-};
-REGISTER_TEST_COMMAND(multiprocess_cmd);
+REGISTER_TEST_COMMAND(multiprocess_autotest, test_mp_secondary);

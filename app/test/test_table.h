@@ -1,40 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <rte_table_stub.h>
 #include <rte_table_lpm.h>
 #include <rte_table_lpm_ipv6.h>
 #include <rte_table_hash.h>
+#include <rte_table_hash_cuckoo.h>
 #include <rte_table_array.h>
 #include <rte_pipeline.h>
 
@@ -78,6 +50,8 @@
 #define MP_FLAGS            0
 
 /* Macros */
+#define APP_METADATA_OFFSET(offset) (sizeof(struct rte_mbuf) + (offset))
+
 #define RING_ENQUEUE(ring, value) do {					\
 	struct rte_mbuf *m;						\
 	uint32_t *k32, *signature;					\
@@ -86,11 +60,13 @@
 	m = rte_pktmbuf_alloc(pool);					\
 	if (m == NULL)							\
 		return -1;						\
-	signature = RTE_MBUF_METADATA_UINT32_PTR(m, 0);			\
-	key = RTE_MBUF_METADATA_UINT8_PTR(m, 32);			\
+	signature = RTE_MBUF_METADATA_UINT32_PTR(m,			\
+			APP_METADATA_OFFSET(0));		\
+	key = RTE_MBUF_METADATA_UINT8_PTR(m,			\
+			APP_METADATA_OFFSET(32));		\
 	k32 = (uint32_t *) key;						\
 	k32[0] = (value);						\
-	*signature = pipeline_test_hash(key, 0, 0);			\
+	*signature = pipeline_test_hash(key, NULL, 0, 0);		\
 	rte_ring_enqueue((ring), m);					\
 } while (0)
 
@@ -127,8 +103,14 @@
 /* Function definitions */
 uint64_t pipeline_test_hash(
 	void *key,
-	__attribute__((unused)) uint32_t key_size,
-	__attribute__((unused)) uint64_t seed);
+	__rte_unused void *key_mask,
+	__rte_unused uint32_t key_size,
+	__rte_unused uint64_t seed);
+
+uint32_t pipeline_test_hash_cuckoo(
+	const void *key,
+	__rte_unused uint32_t key_size,
+	__rte_unused uint32_t seed);
 
 /* Extern variables */
 extern struct rte_pipeline *p;

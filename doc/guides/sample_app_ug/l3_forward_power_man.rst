@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 L3 Forwarding with Power Management Sample Application
 ======================================================
@@ -43,8 +16,7 @@ Overview
 --------
 
 The application demonstrates the use of the Power libraries in the DPDK to implement packet forwarding.
-The initialization and run-time paths are very similar to those of the L3 forwarding sample application
-(see Chapter 10 "L3 Forwarding Sample Application" for more information).
+The initialization and run-time paths are very similar to those of the :doc:`l3_forward`.
 The main difference from the L3 Forwarding sample application is that this application introduces power-aware optimization algorithms
 by leveraging the Power library to control P-state and C-state of processor based on packet load.
 
@@ -105,27 +77,9 @@ instead of always running to the C0 state waiting for packets.
 Compiling the Application
 -------------------------
 
-To compile the application:
+To compile the sample application see :doc:`compiling`.
 
-#.  Go to the sample application directory:
-
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk cd ${RTE_SDK}/examples/l3fwd-power
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-    See the *DPDK Getting Started Guide* for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
+The application is located in the ``l3fwd-power`` sub-directory.
 
 Running the Application
 -----------------------
@@ -151,7 +105,11 @@ where,
 
 *   --no-numa: optional, disables numa awareness
 
-See Chapter 10 "L3 Forwarding Sample Application" for details.
+*   --empty-poll: Traffic Aware power management. See below for details
+
+*   --telemetry:  Telemetry mode.
+
+See :doc:`l3_forward` for details.
 The L3fwd-power example reuses the L3fwd command line options.
 
 Explanation
@@ -181,11 +139,11 @@ responsible for checking if it needs to scale down frequency at run time by chec
         struct lcore_conf *qconf;
         int ret;
         unsigned nb_ports;
-        uint16_t queueid;
+        uint16_t queueid, portid;
         unsigned lcore_id;
         uint64_t hz;
         uint32_t n_tx_queue, nb_lcores;
-        uint8_t portid, nb_rx_queue, queue, socketid;
+        uint8_t nb_rx_queue, queue, socketid;
 
         // ...
 
@@ -248,7 +206,7 @@ to generate hints based on recent network load trends.
 .. code-block:: c
 
     static
-    attribute ((noreturn)) int main_loop( attribute ((unused)) void *dummy)
+    __rte_noreturn int main_loop(__rte_unused void *dummy)
     {
         // ...
 
@@ -408,3 +366,96 @@ The algorithm has the following sleeping behavior depending on the idle counter:
 If a thread polls multiple Rx queues and different queue returns different sleep duration values,
 the algorithm controls the sleep time in a conservative manner by sleeping for the least possible time
 in order to avoid a potential performance impact.
+
+Empty Poll Mode
+-------------------------
+Additionally, there is a traffic aware mode of operation called "Empty
+Poll" where the number of empty polls can be monitored to keep track
+of how busy the application is. Empty poll mode can be enabled by the
+command line option --empty-poll.
+
+See :doc:`Power Management<../prog_guide/power_man>` chapter in the DPDK Programmer's Guide for empty poll mode details.
+
+.. code-block:: console
+
+    ./l3fwd-power -l xxx   -n 4   -w 0000:xx:00.0 -w 0000:xx:00.1 -- -p 0x3 -P --config="(0,0,xx),(1,0,xx)" --empty-poll="0,0,0" -l 14 -m 9 -h 1
+
+Where,
+
+--empty-poll: Enable the empty poll mode instead of original algorithm
+
+--empty-poll="training_flag, med_threshold, high_threshold"
+
+* ``training_flag`` : optional, enable/disable training mode. Default value is 0. If the training_flag is set as 1(true), then the application will start in training mode and print out the trained threshold values. If the training_flag is set as 0(false), the application will start in normal mode, and will use either the default thresholds or those supplied on the command line. The trained threshold values are specific to the user’s system, may give a better power profile when compared to the default threshold values.
+
+* ``med_threshold`` : optional, sets the empty poll threshold of a modestly busy system state. If this is not supplied, the application will apply the default value of 350000.
+
+* ``high_threshold`` : optional, sets the empty poll threshold of a busy system state. If this is not supplied, the application will apply the default value of 580000.
+
+* -l : optional, set up the LOW power state frequency index
+
+* -m : optional, set up the MED power state frequency index
+
+* -h : optional, set up the HIGH power state frequency index
+
+Empty Poll Mode Example Usage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To initially obtain the ideal thresholds for the system, the training
+mode should be run first. This is achieved by running the l3fwd-power
+app with the training flag set to “1”, and the other parameters set to
+0.
+
+.. code-block:: console
+
+        ./examples/l3fwd-power/build/l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --empty-poll "1,0,0" –P
+
+This will run the training algorithm for x seconds on each core (cores 2
+and 3), and then print out the recommended threshold values for those
+cores. The thresholds should be very similar for each core.
+
+.. code-block:: console
+
+        POWER: Bring up the Timer
+        POWER: set the power freq to MED
+        POWER: Low threshold is 230277
+        POWER: MED threshold is 335071
+        POWER: HIGH threshold is 523769
+        POWER: Training is Complete for 2
+        POWER: set the power freq to MED
+        POWER: Low threshold is 236814
+        POWER: MED threshold is 344567
+        POWER: HIGH threshold is 538580
+        POWER: Training is Complete for 3
+
+Once the values have been measured for a particular system, the app can
+then be started without the training mode so traffic can start immediately.
+
+.. code-block:: console
+
+        ./examples/l3fwd-power/build/l3fwd-power -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --empty-poll "0,340000,540000" –P
+
+Telemetry Mode
+--------------
+
+The telemetry mode support for ``l3fwd-power`` is a standalone mode, in this mode
+``l3fwd-power`` does simple l3fwding along with calculating empty polls, full polls,
+and busy percentage for each forwarding core. The aggregation of these
+values of all cores is reported as application level telemetry to metric
+library for every 500ms from the master core.
+
+The busy percentage is calculated by recording the poll_count
+and when the count reaches a defined value the total
+cycles it took is measured and compared with minimum and maximum
+reference cycles and accordingly busy rate is set  to either 0% or
+50% or 100%.
+
+   .. Note::
+
+      * The CONFIG_RTE_LIBRTE_TELEMETRY should be set in order to get the stats in DPDK telemetry.
+
+.. code-block:: console
+
+        ./examples/l3fwd-power/build/l3fwd-power --telemetry -l 1-3 -- -p 0x0f --config="(0,0,2),(0,1,3)" --telemetry
+
+The new stats ``empty_poll`` , ``full_poll`` and ``busy_percent`` can be viewed by running the script
+``/usertools/dpdk-telemetry-client.py`` and selecting the menu option ``Send for global Metrics``.

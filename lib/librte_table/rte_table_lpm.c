@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <string.h>
@@ -44,7 +15,9 @@
 
 #include "rte_table_lpm.h"
 
-#define RTE_TABLE_LPM_MAX_NEXT_HOPS                        256
+#ifndef RTE_TABLE_LPM_MAX_NEXT_HOPS
+#define RTE_TABLE_LPM_MAX_NEXT_HOPS                        65536
+#endif
 
 #ifdef RTE_TABLE_STATS_COLLECT
 
@@ -80,8 +53,10 @@ struct rte_table_lpm {
 static void *
 rte_table_lpm_create(void *params, int socket_id, uint32_t entry_size)
 {
-	struct rte_table_lpm_params *p = (struct rte_table_lpm_params *) params;
+	struct rte_table_lpm_params *p = params;
 	struct rte_table_lpm *lpm;
+	struct rte_lpm_config lpm_config;
+
 	uint32_t total_size, nht_size;
 
 	/* Check input parameters */
@@ -91,6 +66,10 @@ rte_table_lpm_create(void *params, int socket_id, uint32_t entry_size)
 	}
 	if (p->n_rules == 0) {
 		RTE_LOG(ERR, TABLE, "%s: Invalid n_rules\n", __func__);
+		return NULL;
+	}
+	if (p->number_tbl8s == 0) {
+		RTE_LOG(ERR, TABLE, "%s: Invalid number_tbl8s\n", __func__);
 		return NULL;
 	}
 	if (p->entry_unique_size == 0) {
@@ -103,7 +82,11 @@ rte_table_lpm_create(void *params, int socket_id, uint32_t entry_size)
 			__func__);
 		return NULL;
 	}
-
+	if (p->name == NULL) {
+		RTE_LOG(ERR, TABLE, "%s: Table name is NULL\n",
+			__func__);
+		return NULL;
+	}
 	entry_size = RTE_ALIGN(entry_size, sizeof(uint64_t));
 
 	/* Memory allocation */
@@ -119,7 +102,11 @@ rte_table_lpm_create(void *params, int socket_id, uint32_t entry_size)
 	}
 
 	/* LPM low-level table creation */
-	lpm->lpm = rte_lpm_create("LPM", socket_id, p->n_rules, 0);
+	lpm_config.max_rules = p->n_rules;
+	lpm_config.number_tbl8s = p->number_tbl8s;
+	lpm_config.flags = p->flags;
+	lpm->lpm = rte_lpm_create(p->name, socket_id, &lpm_config);
+
 	if (lpm->lpm == NULL) {
 		rte_free(lpm);
 		RTE_LOG(ERR, TABLE, "Unable to create low-level LPM table\n");
@@ -138,7 +125,7 @@ rte_table_lpm_create(void *params, int socket_id, uint32_t entry_size)
 static int
 rte_table_lpm_free(void *table)
 {
-	struct rte_table_lpm *lpm = (struct rte_table_lpm *) table;
+	struct rte_table_lpm *lpm = table;
 
 	/* Check input parameters */
 	if (lpm == NULL) {
@@ -194,11 +181,11 @@ rte_table_lpm_entry_add(
 	int *key_found,
 	void **entry_ptr)
 {
-	struct rte_table_lpm *lpm = (struct rte_table_lpm *) table;
-	struct rte_table_lpm_key *ip_prefix = (struct rte_table_lpm_key *) key;
+	struct rte_table_lpm *lpm = table;
+	struct rte_table_lpm_key *ip_prefix = key;
 	uint32_t nht_pos, nht_pos0_valid;
 	int status;
-	uint8_t nht_pos0 = 0;
+	uint32_t nht_pos0 = 0;
 
 	/* Check input parameters */
 	if (lpm == NULL) {
@@ -240,8 +227,7 @@ rte_table_lpm_entry_add(
 	}
 
 	/* Add rule to low level LPM table */
-	if (rte_lpm_add(lpm->lpm, ip_prefix->ip, ip_prefix->depth,
-		(uint8_t) nht_pos) < 0) {
+	if (rte_lpm_add(lpm->lpm, ip_prefix->ip, ip_prefix->depth, nht_pos) < 0) {
 		RTE_LOG(ERR, TABLE, "%s: LPM rule add failed\n", __func__);
 		return -1;
 	}
@@ -262,9 +248,9 @@ rte_table_lpm_entry_delete(
 	int *key_found,
 	void *entry)
 {
-	struct rte_table_lpm *lpm = (struct rte_table_lpm *) table;
-	struct rte_table_lpm_key *ip_prefix = (struct rte_table_lpm_key *) key;
-	uint8_t nht_pos;
+	struct rte_table_lpm *lpm = table;
+	struct rte_table_lpm_key *ip_prefix = key;
+	uint32_t nht_pos;
 	int status;
 
 	/* Check input parameters */
@@ -338,7 +324,7 @@ rte_table_lpm_lookup(
 			uint32_t ip = rte_bswap32(
 				RTE_MBUF_METADATA_UINT32(pkt, lpm->offset));
 			int status;
-			uint8_t nht_pos;
+			uint32_t nht_pos;
 
 			status = rte_lpm_lookup(lpm->lpm, ip, &nht_pos);
 			if (status == 0) {
@@ -357,7 +343,7 @@ rte_table_lpm_lookup(
 static int
 rte_table_lpm_stats_read(void *table, struct rte_table_stats *stats, int clear)
 {
-	struct rte_table_lpm *t = (struct rte_table_lpm *) table;
+	struct rte_table_lpm *t = table;
 
 	if (stats != NULL)
 		memcpy(stats, &t->stats, sizeof(t->stats));
@@ -373,6 +359,8 @@ struct rte_table_ops rte_table_lpm_ops = {
 	.f_free = rte_table_lpm_free,
 	.f_add = rte_table_lpm_entry_add,
 	.f_delete = rte_table_lpm_entry_delete,
+	.f_add_bulk = NULL,
+	.f_delete_bulk = NULL,
 	.f_lookup = rte_table_lpm_lookup,
 	.f_stats = rte_table_lpm_stats_read,
 };

@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -36,10 +7,102 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "test.h"
 
+#ifndef RTE_LIBRTE_POWER
+
+static int
+test_power(void)
+{
+	printf("Power management library not supported, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
+
 #include <rte_power.h>
+
+static int
+check_function_ptrs(void)
+{
+	enum power_management_env env = rte_power_get_env();
+
+	const bool not_null_expected = !(env == PM_ENV_NOT_SET);
+
+	const char *inject_not_string1 = not_null_expected ? " not" : "";
+	const char *inject_not_string2 = not_null_expected ? "" : " not";
+
+	if ((rte_power_freqs == NULL) == not_null_expected) {
+		printf("rte_power_freqs should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+					inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_get_freq == NULL) == not_null_expected) {
+		printf("rte_power_get_freq should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+					inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_set_freq == NULL) == not_null_expected) {
+		printf("rte_power_set_freq should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_up == NULL) == not_null_expected) {
+		printf("rte_power_freq_up should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_down == NULL) == not_null_expected) {
+		printf("rte_power_freq_down should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_max == NULL) == not_null_expected) {
+		printf("rte_power_freq_max should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_min == NULL) == not_null_expected) {
+		printf("rte_power_freq_min should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_turbo_status == NULL) == not_null_expected) {
+		printf("rte_power_turbo_status should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_enable_turbo == NULL) == not_null_expected) {
+		printf("rte_power_freq_enable_turbo should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_freq_disable_turbo == NULL) == not_null_expected) {
+		printf("rte_power_freq_disable_turbo should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+	if ((rte_power_get_capabilities == NULL) == not_null_expected) {
+		printf("rte_power_get_capabilities should%s be NULL, environment has%s been "
+				"initialised\n", inject_not_string1,
+				inject_not_string2);
+		return -1;
+	}
+
+	return 0;
+}
 
 static int
 test_power(void)
@@ -61,51 +124,51 @@ test_power(void)
 		return -1;
 	}
 
-	/* verify that function pointers are NULL */
-	if (rte_power_freqs != NULL) {
-		printf("rte_power_freqs should be NULL, environment has not been "
-				"initialised\n");
+	/* Verify that function pointers are NULL */
+	if (check_function_ptrs() < 0)
 		goto fail_all;
-	}
-	if (rte_power_get_freq != NULL) {
-		printf("rte_power_get_freq should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
-	if (rte_power_set_freq != NULL) {
-		printf("rte_power_set_freq should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
-	if (rte_power_freq_up != NULL) {
-		printf("rte_power_freq_up should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
-	if (rte_power_freq_down != NULL) {
-		printf("rte_power_freq_down should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
-	if (rte_power_freq_max != NULL) {
-		printf("rte_power_freq_max should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
-	if (rte_power_freq_min != NULL) {
-		printf("rte_power_freq_min should be NULL, environment has not been "
-				"initialised\n");
-		goto fail_all;
-	}
+
 	rte_power_unset_env();
+
+	/* Perform tests for valid environments.*/
+	const enum power_management_env envs[] = {PM_ENV_ACPI_CPUFREQ,
+			PM_ENV_KVM_VM,
+			PM_ENV_PSTATE_CPUFREQ};
+
+	unsigned int i;
+	for (i = 0; i < RTE_DIM(envs); ++i) {
+
+		/* Test setting a valid environment */
+		ret = rte_power_set_env(envs[i]);
+		if (ret != 0) {
+			printf("Unexpectedly unsucceeded on setting a valid environment\n");
+			return -1;
+		}
+
+		/* Test that the environment has been set */
+		env = rte_power_get_env();
+		if (env != envs[i]) {
+			printf("Not expected environment configuration\n");
+			return -1;
+		}
+
+		/* Verify that function pointers are NOT NULL */
+		if (check_function_ptrs() < 0)
+			goto fail_all;
+
+		rte_power_unset_env();
+
+		/* Verify that function pointers are NULL */
+		if (check_function_ptrs() < 0)
+			goto fail_all;
+
+	}
+
 	return 0;
 fail_all:
 	rte_power_unset_env();
 	return -1;
 }
+#endif
 
-static struct test_command power_cmd = {
-	.command = "power_autotest",
-	.callback = test_power,
-};
-REGISTER_TEST_COMMAND(power_cmd);
+REGISTER_TEST_COMMAND(power_autotest, test_power);

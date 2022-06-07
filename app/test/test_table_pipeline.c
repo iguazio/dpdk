@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <string.h>
@@ -91,52 +62,58 @@ rte_pipeline_port_out_action_handler port_action_stub(struct rte_mbuf **pkts,
 #endif
 
 rte_pipeline_table_action_handler_hit
-table_action_0x00(struct rte_mbuf **pkts, uint64_t *pkts_mask,
-	struct rte_pipeline_table_entry **actions, uint32_t action_mask);
+table_action_0x00(struct rte_pipeline *p, struct rte_mbuf **pkts,
+	uint64_t pkts_mask, struct rte_pipeline_table_entry **entry, void *arg);
 
 rte_pipeline_table_action_handler_hit
-table_action_stub_hit(struct rte_mbuf **pkts, uint64_t *pkts_mask,
-	struct rte_pipeline_table_entry **actions, uint32_t action_mask);
+table_action_stub_hit(struct rte_pipeline *p, struct rte_mbuf **pkts,
+	uint64_t pkts_mask, struct rte_pipeline_table_entry **entry, void *arg);
 
-rte_pipeline_table_action_handler_miss
-table_action_stub_miss(struct rte_mbuf **pkts, uint64_t *pkts_mask,
-	struct rte_pipeline_table_entry *action, uint32_t action_mask);
+static int
+table_action_stub_miss(struct rte_pipeline *p, struct rte_mbuf **pkts,
+	uint64_t pkts_mask, struct rte_pipeline_table_entry *entry, void *arg);
 
 rte_pipeline_table_action_handler_hit
-table_action_0x00(__attribute__((unused)) struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
-	__attribute__((unused)) struct rte_pipeline_table_entry **actions,
-	__attribute__((unused)) uint32_t action_mask)
+table_action_0x00(__rte_unused struct rte_pipeline *p,
+	__rte_unused struct rte_mbuf **pkts,
+	uint64_t pkts_mask,
+	__rte_unused struct rte_pipeline_table_entry **entry,
+	__rte_unused void *arg)
 {
 	printf("Table Action, setting pkts_mask to 0x00\n");
-	*pkts_mask = 0x00;
+	pkts_mask = ~0x00;
+	rte_pipeline_ah_packet_drop(p, pkts_mask);
 	return 0;
 }
 
 rte_pipeline_table_action_handler_hit
-table_action_stub_hit(__attribute__((unused)) struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
-	__attribute__((unused)) struct rte_pipeline_table_entry **actions,
-	__attribute__((unused)) uint32_t action_mask)
+table_action_stub_hit(__rte_unused struct rte_pipeline *p,
+	__rte_unused struct rte_mbuf **pkts,
+	uint64_t pkts_mask,
+	__rte_unused struct rte_pipeline_table_entry **entry,
+	__rte_unused void *arg)
 {
 	printf("STUB Table Action Hit - doing nothing\n");
 	printf("STUB Table Action Hit - setting mask to 0x%"PRIx64"\n",
 		override_hit_mask);
-	*pkts_mask = override_hit_mask;
-	return 0;
-}
-rte_pipeline_table_action_handler_miss
-table_action_stub_miss(__attribute__((unused)) struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
-	__attribute__((unused)) struct rte_pipeline_table_entry *action,
-	__attribute__((unused)) uint32_t action_mask)
-{
-	printf("STUB Table Action Miss - setting mask to 0x%"PRIx64"\n",
-		override_miss_mask);
-	*pkts_mask = override_miss_mask;
+	pkts_mask = (~override_hit_mask) & 0x3;
+	rte_pipeline_ah_packet_drop(p, pkts_mask);
 	return 0;
 }
 
+static int
+table_action_stub_miss(struct rte_pipeline *p,
+	__rte_unused struct rte_mbuf **pkts,
+	uint64_t pkts_mask,
+	__rte_unused struct rte_pipeline_table_entry *entry,
+	__rte_unused void *arg)
+{
+	printf("STUB Table Action Miss - setting mask to 0x%"PRIx64"\n",
+		override_miss_mask);
+	pkts_mask = (~override_miss_mask) & 0x3;
+	rte_pipeline_ah_packet_drop(p, pkts_mask);
+	return 0;
+}
 
 enum e_test_type {
 	e_TEST_STUB = 0,
@@ -213,11 +190,13 @@ check_pipeline_invalid_params(void)
 		goto fail;
 	}
 
-	p = rte_pipeline_create(&pipeline_params_3);
-	if (p != NULL) {
-		RTE_LOG(INFO, PIPELINE, "%s: Configure pipeline with invalid "
-			"socket\n", __func__);
-		goto fail;
+	if (rte_eal_has_hugepages()) {
+		p = rte_pipeline_create(&pipeline_params_3);
+		if (p != NULL) {
+			RTE_LOG(INFO, PIPELINE, "%s: Configure pipeline with "
+				"invalid socket\n", __func__);
+			goto fail;
+		}
 	}
 
 	/* Check pipeline consistency */
@@ -433,7 +412,8 @@ test_pipeline_single_filter(int test_type, int expected_count)
 	RTE_LOG(INFO, PIPELINE, "%s: **** Running %s test\n",
 		__func__, pipeline_test_names[test_type]);
 	/* Run pipeline once */
-	rte_pipeline_run(p);
+	for (i = 0; i < N_PORTS; i++)
+		rte_pipeline_run(p);
 
 
 	ret = rte_pipeline_flush(NULL);
@@ -457,7 +437,8 @@ test_pipeline_single_filter(int test_type, int expected_count)
 				rte_panic("Failed to alloc mbuf from pool\n");
 				return -1;
 			}
-			key = RTE_MBUF_METADATA_UINT8_PTR(m, 32);
+			key = RTE_MBUF_METADATA_UINT8_PTR(m,
+					APP_METADATA_OFFSET(32));
 
 			k32 = (uint32_t *) key;
 			k32[0] = 0xadadadad >> (j % 2);
@@ -468,7 +449,8 @@ test_pipeline_single_filter(int test_type, int expected_count)
 		}
 
 	/* Run pipeline once */
-	rte_pipeline_run(p);
+	for (i = 0; i < N_PORTS; i++)
+		rte_pipeline_run(p);
 
    /*
 	* need to flush the pipeline, as there may be less hits than the burst
@@ -485,14 +467,14 @@ test_pipeline_single_filter(int test_type, int expected_count)
 		void *objs[RING_TX_SIZE];
 		struct rte_mbuf *mbuf;
 
-		ret = rte_ring_sc_dequeue_burst(rings_tx[i], objs, 10);
+		ret = rte_ring_sc_dequeue_burst(rings_tx[i], objs, 10, NULL);
 		if (ret <= 0)
 			printf("Got no objects from ring %d - error code %d\n",
 				i, ret);
 		else {
 			printf("Got %d object(s) from ring %d!\n", ret, i);
 			for (j = 0; j < ret; j++) {
-				mbuf = (struct rte_mbuf *)objs[j];
+				mbuf = objs[j];
 				rte_hexdump(stdout, "Object:",
 					rte_pktmbuf_mtod(mbuf, char *),
 					mbuf->data_len);
@@ -537,8 +519,7 @@ test_table_pipeline(void)
 
 	/* TEST - one packet per port */
 	action_handler_hit = NULL;
-	action_handler_miss =
-		(rte_pipeline_table_action_handler_miss) table_action_stub_miss;
+	action_handler_miss = table_action_stub_miss;
 	table_entry_default_action = RTE_PIPELINE_ACTION_PORT;
 	override_miss_mask = 0x01; /* one packet per port */
 	setup_pipeline(e_TEST_STUB);
@@ -573,8 +554,7 @@ test_table_pipeline(void)
 
 	printf("TEST - two tables, hitmask override to 0x01\n");
 	connect_miss_action_to_table = 1;
-	action_handler_miss =
-		(rte_pipeline_table_action_handler_miss)table_action_stub_miss;
+	action_handler_miss = table_action_stub_miss;
 	override_miss_mask = 0x01;
 	setup_pipeline(e_TEST_STUB);
 	if (test_pipeline_single_filter(e_TEST_STUB, 2) < 0)

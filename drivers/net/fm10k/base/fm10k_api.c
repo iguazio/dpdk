@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013 - 2015 Intel Corporation
+ */
 
 #include "fm10k_api.h"
 #include "fm10k_common.h"
@@ -55,6 +26,12 @@ s32 fm10k_set_mac_type(struct fm10k_hw *hw)
 
 	switch (hw->device_id) {
 	case FM10K_DEV_ID_PF:
+#ifdef BOULDER_RAPIDS_HW
+	case FM10K_DEV_ID_SDI_FM10420_QDA2:
+#endif /* BOULDER_RAPIDS_HW */
+#ifdef ATWOOD_CHANNEL_HW
+	case FM10K_DEV_ID_SDI_FM10420_DA2:
+#endif /* ATWOOD_CHANNEL_HW */
 		hw->mac.type = fm10k_mac_pf;
 		break;
 	case FM10K_DEV_ID_VF:
@@ -175,6 +152,7 @@ s32 fm10k_get_bus_info(struct fm10k_hw *hw)
 			       FM10K_NOT_IMPLEMENTED);
 }
 
+#ifndef NO_IS_SLOT_APPROPRIATE_CHECK
 /**
  *  fm10k_is_slot_appropriate - Indicate appropriate slot for this SKU
  *  @hw: pointer to hardware structure
@@ -189,6 +167,7 @@ bool fm10k_is_slot_appropriate(struct fm10k_hw *hw)
 	return true;
 }
 
+#endif
 /**
  *  fm10k_update_vlan - Clear VLAN ID to VLAN filter table
  *  @hw: pointer to hardware structure
@@ -226,8 +205,14 @@ s32 fm10k_read_mac_addr(struct fm10k_hw *hw)
  * */
 void fm10k_update_hw_stats(struct fm10k_hw *hw, struct fm10k_hw_stats *stats)
 {
-	if (hw->mac.ops.update_hw_stats)
-		hw->mac.ops.update_hw_stats(hw, stats);
+	switch (hw->mac.type) {
+	case fm10k_mac_pf:
+		return fm10k_update_hw_stats_pf(hw, stats);
+	case fm10k_mac_vf:
+		return fm10k_update_hw_stats_vf(hw, stats);
+	default:
+		break;
+	}
 }
 
 /**
@@ -238,8 +223,14 @@ void fm10k_update_hw_stats(struct fm10k_hw *hw, struct fm10k_hw_stats *stats)
  * */
 void fm10k_rebind_hw_stats(struct fm10k_hw *hw, struct fm10k_hw_stats *stats)
 {
-	if (hw->mac.ops.rebind_hw_stats)
-		hw->mac.ops.rebind_hw_stats(hw, stats);
+	switch (hw->mac.type) {
+	case fm10k_mac_pf:
+		return fm10k_rebind_hw_stats_pf(hw, stats);
+	case fm10k_mac_vf:
+		return fm10k_rebind_hw_stats_vf(hw, stats);
+	default:
+		break;
+	}
 }
 
 /**
@@ -338,4 +329,18 @@ s32 fm10k_adjust_systime(struct fm10k_hw *hw, s32 ppb)
 {
 	return fm10k_call_func(hw, hw->mac.ops.adjust_systime,
 			       (hw, ppb), FM10K_NOT_IMPLEMENTED);
+}
+
+/**
+ *  fm10k_notify_offset - Notify switch of change in PTP offset
+ *  @hw: pointer to hardware structure
+ *  @offset: 64bit unsigned offset from hardware SYSTIME value
+ *
+ *  This function is meant to notify switch of change in the PTP offset for
+ *  the hardware SYSTIME registers.
+ **/
+s32 fm10k_notify_offset(struct fm10k_hw *hw, u64 offset)
+{
+	return fm10k_call_func(hw, hw->mac.ops.notify_offset,
+			       (hw, offset), FM10K_NOT_IMPLEMENTED);
 }

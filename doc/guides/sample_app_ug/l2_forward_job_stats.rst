@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2015 Intel Corporation.
 
 L2 Forwarding Sample Application (in Real and Virtualized Environments) with core load statistics.
 ==================================================================================================
@@ -97,25 +70,9 @@ in this case enabling a total of four Virtual Functions.
 Compiling the Application
 -------------------------
 
-#.  Go to the example directory:
+To compile the sample application see :doc:`compiling`.
 
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk cd ${RTE_SDK}/examples/l2fwd-jobstats
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-    *See the DPDK Getting Started Guide* for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
+The application is located in the ``l2fwd-jobstats`` sub-directory.
 
 Running the Application
 -----------------------
@@ -134,12 +91,12 @@ where,
 
 *   l: Use locale thousands separator when formatting big numbers.
 
-To run the application in linuxapp environment with 4 lcores, 16 ports, 8 RX queues per lcore and
+To run the application in linux environment with 4 lcores, 16 ports, 8 RX queues per lcore and
 thousands  separator printing, issue the command:
 
 .. code-block:: console
 
-    $ ./build/l2fwd-jobstats -c f -n 4 -- -q 8 -p ffff -l
+    $ ./build/l2fwd-jobstats -l 0-3 -n 4 -- -q 8 -p ffff -l
 
 Refer to the *DPDK Getting Started Guide* for general information on running applications
 and the Environment Abstraction Layer (EAL) options.
@@ -153,7 +110,8 @@ Command Line Arguments
 ~~~~~~~~~~~~~~~~~~~~~~
 
 The L2 Forwarding sample application takes specific parameters,
-in addition to Environment Abstraction Layer (EAL) arguments (see Section 9.3).
+in addition to Environment Abstraction Layer (EAL) arguments
+(see `Running the Application`_).
 The preferred way to parse parameters is to use the getopt() function,
 since it is part of a well-defined and portable library.
 
@@ -191,36 +149,25 @@ and the application to store network packet data:
 .. code-block:: c
 
     /* create the mbuf pool */
-    l2fwd_pktmbuf_pool =
-        rte_mempool_create("mbuf_pool", NB_MBUF,
-                   MBUF_SIZE, 32,
-                   sizeof(struct rte_pktmbuf_pool_private),
-                   rte_pktmbuf_pool_init, NULL,
-                   rte_pktmbuf_init, NULL,
-                   rte_socket_id(), 0);
+    l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", NB_MBUF,
+		MEMPOOL_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE,
+		rte_socket_id());
 
     if (l2fwd_pktmbuf_pool == NULL)
         rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
 The rte_mempool is a generic structure used to handle pools of objects.
-In this case, it is necessary to create a pool that will be used by the driver,
-which expects to have some reserved space in the mempool structure,
-sizeof(struct rte_pktmbuf_pool_private) bytes.
-The number of allocated pkt mbufs is NB_MBUF, with a size of MBUF_SIZE each.
-A per-lcore cache of 32 mbufs is kept.
+In this case, it is necessary to create a pool that will be used by the driver.
+The number of allocated pkt mbufs is NB_MBUF, with a data room size of
+RTE_MBUF_DEFAULT_BUF_SIZE each.
+A per-lcore cache of MEMPOOL_CACHE_SIZE mbufs is kept.
 The memory is allocated in rte_socket_id() socket,
 but it is possible to extend this code to allocate one mbuf pool per socket.
 
-Two callback pointers are also given to the rte_mempool_create() function:
-
-*   The first callback pointer is to rte_pktmbuf_pool_init() and is used
-    to initialize the private data of the mempool, which is needed by the driver.
-    This function is provided by the mbuf API, but can be copied and extended by the developer.
-
-*   The second callback pointer given to rte_mempool_create() is the mbuf initializer.
-    The default is used, that is, rte_pktmbuf_init(), which is provided in the rte_mbuf library.
-    If a more complex application wants to extend the rte_pktmbuf structure for its own needs,
-    a new function derived from rte_pktmbuf_init( ) can be created.
+The rte_pktmbuf_pool_create() function uses the default mbuf pool and mbuf
+initializers, respectively rte_pktmbuf_pool_init() and rte_pktmbuf_init().
+An advanced application may want to use the mempool API to create the
+mbuf pool with more control.
 
 Driver Initialization
 ~~~~~~~~~~~~~~~~~~~~~
@@ -230,14 +177,6 @@ To fully understand this code, it is recommended to study the chapters that rela
 in the *DPDK Programmer's Guide* and the *DPDK API Reference*.
 
 .. code-block:: c
-
-    nb_ports = rte_eth_dev_count();
-
-    if (nb_ports == 0)
-        rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
-
-    if (nb_ports > RTE_MAX_ETHPORTS)
-        nb_ports = RTE_MAX_ETHPORTS;
 
     /* reset l2fwd_dst_ports */
 
@@ -249,7 +188,7 @@ in the *DPDK Programmer's Guide* and the *DPDK API Reference*.
     /*
      * Each logical core is assigned a dedicated TX queue on each port.
      */
-    for (portid = 0; portid < nb_ports; portid++) {
+    RTE_ETH_FOREACH_DEV(portid) {
         /* skip ports that are not enabled */
         if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
            continue;
@@ -278,25 +217,6 @@ The rte_eth_dev_configure() function is used to configure the number of queues f
         rte_exit(EXIT_FAILURE, "Cannot configure device: "
             "err=%d, port=%u\n",
             ret, portid);
-
-The global configuration is stored in a static structure:
-
-.. code-block:: c
-
-    static const struct rte_eth_conf port_conf = {
-        .rxmode = {
-            .split_hdr_size = 0,
-            .header_split = 0,   /**< Header Split disabled */
-            .hw_ip_checksum = 0, /**< IP checksum offload disabled */
-            .hw_vlan_filter = 0, /**< VLAN filtering disabled */
-            .jumbo_frame = 0,    /**< Jumbo Frame Support disabled */
-            .hw_strip_crc= 0,    /**< CRC stripped by hardware */
-        },
-
-        .txmode = {
-            .mq_mode = ETH_DCB_NONE
-        },
-    };
 
 RX Queue Initialization
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -343,7 +263,7 @@ The list of queues that must be polled for a given lcore is stored in a private 
 Values of struct lcore_queue_conf:
 
 *   n_rx_port and rx_port_list[] are used in the main packet processing loop
-    (see Section 9.4.6 "Receive, Process and Transmit Packets" later in this chapter).
+    (see Section `Receive, Process and Transmit Packets`_ later in this chapter).
 
 *   rx_timers and flush_timer are used to ensure forced TX on low packet rate.
 
@@ -531,13 +451,13 @@ Naturally, the number of ports in the portmask must be even, otherwise, the appl
     static void
     l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
     {
-        struct ether_hdr *eth;
+        struct rte_ether_hdr *eth;
         void *tmp;
         unsigned dst_port;
 
         dst_port = l2fwd_dst_ports[portid];
 
-        eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+        eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
         /* 02:00:00:00:00:xx */
 
@@ -547,7 +467,7 @@ Naturally, the number of ports in the portmask must be even, otherwise, the appl
 
         /* src addr */
 
-        ether_addr_copy(&l2fwd_ports_eth_addr[dst_port], &eth->s_addr);
+        rte_ether_addr_copy(&l2fwd_ports_eth_addr[dst_port], &eth->s_addr);
 
         l2fwd_send_packet(m, (uint8_t) dst_port);
     }
@@ -570,7 +490,7 @@ If the table is full, the whole packets table is transmitted using the l2fwd_sen
     /* Send the packet on an output interface */
 
     static int
-    l2fwd_send_packet(struct rte_mbuf *m, uint8_t port)
+    l2fwd_send_packet(struct rte_mbuf *m, uint16_t port)
     {
         unsigned lcore_id, len;
         struct lcore_queue_conf *qconf;
@@ -605,7 +525,7 @@ however it improves performance:
         unsigned lcore_id;
         struct lcore_queue_conf *qconf;
         struct mbuf_table *m_table;
-        uint8_t portid;
+        uint16_t portid;
 
         lcore_id = rte_lcore_id();
         qconf = &lcore_queue_conf[lcore_id];

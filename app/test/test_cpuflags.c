@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -113,7 +84,43 @@ test_cpuflags(void)
 
 	printf("Check for ICACHE_SNOOP:\t\t");
 	CHECK_FOR_FLAG(RTE_CPUFLAG_ICACHE_SNOOP);
-#else
+#endif
+
+#if defined(RTE_ARCH_ARM)
+	printf("Check for NEON:\t\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_NEON);
+#endif
+
+#if defined(RTE_ARCH_ARM64)
+	printf("Check for FP:\t\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_FP);
+
+	printf("Check for ASIMD:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_NEON);
+
+	printf("Check for EVTSTRM:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_EVTSTRM);
+
+	printf("Check for AES:\t\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_AES);
+
+	printf("Check for PMULL:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_PMULL);
+
+	printf("Check for SHA1:\t\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_SHA1);
+
+	printf("Check for SHA2:\t\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_SHA2);
+
+	printf("Check for CRC32:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_CRC32);
+
+	printf("Check for ATOMICS:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_ATOMICS);
+#endif
+
+#if defined(RTE_ARCH_X86_64) || defined(RTE_ARCH_I686)
 	printf("Check for SSE:\t\t");
 	CHECK_FOR_FLAG(RTE_CPUFLAG_SSE);
 
@@ -135,6 +142,9 @@ test_cpuflags(void)
 	printf("Check for AVX2:\t\t");
 	CHECK_FOR_FLAG(RTE_CPUFLAG_AVX2);
 
+	printf("Check for AVX512F:\t");
+	CHECK_FOR_FLAG(RTE_CPUFLAG_AVX512F);
+
 	printf("Check for TRBOBST:\t");
 	CHECK_FOR_FLAG(RTE_CPUFLAG_TRBOBST);
 
@@ -149,8 +159,6 @@ test_cpuflags(void)
 
 	printf("Check for INVTSC:\t");
 	CHECK_FOR_FLAG(RTE_CPUFLAG_INVTSC);
-
-
 #endif
 
 	/*
@@ -165,8 +173,4 @@ test_cpuflags(void)
 	return 0;
 }
 
-static struct test_command cpuflags_cmd = {
-	.command = "cpuflags_autotest",
-	.callback = test_cpuflags,
-};
-REGISTER_TEST_COMMAND(cpuflags_cmd);
+REGISTER_TEST_COMMAND(cpuflags_autotest, test_cpuflags);

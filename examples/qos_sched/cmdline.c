@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -50,9 +21,9 @@ struct cmd_help_result {
 	cmdline_fixed_string_t help;
 };
 
-static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
+static void cmd_help_parsed(__rte_unused void *parsed_result,
                                   struct cmdline *cl,
-                                  __attribute__((unused)) void *data)
+                                  __rte_unused void *data)
 {
 	cmdline_printf(
 		cl,
@@ -93,9 +64,9 @@ struct cmd_quit_result {
 	cmdline_fixed_string_t quit;
 };
 
-static void cmd_quit_parsed(__attribute__((unused)) void *parsed_result,
+static void cmd_quit_parsed(__rte_unused void *parsed_result,
 		struct cmdline *cl,
-		__attribute__((unused)) void *data)
+		__rte_unused void *data)
 {
 	cmdline_quit(cl);
 }
@@ -121,8 +92,8 @@ struct cmd_setqavg_result {
 };
 
 static void cmd_setqavg_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_setqavg_result *res = parsed_result;
 
@@ -162,9 +133,9 @@ struct cmd_appstats_result {
 	cmdline_fixed_string_t app_string;
 };
 
-static void cmd_appstats_parsed(__attribute__((unused)) void *parsed_result,
-				__attribute__((unused)) struct cmdline *cl,
-				__attribute__((unused)) void *data)
+static void cmd_appstats_parsed(__rte_unused void *parsed_result,
+				__rte_unused struct cmdline *cl,
+				__rte_unused void *data)
 {
 	app_stat();
 }
@@ -191,14 +162,14 @@ cmdline_parse_inst_t cmd_appstats = {
 struct cmd_subportstats_result {
         cmdline_fixed_string_t stats_string;
         cmdline_fixed_string_t port_string;
-	uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
 };
 
 static void cmd_subportstats_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
 	struct cmd_subportstats_result *res = parsed_result;
 
@@ -220,7 +191,7 @@ cmdline_parse_token_num_t cmd_subportstats_subport_number =
                                 UINT32);
 cmdline_parse_token_num_t cmd_subportstats_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_subportstats_result, port_number,
-                                UINT8);
+			       UINT16);
 
 cmdline_parse_inst_t cmd_subportstats = {
         .f = cmd_subportstats_parsed,
@@ -240,7 +211,7 @@ cmdline_parse_inst_t cmd_subportstats = {
 struct cmd_pipestats_result {
         cmdline_fixed_string_t stats_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
         cmdline_fixed_string_t pipe_string;
@@ -248,8 +219,8 @@ struct cmd_pipestats_result {
 };
 
 static void cmd_pipestats_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_pipestats_result *res = parsed_result;
 
@@ -265,7 +236,7 @@ cmdline_parse_token_string_t cmd_pipestats_port_string =
                                 "port");
 cmdline_parse_token_num_t cmd_pipestats_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_pipestats_result, port_number,
-                                UINT8);
+			       UINT16);
 cmdline_parse_token_string_t cmd_pipestats_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_pipestats_result, subport_string,
                                 "subport");
@@ -299,7 +270,7 @@ cmdline_parse_inst_t cmd_pipestats = {
 struct cmd_avg_q_result {
         cmdline_fixed_string_t qavg_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
         cmdline_fixed_string_t pipe_string;
@@ -311,8 +282,8 @@ struct cmd_avg_q_result {
 };
 
 static void cmd_avg_q_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_avg_q_result *res = parsed_result;
 
@@ -327,8 +298,8 @@ cmdline_parse_token_string_t cmd_avg_q_port_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_q_result, port_string,
                                 "port");
 cmdline_parse_token_num_t cmd_avg_q_port_number =
-        TOKEN_NUM_INITIALIZER(struct cmd_avg_q_result, port_number,
-                                UINT8);
+	TOKEN_NUM_INITIALIZER(struct cmd_avg_q_result, port_number,
+			       UINT16);
 cmdline_parse_token_string_t cmd_avg_q_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_q_result, subport_string,
                                 "subport");
@@ -378,7 +349,7 @@ cmdline_parse_inst_t cmd_avg_q = {
 struct cmd_avg_tcpipe_result {
         cmdline_fixed_string_t qavg_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
         cmdline_fixed_string_t pipe_string;
@@ -388,8 +359,8 @@ struct cmd_avg_tcpipe_result {
 };
 
 static void cmd_avg_tcpipe_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_avg_tcpipe_result *res = parsed_result;
 
@@ -405,7 +376,7 @@ cmdline_parse_token_string_t cmd_avg_tcpipe_port_string =
                                 "port");
 cmdline_parse_token_num_t cmd_avg_tcpipe_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_avg_tcpipe_result, port_number,
-                                UINT8);
+			       UINT16);
 cmdline_parse_token_string_t cmd_avg_tcpipe_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_tcpipe_result, subport_string,
                                 "subport");
@@ -447,7 +418,7 @@ cmdline_parse_inst_t cmd_avg_tcpipe = {
 struct cmd_avg_pipe_result {
         cmdline_fixed_string_t qavg_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
         cmdline_fixed_string_t pipe_string;
@@ -455,8 +426,8 @@ struct cmd_avg_pipe_result {
 };
 
 static void cmd_avg_pipe_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_avg_pipe_result *res = parsed_result;
 
@@ -472,7 +443,7 @@ cmdline_parse_token_string_t cmd_avg_pipe_port_string =
                                 "port");
 cmdline_parse_token_num_t cmd_avg_pipe_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_avg_pipe_result, port_number,
-                                UINT8);
+			       UINT16);
 cmdline_parse_token_string_t cmd_avg_pipe_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_pipe_result, subport_string,
                                 "subport");
@@ -506,7 +477,7 @@ cmdline_parse_inst_t cmd_avg_pipe = {
 struct cmd_avg_tcsubport_result {
         cmdline_fixed_string_t qavg_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
         cmdline_fixed_string_t tc_string;
@@ -514,8 +485,8 @@ struct cmd_avg_tcsubport_result {
 };
 
 static void cmd_avg_tcsubport_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_avg_tcsubport_result *res = parsed_result;
 
@@ -531,7 +502,7 @@ cmdline_parse_token_string_t cmd_avg_tcsubport_port_string =
                                 "port");
 cmdline_parse_token_num_t cmd_avg_tcsubport_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_avg_tcsubport_result, port_number,
-                                UINT8);
+			       UINT16);
 cmdline_parse_token_string_t cmd_avg_tcsubport_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_tcsubport_result, subport_string,
                                 "subport");
@@ -565,14 +536,14 @@ cmdline_parse_inst_t cmd_avg_tcsubport = {
 struct cmd_avg_subport_result {
         cmdline_fixed_string_t qavg_string;
         cmdline_fixed_string_t port_string;
-        uint8_t port_number;
+	uint16_t port_number;
         cmdline_fixed_string_t subport_string;
         uint32_t subport_number;
 };
 
 static void cmd_avg_subport_parsed(void *parsed_result,
-                                __attribute__((unused)) struct cmdline *cl,
-                                __attribute__((unused)) void *data)
+                                __rte_unused struct cmdline *cl,
+                                __rte_unused void *data)
 {
         struct cmd_avg_subport_result *res = parsed_result;
 
@@ -588,7 +559,7 @@ cmdline_parse_token_string_t cmd_avg_subport_port_string =
                                 "port");
 cmdline_parse_token_num_t cmd_avg_subport_port_number =
         TOKEN_NUM_INITIALIZER(struct cmd_avg_subport_result, port_number,
-                                UINT8);
+			       UINT16);
 cmdline_parse_token_string_t cmd_avg_subport_subport_string =
         TOKEN_STRING_INITIALIZER(struct cmd_avg_subport_result, subport_string,
                                 "subport");

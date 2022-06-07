@@ -1,48 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
 #include <netinet/in.h>
-
-#ifndef __linux__
-#ifndef __FreeBSD__
-#include <net/socket.h>
-#else
 #include <sys/socket.h>
-#endif
-#endif
 
 #include <rte_string_fns.h>
 
@@ -115,8 +79,6 @@ const struct ipaddr_str ipaddr_valid_strs[] = {
 		{"0.0.0.0/24", {AF_INET, {IP4(0,0,0,0)}, 24},
 				CMDLINE_IPADDR_V4 | CMDLINE_IPADDR_NETWORK},
 		{"192.168.1.0/24", {AF_INET, {IP4(192,168,1,0)}, 24},
-				CMDLINE_IPADDR_V4 | CMDLINE_IPADDR_NETWORK},
-		{"012.34.56.78/24", {AF_INET, {IP4(12,34,56,78)}, 24},
 				CMDLINE_IPADDR_V4 | CMDLINE_IPADDR_NETWORK},
 		{"34.56.78.90/1", {AF_INET, {IP4(34,56,78,90)}, 1},
 				CMDLINE_IPADDR_V4 | CMDLINE_IPADDR_NETWORK},
@@ -300,19 +262,6 @@ const char * ipaddr_invalid_strs[] = {
 		" ",
 };
 
-#define IPADDR_VALID_STRS_SIZE \
-	(sizeof(ipaddr_valid_strs) / sizeof(ipaddr_valid_strs[0]))
-#define IPADDR_GARBAGE_ADDR4_STRS_SIZE \
-	(sizeof(ipaddr_garbage_addr4_strs) / sizeof(ipaddr_garbage_addr4_strs[0]))
-#define IPADDR_GARBAGE_ADDR6_STRS_SIZE \
-	(sizeof(ipaddr_garbage_addr6_strs) / sizeof(ipaddr_garbage_addr6_strs[0]))
-#define IPADDR_GARBAGE_NETWORK4_STRS_SIZE \
-	(sizeof(ipaddr_garbage_network4_strs) / sizeof(ipaddr_garbage_network4_strs[0]))
-#define IPADDR_GARBAGE_NETWORK6_STRS_SIZE \
-	(sizeof(ipaddr_garbage_network6_strs) / sizeof(ipaddr_garbage_network6_strs[0]))
-#define IPADDR_INVALID_STRS_SIZE \
-	(sizeof(ipaddr_invalid_strs) / sizeof(ipaddr_invalid_strs[0]))
-
 static void
 dump_addr(cmdline_ipaddr_t addr)
 {
@@ -405,7 +354,7 @@ test_parse_ipaddr_valid(void)
 	}
 
 	/* test valid strings */
-	for (i = 0; i < IPADDR_VALID_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_valid_strs); i++) {
 
 		/* test each valid string against different flags */
 		for (flags = 1; flags < 0x8; flags++) {
@@ -453,7 +402,7 @@ test_parse_ipaddr_valid(void)
 	}
 
 	/* test garbage ipv4 address strings */
-	for (i = 0; i < IPADDR_GARBAGE_ADDR4_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_garbage_addr4_strs); i++) {
 
 		struct in_addr tmp = IPv4_GARBAGE_ADDR;
 
@@ -495,7 +444,7 @@ test_parse_ipaddr_valid(void)
 	}
 
 	/* test garbage ipv6 address strings */
-	for (i = 0; i < IPADDR_GARBAGE_ADDR6_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_garbage_addr6_strs); i++) {
 
 		cmdline_ipaddr_t tmp = {.addr = IPv6_GARBAGE_ADDR};
 
@@ -538,7 +487,7 @@ test_parse_ipaddr_valid(void)
 
 
 	/* test garbage ipv4 network strings */
-	for (i = 0; i < IPADDR_GARBAGE_NETWORK4_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_garbage_network4_strs); i++) {
 
 		struct in_addr tmp = IPv4_GARBAGE_ADDR;
 
@@ -580,7 +529,7 @@ test_parse_ipaddr_valid(void)
 	}
 
 	/* test garbage ipv6 address strings */
-	for (i = 0; i < IPADDR_GARBAGE_NETWORK6_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_garbage_network6_strs); i++) {
 
 		cmdline_ipaddr_t tmp = {.addr = IPv6_GARBAGE_ADDR};
 
@@ -637,7 +586,7 @@ test_parse_ipaddr_invalid_data(void)
 	memset(&result, 0, sizeof(result));
 
 	/* test invalid strings */
-	for (i = 0; i < IPADDR_INVALID_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(ipaddr_invalid_strs); i++) {
 
 		/* test each valid string against different flags */
 		for (flags = 1; flags < 0x8; flags++) {

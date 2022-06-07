@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 Writing Efficient Code
 ======================
@@ -105,6 +78,21 @@ meaning that if all memory access operations are done on the first channel only,
 
 By default, the  :ref:`Mempool Library <Mempool_Library>` spreads the addresses of objects among memory channels.
 
+Locking memory pages
+~~~~~~~~~~~~~~~~~~~~
+
+The underlying operating system is allowed to load/unload memory pages at its own discretion.
+These page loads could impact the performance, as the process is on hold when the kernel fetches them.
+
+To avoid these you could pre-load, and lock them into memory with the ``mlockall()`` call.
+
+.. code-block:: c
+
+    if (mlockall(MCL_CURRENT | MCL_FUTURE)) {
+        RTE_LOG(NOTICE, USER1, "mlockall() failed with error \"%s\"\n",
+                strerror(errno));
+    }
+
 Communication Between lcores
 ----------------------------
 
@@ -113,7 +101,7 @@ it is advised to use the DPDK ring API, which provides a lockless ring implement
 
 The ring supports bulk and burst access,
 meaning that it is possible to read several elements from the ring with only one costly atomic operation
-(see Chapter 5 "Ring Library").
+(see :doc:`ring_lib`).
 Performance is greatly improved when using bulk access operations.
 
 The code algorithm that dequeues messages may be something similar to the following:
@@ -124,7 +112,7 @@ The code algorithm that dequeues messages may be something similar to the follow
 
     while (1) {
         /* Process as many elements as can be dequeued. */
-        count = rte_ring_dequeue_burst(ring, obj_table, MAX_BULK);
+        count = rte_ring_dequeue_burst(ring, obj_table, MAX_BULK, NULL);
         if (unlikely(count == 0))
             continue;
 
@@ -179,7 +167,13 @@ but with the added cost of lower throughput.
 Locks and Atomic Operations
 ---------------------------
 
-Atomic operations imply a lock prefix before the instruction,
+This section describes some key considerations when using locks and atomic
+operations in the DPDK environment.
+
+Locks
+~~~~~
+
+On x86, atomic operations imply a lock prefix before the instruction,
 causing the processor's LOCK# signal to be asserted during execution of the following instruction.
 This has a big impact on performance in a multicore environment.
 
@@ -187,6 +181,57 @@ Performance can be improved by avoiding lock mechanisms in the data plane.
 It can often be replaced by other solutions like per-lcore variables.
 Also, some locking techniques are more efficient than others.
 For instance, the Read-Copy-Update (RCU) algorithm can frequently replace simple rwlocks.
+
+Atomic Operations: Use C11 Atomic Builtins
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+DPDK generic rte_atomic operations are implemented by __sync builtins. These
+__sync builtins result in full barriers on aarch64, which are unnecessary
+in many use cases. They can be replaced by __atomic builtins that conform to
+the C11 memory model and provide finer memory order control.
+
+So replacing the rte_atomic operations with __atomic builtins might improve
+performance for aarch64 machines.
+
+Some typical optimization cases are listed below:
+
+Atomicity
+^^^^^^^^^
+
+Some use cases require atomicity alone, the ordering of the memory operations
+does not matter. For example, the packet statistics counters need to be
+incremented atomically but do not need any particular memory ordering.
+So, RELAXED memory ordering is sufficient.
+
+One-way Barrier
+^^^^^^^^^^^^^^^
+
+Some use cases allow for memory reordering in one way while requiring memory
+ordering in the other direction.
+
+For example, the memory operations before the spinlock lock are allowed to
+move to the critical section, but the memory operations in the critical section
+are not allowed to move above the lock. In this case, the full memory barrier
+in the compare-and-swap operation can be replaced with ACQUIRE memory order.
+On the other hand, the memory operations after the spinlock unlock are allowed
+to move to the critical section, but the memory operations in the critical
+section are not allowed to move below the unlock. So the full barrier in the
+store operation can use RELEASE memory order.
+
+Reader-Writer Concurrency
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Lock-free reader-writer concurrency is one of the common use cases in DPDK.
+
+The payload or the data that the writer wants to communicate to the reader,
+can be written with RELAXED memory order. However, the guard variable should
+be written with RELEASE memory order. This ensures that the store to guard
+variable is observable only after the store to payload is observable.
+
+Correspondingly, on the reader side, the guard variable should be read
+with ACQUIRE memory order. The payload or the data the writer communicated,
+can be read with RELAXED memory order. This ensures that, if the store to
+guard variable is observable, the store to payload is also observable.
 
 Coding Considerations
 ---------------------

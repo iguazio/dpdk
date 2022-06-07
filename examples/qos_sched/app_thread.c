@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdint.h>
@@ -49,13 +20,11 @@
  * QoS parameters are encoded as follows:
  *		Outer VLAN ID defines subport
  *		Inner VLAN ID defines pipe
- *		Destination IP 0.0.XXX.0 defines traffic class
  *		Destination IP host (0.0.0.XXX) defines queue
  * Values below define offset to each field from start of frame
  */
 #define SUBPORT_OFFSET	7
 #define PIPE_OFFSET		9
-#define TC_OFFSET		20
 #define QUEUE_OFFSET	20
 #define COLOR_OFFSET	19
 
@@ -64,16 +33,27 @@ get_pkt_sched(struct rte_mbuf *m, uint32_t *subport, uint32_t *pipe,
 			uint32_t *traffic_class, uint32_t *queue, uint32_t *color)
 {
 	uint16_t *pdata = rte_pktmbuf_mtod(m, uint16_t *);
+	uint16_t pipe_queue;
 
+	/* Outer VLAN ID*/
 	*subport = (rte_be_to_cpu_16(pdata[SUBPORT_OFFSET]) & 0x0FFF) &
-			(port_params.n_subports_per_port - 1); /* Outer VLAN ID*/
+		(port_params.n_subports_per_port - 1);
+
+	/* Inner VLAN ID */
 	*pipe = (rte_be_to_cpu_16(pdata[PIPE_OFFSET]) & 0x0FFF) &
-			(port_params.n_pipes_per_subport - 1); /* Inner VLAN ID */
-	*traffic_class = (pdata[QUEUE_OFFSET] & 0x0F) &
-			(RTE_SCHED_TRAFFIC_CLASSES_PER_PIPE - 1); /* Destination IP */
-	*queue = ((pdata[QUEUE_OFFSET] >> 8) & 0x0F) &
-			(RTE_SCHED_QUEUES_PER_TRAFFIC_CLASS - 1) ; /* Destination IP */
-	*color = pdata[COLOR_OFFSET] & 0x03; 	/* Destination IP */
+		(subport_params[*subport].n_pipes_per_subport_enabled - 1);
+
+	pipe_queue = active_queues[(pdata[QUEUE_OFFSET] >> 8) % n_active_queues];
+
+	/* Traffic class (Destination IP) */
+	*traffic_class = pipe_queue > RTE_SCHED_TRAFFIC_CLASS_BE ?
+			RTE_SCHED_TRAFFIC_CLASS_BE : pipe_queue;
+
+	/* Traffic class queue (Destination IP) */
+	*queue = pipe_queue - *traffic_class;
+
+	/* Color (Destination IP) */
+	*color = pdata[COLOR_OFFSET] & 0x03;
 
 	return 0;
 }
@@ -102,12 +82,15 @@ app_rx_thread(struct thread_conf **confs)
 			for(i = 0; i < nb_rx; i++) {
 				get_pkt_sched(rx_mbufs[i],
 						&subport, &pipe, &traffic_class, &queue, &color);
-				rte_sched_port_pkt_write(rx_mbufs[i], subport, pipe,
-						traffic_class, queue, (enum rte_meter_color) color);
+				rte_sched_port_pkt_write(conf->sched_port,
+						rx_mbufs[i],
+						subport, pipe,
+						traffic_class, queue,
+						(enum rte_color) color);
 			}
 
 			if (unlikely(rte_ring_sp_enqueue_bulk(conf->rx_ring,
-								(void **)rx_mbufs, nb_rx) != 0)) {
+					(void **)rx_mbufs, nb_rx, NULL) == 0)) {
 				for(i = 0; i < nb_rx; i++) {
 					rte_pktmbuf_free(rx_mbufs[i]);
 
@@ -179,8 +162,8 @@ app_tx_thread(struct thread_conf **confs)
 
 	while ((conf = confs[conf_idx])) {
 		retval = rte_ring_sc_dequeue_bulk(conf->tx_ring, (void **)mbufs,
-					burst_conf.qos_dequeue);
-		if (likely(retval == 0)) {
+					burst_conf.qos_dequeue, NULL);
+		if (likely(retval != 0)) {
 			app_send_packets(conf, mbufs, burst_conf.qos_dequeue);
 
 			conf->counter = 0; /* reset empty read loop counter */
@@ -215,23 +198,24 @@ app_worker_thread(struct thread_conf **confs)
 
 	while ((conf = confs[conf_idx])) {
 		uint32_t nb_pkt;
-		int retval;
 
 		/* Read packet from the ring */
-		retval = rte_ring_sc_dequeue_bulk(conf->rx_ring, (void **)mbufs,
-					burst_conf.ring_burst);
-		if (likely(retval == 0)) {
+		nb_pkt = rte_ring_sc_dequeue_burst(conf->rx_ring, (void **)mbufs,
+					burst_conf.ring_burst, NULL);
+		if (likely(nb_pkt)) {
 			int nb_sent = rte_sched_port_enqueue(conf->sched_port, mbufs,
-					burst_conf.ring_burst);
+					nb_pkt);
 
-			APP_STATS_ADD(conf->stat.nb_drop, burst_conf.ring_burst - nb_sent);
-			APP_STATS_ADD(conf->stat.nb_rx, burst_conf.ring_burst);
+			APP_STATS_ADD(conf->stat.nb_drop, nb_pkt - nb_sent);
+			APP_STATS_ADD(conf->stat.nb_rx, nb_pkt);
 		}
 
 		nb_pkt = rte_sched_port_dequeue(conf->sched_port, mbufs,
 					burst_conf.qos_dequeue);
 		if (likely(nb_pkt > 0))
-			while (rte_ring_sp_enqueue_bulk(conf->tx_ring, (void **)mbufs, nb_pkt) != 0);
+			while (rte_ring_sp_enqueue_bulk(conf->tx_ring,
+					(void **)mbufs, nb_pkt, NULL) == 0)
+				; /* empty body */
 
 		conf_idx++;
 		if (confs[conf_idx] == NULL)
@@ -250,17 +234,16 @@ app_mixed_thread(struct thread_conf **confs)
 
 	while ((conf = confs[conf_idx])) {
 		uint32_t nb_pkt;
-		int retval;
 
 		/* Read packet from the ring */
-		retval = rte_ring_sc_dequeue_bulk(conf->rx_ring, (void **)mbufs,
-					burst_conf.ring_burst);
-		if (likely(retval == 0)) {
+		nb_pkt = rte_ring_sc_dequeue_burst(conf->rx_ring, (void **)mbufs,
+					burst_conf.ring_burst, NULL);
+		if (likely(nb_pkt)) {
 			int nb_sent = rte_sched_port_enqueue(conf->sched_port, mbufs,
-					burst_conf.ring_burst);
+					nb_pkt);
 
-			APP_STATS_ADD(conf->stat.nb_drop, burst_conf.ring_burst - nb_sent);
-			APP_STATS_ADD(conf->stat.nb_rx, burst_conf.ring_burst);
+			APP_STATS_ADD(conf->stat.nb_drop, nb_pkt - nb_sent);
+			APP_STATS_ADD(conf->stat.nb_rx, nb_pkt);
 		}
 
 

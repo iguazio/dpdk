@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2019 Intel Corporation
  */
 
 #include <stdio.h>
@@ -37,15 +8,15 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/queue.h>
+#include <unistd.h>
 
 #include <rte_common.h>
 #include <rte_memory.h>
-#include <rte_memzone.h>
 #include <rte_per_lcore.h>
 #include <rte_launch.h>
 #include <rte_eal.h>
-#include <rte_per_lcore.h>
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 #include <rte_cycles.h>
@@ -56,9 +27,12 @@
 
 #define N 10000
 
-#define QUOTE_(x) #x
-#define QUOTE(x) QUOTE_(x)
-#define MALLOC_MEMZONE_SIZE QUOTE(RTE_MALLOC_MEMZONE_SIZE)
+
+static int
+is_mem_on_socket(int32_t socket);
+
+static int32_t
+addr_to_socket(void *addr);
 
 /*
  * Malloc
@@ -95,7 +69,7 @@ is_aligned(void *p, int align)
 }
 
 static int
-test_align_overlap_per_lcore(__attribute__((unused)) void *arg)
+test_align_overlap_per_lcore(__rte_unused void *arg)
 {
 	const unsigned align1 = 8,
 			align2 = 64,
@@ -113,8 +87,7 @@ test_align_overlap_per_lcore(__attribute__((unused)) void *arg)
 		}
 		for(j = 0; j < 1000 ; j++) {
 			if( *(char *)p1 != 0) {
-				printf("rte_zmalloc didn't zero"
-				       "the allocated memory\n");
+				printf("rte_zmalloc didn't zero the allocated memory\n");
 				ret = -1;
 			}
 		}
@@ -167,7 +140,7 @@ test_align_overlap_per_lcore(__attribute__((unused)) void *arg)
 }
 
 static int
-test_reordered_free_per_lcore(__attribute__((unused)) void *arg)
+test_reordered_free_per_lcore(__rte_unused void *arg)
 {
 	const unsigned align1 = 8,
 			align2 = 64,
@@ -185,8 +158,7 @@ test_reordered_free_per_lcore(__attribute__((unused)) void *arg)
 		}
 		for(j = 0; j < 1000 ; j++) {
 			if( *(char *)p1 != 0) {
-				printf("rte_zmalloc didn't zero"
-				       "the allocated memory\n");
+				printf("rte_zmalloc didn't zero the allocated memory\n");
 				ret = -1;
 			}
 		}
@@ -285,63 +257,9 @@ test_str_to_size(void)
 			{"18446744073709551616", 0} /* ULLONG_MAX + 1 == out of range*/
 	};
 	unsigned i;
-	for (i = 0; i < sizeof(test_values)/sizeof(test_values[0]); i++)
+	for (i = 0; i < RTE_DIM(test_values); i++)
 		if (rte_str_to_size(test_values[i].str) != test_values[i].value)
 			return -1;
-	return 0;
-}
-
-static int
-test_big_alloc(void)
-{
-	int socket = 0;
-	struct rte_malloc_socket_stats pre_stats, post_stats;
-	size_t size =rte_str_to_size(MALLOC_MEMZONE_SIZE)*2;
-	int align = 0;
-#ifndef RTE_LIBRTE_MALLOC_DEBUG
-	int overhead = RTE_CACHE_LINE_SIZE + RTE_CACHE_LINE_SIZE;
-#else
-	int overhead = RTE_CACHE_LINE_SIZE + RTE_CACHE_LINE_SIZE + RTE_CACHE_LINE_SIZE;
-#endif
-
-	rte_malloc_get_socket_stats(socket, &pre_stats);
-
-	void *p1 = rte_malloc_socket("BIG", size , align, socket);
-	if (!p1)
-		return -1;
-	rte_malloc_get_socket_stats(socket,&post_stats);
-
-	/* Check statistics reported are correct */
-	/* Allocation may increase, or may be the same as before big allocation */
-	if (post_stats.heap_totalsz_bytes < pre_stats.heap_totalsz_bytes) {
-		printf("Malloc statistics are incorrect - heap_totalsz_bytes\n");
-		return -1;
-	}
-	/* Check that allocated size adds up correctly */
-	if (post_stats.heap_allocsz_bytes !=
-			pre_stats.heap_allocsz_bytes + size + align + overhead) {
-		printf("Malloc statistics are incorrect - alloc_size\n");
-		return -1;
-	}
-	/* Check free size against tested allocated size */
-	if (post_stats.heap_freesz_bytes !=
-			post_stats.heap_totalsz_bytes - post_stats.heap_allocsz_bytes) {
-		printf("Malloc statistics are incorrect - heap_freesz_bytes\n");
-		return -1;
-	}
-	/* Number of allocated blocks must increase after allocation */
-	if (post_stats.alloc_count != pre_stats.alloc_count + 1) {
-		printf("Malloc statistics are incorrect - alloc_count\n");
-		return -1;
-	}
-	/* New blocks now available - just allocated 1 but also 1 new free */
-	if (post_stats.free_count != pre_stats.free_count &&
-			post_stats.free_count != pre_stats.free_count - 1) {
-		printf("Malloc statistics are incorrect - free_count\n");
-		return -1;
-	}
-
-	rte_free(p1);
 	return 0;
 }
 
@@ -352,13 +270,26 @@ test_multi_alloc_statistics(void)
 	struct rte_malloc_socket_stats pre_stats, post_stats ,first_stats, second_stats;
 	size_t size = 2048;
 	int align = 1024;
-#ifndef RTE_LIBRTE_MALLOC_DEBUG
-	int trailer_size = 0;
-#else
-	int trailer_size = RTE_CACHE_LINE_SIZE;
-#endif
-	int overhead = RTE_CACHE_LINE_SIZE + trailer_size;
+	int overhead = 0;
 
+	/* Dynamically calculate the overhead by allocating one cacheline and
+	 * then comparing what was allocated from the heap.
+	 */
+	rte_malloc_get_socket_stats(socket, &pre_stats);
+
+	void *dummy = rte_malloc_socket(NULL, RTE_CACHE_LINE_SIZE, 0, socket);
+	if (dummy == NULL)
+		return -1;
+
+	rte_malloc_get_socket_stats(socket, &post_stats);
+
+	/* after subtracting cache line, remainder is overhead */
+	overhead = post_stats.heap_allocsz_bytes - pre_stats.heap_allocsz_bytes;
+	overhead -= RTE_CACHE_LINE_SIZE;
+
+	rte_free(dummy);
+
+	/* Now start the real tests */
 	rte_malloc_get_socket_stats(socket, &pre_stats);
 
 	void *p1 = rte_malloc_socket("stats", size , align, socket);
@@ -399,10 +330,6 @@ test_multi_alloc_statistics(void)
 	/* After freeing both allocations check stats return to original */
 	rte_malloc_get_socket_stats(socket, &post_stats);
 
-	/*
-	 * Check that no new blocks added after small allocations
-	 * i.e. < RTE_MALLOC_MEMZONE_SIZE
-	 */
 	if(second_stats.heap_totalsz_bytes != first_stats.heap_totalsz_bytes) {
 		printf("Incorrect heap statistics: Total size \n");
 		return -1;
@@ -447,31 +374,7 @@ test_multi_alloc_statistics(void)
 }
 
 static int
-test_memzone_size_alloc(void)
-{
-	void *p1 = rte_malloc("BIG", (size_t)(rte_str_to_size(MALLOC_MEMZONE_SIZE) - 128), 64);
-	if (!p1)
-		return -1;
-	rte_free(p1);
-	/* one extra check - check no crashes if free(NULL) */
-	rte_free(NULL);
-	return 0;
-}
-
-static int
-test_rte_malloc_type_limits(void)
-{
-	/* The type-limits functionality is not yet implemented,
-	 * so always return 0 no matter what the retval.
-	 */
-	const char *typename = "limit_test";
-	rte_malloc_set_limit(typename, 64 * 1024);
-	rte_malloc_dump_stats(stdout, typename);
-	return 0;
-}
-
-static int
-test_realloc(void)
+test_realloc_socket(int socket)
 {
 	const char hello_str[] = "Hello, world!";
 	const unsigned size1 = 1024;
@@ -480,13 +383,15 @@ test_realloc(void)
 	const unsigned size4 = size3 + 1024;
 
 	/* test data is the same even if element is moved*/
-	char *ptr1 = rte_zmalloc(NULL, size1, RTE_CACHE_LINE_SIZE);
+	char *ptr1 = rte_zmalloc_socket(
+			NULL, size1, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr1){
 		printf("NULL pointer returned from rte_zmalloc\n");
 		return -1;
 	}
-	snprintf(ptr1, size1, "%s" ,hello_str);
-	char *ptr2 = rte_realloc(ptr1, size2, RTE_CACHE_LINE_SIZE);
+	strlcpy(ptr1, hello_str, size1);
+	char *ptr2 = rte_realloc_socket(
+			ptr1, size2, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr2){
 		rte_free(ptr1);
 		printf("NULL pointer returned from rte_realloc\n");
@@ -510,7 +415,8 @@ test_realloc(void)
 	/* now allocate third element, free the second
 	 * and resize third. It should not move. (ptr1 is now invalid)
 	 */
-	char *ptr3 = rte_zmalloc(NULL, size3, RTE_CACHE_LINE_SIZE);
+	char *ptr3 = rte_zmalloc_socket(
+			NULL, size3, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr3){
 		printf("NULL pointer returned from rte_zmalloc\n");
 		rte_free(ptr2);
@@ -525,7 +431,8 @@ test_realloc(void)
 		}
 	rte_free(ptr2);
 	/* first resize to half the size of the freed block */
-	char *ptr4 = rte_realloc(ptr3, size4, RTE_CACHE_LINE_SIZE);
+	char *ptr4 = rte_realloc_socket(
+			ptr3, size4, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr4){
 		printf("NULL pointer returned from rte_realloc\n");
 		rte_free(ptr3);
@@ -537,7 +444,8 @@ test_realloc(void)
 		return -1;
 	}
 	/* now resize again to the full size of the freed block */
-	ptr4 = rte_realloc(ptr3, size3 + size2 + size1, RTE_CACHE_LINE_SIZE);
+	ptr4 = rte_realloc_socket(ptr3, size3 + size2 + size1,
+			RTE_CACHE_LINE_SIZE, socket);
 	if (ptr3 != ptr4){
 		printf("Unexpected - ptr4 != ptr3 on second resize\n");
 		rte_free(ptr4);
@@ -548,12 +456,14 @@ test_realloc(void)
 	/* now try a resize to a smaller size, see if it works */
 	const unsigned size5 = 1024;
 	const unsigned size6 = size5 / 2;
-	char *ptr5 = rte_malloc(NULL, size5, RTE_CACHE_LINE_SIZE);
+	char *ptr5 = rte_malloc_socket(
+			NULL, size5, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr5){
 		printf("NULL pointer returned from rte_malloc\n");
 		return -1;
 	}
-	char *ptr6 = rte_realloc(ptr5, size6, RTE_CACHE_LINE_SIZE);
+	char *ptr6 = rte_realloc_socket(
+			ptr5, size6, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr6){
 		printf("NULL pointer returned from rte_realloc\n");
 		rte_free(ptr5);
@@ -570,7 +480,7 @@ test_realloc(void)
 	const unsigned size7 = 1024;
 	const unsigned orig_align = RTE_CACHE_LINE_SIZE;
 	unsigned new_align = RTE_CACHE_LINE_SIZE * 2;
-	char *ptr7 = rte_malloc(NULL, size7, orig_align);
+	char *ptr7 = rte_malloc_socket(NULL, size7, orig_align, socket);
 	if (!ptr7){
 		printf("NULL pointer returned from rte_malloc\n");
 		return -1;
@@ -578,7 +488,7 @@ test_realloc(void)
 	/* calc an alignment we don't already have */
 	while(RTE_PTR_ALIGN(ptr7, new_align) == ptr7)
 		new_align *= 2;
-	char *ptr8 = rte_realloc(ptr7, size7, new_align);
+	char *ptr8 = rte_realloc_socket(ptr7, size7, new_align, socket);
 	if (!ptr8){
 		printf("NULL pointer returned from rte_realloc\n");
 		rte_free(ptr7);
@@ -596,18 +506,21 @@ test_realloc(void)
 	 */
 	unsigned size9 = 1024, size10 = 1024;
 	unsigned size11 = size9 + size10 + 256;
-	char *ptr9 = rte_malloc(NULL, size9, RTE_CACHE_LINE_SIZE);
+	char *ptr9 = rte_malloc_socket(
+			NULL, size9, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr9){
 		printf("NULL pointer returned from rte_malloc\n");
 		return -1;
 	}
-	char *ptr10 = rte_malloc(NULL, size10, RTE_CACHE_LINE_SIZE);
+	char *ptr10 = rte_malloc_socket(
+			NULL, size10, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr10){
 		printf("NULL pointer returned from rte_malloc\n");
 		return -1;
 	}
 	rte_free(ptr9);
-	char *ptr11 = rte_realloc(ptr10, size11, RTE_CACHE_LINE_SIZE);
+	char *ptr11 = rte_realloc_socket(
+			ptr10, size11, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr11){
 		printf("NULL pointer returned from rte_realloc\n");
 		rte_free(ptr10);
@@ -624,7 +537,8 @@ test_realloc(void)
 	 * We should get a malloc of the size requested*/
 	const size_t size12 = 1024;
 	size_t size12_check;
-	char *ptr12 = rte_realloc(NULL, size12, RTE_CACHE_LINE_SIZE);
+	char *ptr12 = rte_realloc_socket(
+			NULL, size12, RTE_CACHE_LINE_SIZE, socket);
 	if (!ptr12){
 		printf("NULL pointer returned from rte_realloc\n");
 		return -1;
@@ -635,11 +549,130 @@ test_realloc(void)
 		return -1;
 	}
 	rte_free(ptr12);
+
+	/* do the same, but for regular memory */
+	ptr12 = rte_realloc(NULL, size12, RTE_CACHE_LINE_SIZE);
+	if (!ptr12) {
+		printf("NULL pointer returned from rte_realloc\n");
+		return -1;
+	}
+	if (rte_malloc_validate(ptr12, &size12_check) < 0 ||
+			size12_check != size12) {
+		rte_free(ptr12);
+		return -1;
+	}
+	rte_free(ptr12);
+
 	return 0;
 }
 
 static int
-test_random_alloc_free(void *_ __attribute__((unused)))
+test_realloc_numa(void)
+{
+	/* check realloc_socket part */
+	int32_t socket_count = 0, socket_allocated, socket;
+	void *ptr1, *ptr2;
+	int ret = -1;
+	size_t size = 1024;
+
+	ptr1 = NULL;
+	for (socket = 0; socket < RTE_MAX_NUMA_NODES; socket++) {
+		if (is_mem_on_socket(socket)) {
+			int j = 2;
+
+			socket_count++;
+			while (j--) {
+				/* j == 1 -> resizing */
+				ptr2 = rte_realloc_socket(ptr1, size,
+							  RTE_CACHE_LINE_SIZE,
+							  socket);
+				if (ptr2 == NULL) {
+					printf("NULL pointer returned from rte_realloc_socket\n");
+					goto end;
+				}
+
+				ptr1 = ptr2;
+				socket_allocated = addr_to_socket(ptr2);
+				if (socket_allocated != socket) {
+					printf("Requested socket (%d) doesn't mach allocated one (%d)\n",
+					       socket, socket_allocated);
+					goto end;
+				}
+				size += RTE_CACHE_LINE_SIZE;
+			}
+		}
+	}
+
+	/* Print warnign if only a single socket, but don't fail the test */
+	if (socket_count < 2)
+		printf("WARNING: realloc_socket test needs memory on multiple sockets!\n");
+
+	ret = 0;
+end:
+	rte_free(ptr1);
+	return ret;
+}
+
+static int
+test_realloc(void)
+{
+	const char *heap_name = "realloc_heap";
+	int realloc_heap_socket;
+	unsigned int mem_sz = 1U << 13; /* 8K */
+	unsigned int page_sz = sysconf(_SC_PAGESIZE);
+	void *mem;
+	int ret;
+
+	/* page size may be bigger than total mem size, so adjust */
+	mem_sz = RTE_MAX(mem_sz, page_sz);
+
+	/*
+	 * the realloc tests depend on specific layout of underlying memory, so
+	 * to prevent accidental failures to do fragmented main heap, we will
+	 * do all of our tests on an artificially created memory.
+	 */
+	if (rte_malloc_heap_create(heap_name) != 0) {
+		printf("Failed to create external heap\n");
+		ret = -1;
+		goto end;
+	}
+	realloc_heap_socket = rte_malloc_heap_get_socket(heap_name);
+
+	mem = mmap(NULL, mem_sz, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mem == MAP_FAILED) {
+		printf("Failed to allocate memory for external heap\n");
+		ret = -1;
+		goto heap_destroy;
+	}
+
+	if (rte_malloc_heap_memory_add(
+			heap_name, mem, mem_sz, NULL, 0, page_sz) != 0) {
+		printf("Failed to add memory to external heap\n");
+		ret = -1;
+		goto mem_free;
+	}
+
+	/* run the socket-bound tests */
+	ret = test_realloc_socket(realloc_heap_socket);
+	if (ret != 0)
+		goto mem_remove;
+
+	/* now, run the NUMA node tests */
+	ret = test_realloc_numa();
+
+mem_remove:
+	rte_malloc_heap_memory_remove(heap_name, mem, mem_sz);
+mem_free:
+	munmap(mem, mem_sz);
+heap_destroy:
+	rte_malloc_heap_destroy(heap_name);
+end:
+	return ret;
+}
+
+static int
+test_random_alloc_free(void *_ __rte_unused)
 {
 	struct mem_list {
 		struct mem_list *next;
@@ -698,7 +731,7 @@ test_rte_malloc_validate(void)
 	const size_t request_size = 1024;
 	size_t allocated_size;
 	char *data_ptr = rte_malloc(NULL, request_size, RTE_CACHE_LINE_SIZE);
-#ifdef RTE_LIBRTE_MALLOC_DEBUG
+#ifdef RTE_MALLOC_DEBUG
 	int retval;
 	char *over_write_vals = NULL;
 #endif
@@ -720,7 +753,7 @@ test_rte_malloc_validate(void)
 	if (allocated_size < request_size)
 		err_return();
 
-#ifdef RTE_LIBRTE_MALLOC_DEBUG
+#ifdef RTE_MALLOC_DEBUG
 
 	/****** change the header to be bad */
 	char save_buf[64];
@@ -795,11 +828,33 @@ test_malloc_bad_params(void)
 	if (bad_ptr != NULL)
 		goto err_return;
 
+	/* rte_realloc expected to return null with inappropriate size */
+	bad_ptr = rte_realloc(NULL, size, align);
+	if (bad_ptr != NULL)
+		goto err_return;
+
 	/* rte_malloc expected to return null with inappropriate alignment */
 	align = 17;
 	size = 1024;
 
 	bad_ptr = rte_malloc(type, size, align);
+	if (bad_ptr != NULL)
+		goto err_return;
+
+	/* rte_realloc expected to return null with inappropriate alignment */
+	bad_ptr = rte_realloc(NULL, size, align);
+	if (bad_ptr != NULL)
+		goto err_return;
+
+	/* rte_malloc expected to return null with size will cause overflow */
+	align = RTE_CACHE_LINE_SIZE;
+	size = (size_t)-8;
+
+	bad_ptr = rte_malloc(type, size, align);
+	if (bad_ptr != NULL)
+		goto err_return;
+
+	bad_ptr = rte_realloc(NULL, size, align);
 	if (bad_ptr != NULL)
 		goto err_return;
 
@@ -812,19 +867,24 @@ err_return:
 	return -1;
 }
 
-/* Check if memory is avilable on a specific socket */
+static int
+check_socket_mem(const struct rte_memseg_list *msl, void *arg)
+{
+	int32_t *socket = arg;
+
+	if (msl->external)
+		return 0;
+
+	return *socket == msl->socket_id;
+}
+
+/* Check if memory is available on a specific socket */
 static int
 is_mem_on_socket(int32_t socket)
 {
-	const struct rte_memseg *ms = rte_eal_get_physmem_layout();
-	unsigned i;
-
-	for (i = 0; i < RTE_MAX_MEMSEG; i++) {
-		if (socket == ms[i].socket_id)
-			return 1;
-	}
-	return 0;
+	return rte_memseg_list_walk(check_socket_mem, &socket);
 }
+
 
 /*
  * Find what socket a memory address is on. Only works for addresses within
@@ -833,16 +893,9 @@ is_mem_on_socket(int32_t socket)
 static int32_t
 addr_to_socket(void * addr)
 {
-	const struct rte_memseg *ms = rte_eal_get_physmem_layout();
-	unsigned i;
+	const struct rte_memseg *ms = rte_mem_virt2memseg(addr, NULL);
+	return ms == NULL ? -1 : ms->socket_id;
 
-	for (i = 0; i < RTE_MAX_MEMSEG; i++) {
-		if ((ms[i].addr <= addr) &&
-				((uintptr_t)addr <
-				((uintptr_t)ms[i].addr + (uintptr_t)ms[i].len)))
-			return ms[i].socket_id;
-	}
-	return -1;
 }
 
 /* Test using rte_[c|m|zm]alloc_socket() on a specific socket */
@@ -935,18 +988,6 @@ test_malloc(void)
 	}
 	else printf("test_str_to_size() passed\n");
 
-	if (test_memzone_size_alloc() < 0){
-		printf("test_memzone_size_alloc() failed\n");
-		return -1;
-	}
-	else printf("test_memzone_size_alloc() passed\n");
-
-	if (test_big_alloc() < 0){
-		printf("test_big_alloc() failed\n");
-		return -1;
-	}
-	else printf("test_big_alloc() passed\n");
-
 	if (test_zero_aligned_alloc() < 0){
 		printf("test_zero_aligned_alloc() failed\n");
 		return -1;
@@ -1011,15 +1052,6 @@ test_malloc(void)
 	else printf("test_random_alloc_free() passed\n");
 
 	/*----------------------------*/
-	ret = test_rte_malloc_type_limits();
-	if (ret < 0){
-		printf("test_rte_malloc_type_limits() failed\n");
-		return ret;
-	}
-	/* TODO: uncomment following line once type limits are valid */
-	/*else printf("test_rte_malloc_type_limits() passed\n");*/
-
-	/*----------------------------*/
 	ret = test_rte_malloc_validate();
 	if (ret < 0){
 		printf("test_rte_malloc_validate() failed\n");
@@ -1045,8 +1077,4 @@ test_malloc(void)
 	return 0;
 }
 
-static struct test_command malloc_cmd = {
-	.command = "malloc_autotest",
-	.callback = test_malloc,
-};
-REGISTER_TEST_COMMAND(malloc_cmd);
+REGISTER_TEST_COMMAND(malloc_autotest, test_malloc);

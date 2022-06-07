@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2015 Intel Corporation
  */
 
 #ifndef RTE_ETH_BOND_ALB_H_
@@ -42,23 +13,23 @@
 
 struct client_data {
 	/** ARP data of single client */
-	struct ether_addr app_mac;
+	struct rte_ether_addr app_mac;
 	/**< MAC address of application running DPDK */
 	uint32_t app_ip;
 	/**< IP address of application running DPDK */
-	struct ether_addr cli_mac;
+	struct rte_ether_addr cli_mac;
 	/**< Client MAC address */
 	uint32_t cli_ip;
 	/**< Client IP address */
 
-	uint8_t slave_idx;
+	uint16_t slave_idx;
 	/**< Index of slave on which we connect with that client */
 	uint8_t in_use;
 	/**< Flag indicating if entry in client table is currently used */
 	uint8_t ntt;
 	/**< Flag indicating if we need to send update to this client on next tx */
 
-	struct vlan_hdr vlan[2];
+	struct rte_vlan_hdr vlan[2];
 	/**< Content of vlan headers */
 	uint8_t vlan_count;
 	/**< Number of nested vlan headers */
@@ -97,7 +68,7 @@ bond_mode_alb_enable(struct rte_eth_dev *bond_dev);
  * @param internals		Bonding data.
  */
 void
-bond_mode_alb_arp_recv(struct ether_hdr *eth_h, uint16_t offset,
+bond_mode_alb_arp_recv(struct rte_ether_hdr *eth_h, uint16_t offset,
 		struct bond_dev_private *internals);
 
 /**
@@ -113,8 +84,8 @@ bond_mode_alb_arp_recv(struct ether_hdr *eth_h, uint16_t offset,
  * @return
  * Index of slave on which packet should be sent.
  */
-uint8_t
-bond_mode_alb_arp_xmit(struct ether_hdr *eth_h, uint16_t offset,
+uint16_t
+bond_mode_alb_arp_xmit(struct rte_ether_hdr *eth_h, uint16_t offset,
 		struct bond_dev_private *internals);
 
 /**
@@ -127,7 +98,7 @@ bond_mode_alb_arp_xmit(struct ether_hdr *eth_h, uint16_t offset,
  * @return
  * Index of slawe on which packet should be sent.
  */
-uint8_t
+uint16_t
 bond_mode_alb_arp_upd(struct client_data *client_info,
 		struct rte_mbuf *pkt, struct bond_dev_private *internals);
 

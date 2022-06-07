@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 IPv4 Multicast Sample Application
 =================================
@@ -39,8 +12,7 @@ Overview
 --------
 
 The application demonstrates the use of zero-copy buffers for packet forwarding.
-The initialization and run-time paths are very similar to those of the L2 forwarding application
-(see Chapter 9 "L2 Forwarding Sample Application (in Real and Virtualized Environments)" for details more information).
+The initialization and run-time paths are very similar to those of the :doc:`l2_forward_real_virtual`.
 This guide highlights the differences between the two applications.
 There are two key differences from the L2 Forwarding sample application:
 
@@ -52,43 +24,24 @@ The lookup method is the Four-byte Key (FBK) hash-based method.
 The lookup table is composed of pairs of destination IPv4 address (the FBK)
 and a port mask associated with that IPv4 address.
 
+.. note::
+
+    The max port mask supported in the given hash table is 0xf, so only first
+    four ports can be supported.
+    If using non-consecutive ports, use the destination IPv4 address accordingly.
+
 For convenience and simplicity, this sample application does not take IANA-assigned multicast addresses into account,
 but instead equates the last four bytes of the multicast group (that is, the last four bytes of the destination IP address)
 with the mask of ports to multicast packets to.
 Also, the application does not consider the Ethernet addresses;
 it looks only at the IPv4 destination address for any given packet.
 
-Building the Application
-------------------------
+Compiling the Application
+-------------------------
 
-To compile the application:
+To compile the sample application see :doc:`compiling`.
 
-#.  Go to the sample application directory:
-
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk
-        cd ${RTE_SDK}/examples/ipv4_multicast
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-See the *DPDK Getting Started Guide* for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
-
-.. note::
-
-    The compiled application is written to the build subdirectory.
-    To have the application written to a different location,
-    the O=/path/to/build/directory option may be specified in the make command.
+The application is located in the ``ipv4_multicast`` sub-directory.
 
 Running the Application
 -----------------------
@@ -114,11 +67,11 @@ Typically, to run the IPv4 Multicast sample application, issue the following com
 
 .. code-block:: console
 
-    ./build/ipv4_multicast -c 0x00f -n 3 -- -p 0x3 -q 1
+    ./build/ipv4_multicast -l 0-3 -n 3 -- -p 0x3 -q 1
 
 In this command:
 
-*   The -c option enables cores 0, 1, 2 and 3
+*   The -l option enables cores 0, 1, 2 and 3
 
 *   The -n option specifies 3 memory channels
 
@@ -134,8 +87,7 @@ Explanation
 
 The following sections provide some explanation of the code.
 As mentioned in the overview section,
-the initialization and run-time paths are very similar to those of the L2 Forwarding sample application
-(see Chapter 9 "L2 Forwarding Sample Application in Real and Virtualized Environments" for more information).
+the initialization and run-time paths are very similar to those of the :doc:`l2_forward_real_virtual`.
 The following sections describe aspects that are specific to the IPv4 Multicast sample application.
 
 Memory Pool Initialization
@@ -147,12 +99,12 @@ Memory pools for indirect buffers are initialized differently from the memory po
 
 .. code-block:: c
 
-    packet_pool = rte_mempool_create("packet_pool", NB_PKT_MBUF, PKT_MBUF_SIZE, 32, sizeof(struct rte_pktmbuf_pool_private),
-                                     rte_pktmbuf_pool_init, NULL, rte_pktmbuf_init, NULL, rte_socket_id(), 0);
-
-    header_pool = rte_mempool_create("header_pool", NB_HDR_MBUF, HDR_MBUF_SIZE, 32, 0, NULL, NULL, rte_pktmbuf_init, NULL, rte_socket_id(), 0);
-    clone_pool = rte_mempool_create("clone_pool", NB_CLONE_MBUF,
-    CLONE_MBUF_SIZE, 32, 0, NULL, NULL, rte_pktmbuf_init, NULL, rte_socket_id(), 0);
+    packet_pool = rte_pktmbuf_pool_create("packet_pool", NB_PKT_MBUF, 32,
+			0, PKT_MBUF_DATA_SIZE, rte_socket_id());
+    header_pool = rte_pktmbuf_pool_create("header_pool", NB_HDR_MBUF, 32,
+			0, HDR_MBUF_DATA_SIZE, rte_socket_id());
+    clone_pool = rte_pktmbuf_pool_create("clone_pool", NB_CLONE_MBUF, 32,
+			0, 0, rte_socket_id());
 
 The reason for this is because indirect buffers are not supposed to hold any packet data and
 therefore can be initialized with lower amount of reserved memory for each buffer.
@@ -194,8 +146,8 @@ Firstly, the Ethernet* header is removed from the packet and the IPv4 address is
 
     /* Remove the Ethernet header from the input packet */
 
-    iphdr = (struct ipv4_hdr *)rte_pktmbuf_adj(m, sizeof(struct ether_hdr));
-    RTE_MBUF_ASSERT(iphdr != NULL);
+    iphdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(m, sizeof(struct rte_ether_hdr));
+    RTE_ASSERT(iphdr != NULL);
     dest_addr = rte_be_to_cpu_32(iphdr->dst_addr);
 
 Then, the packet is checked to see if it has a multicast destination address and
@@ -203,7 +155,7 @@ if the routing table has any ports assigned to the destination address:
 
 .. code-block:: c
 
-    if (!IS_IPV4_MCAST(dest_addr) ||
+    if (!RTE_IS_IPV4_MCAST(dest_addr) ||
        (hash = rte_fbk_hash_lookup(mcast_hash, dest_addr)) <= 0 ||
        (port_mask = hash & enabled_port_mask) == 0) {
            rte_pktmbuf_free(m);
@@ -222,7 +174,7 @@ Then, the number of ports in the destination portmask is calculated with the hel
 
         for (n = 0; v != 0; v &= v - 1, n++)
            ;
-        return (n);
+        return n;
     }
 
 This is done to determine which forwarding algorithm to use.
@@ -264,20 +216,20 @@ The actual packet transmission is done in the mcast_send_pkt() function:
 
 .. code-block:: c
 
-    static inline void mcast_send_pkt(struct rte_mbuf *pkt, struct ether_addr *dest_addr, struct lcore_queue_conf *qconf, uint8_t port)
+    static inline void mcast_send_pkt(struct rte_mbuf *pkt, struct rte_ether_addr *dest_addr, struct lcore_queue_conf *qconf, uint16_t port)
     {
-        struct ether_hdr *ethdr;
+        struct rte_ether_hdr *ethdr;
         uint16_t len;
 
         /* Construct Ethernet header. */
 
-        ethdr = (struct ether_hdr *)rte_pktmbuf_prepend(pkt, (uint16_t) sizeof(*ethdr));
+        ethdr = (struct rte_ether_hdr *)rte_pktmbuf_prepend(pkt, (uint16_t) sizeof(*ethdr));
 
-        RTE_MBUF_ASSERT(ethdr != NULL);
+        RTE_ASSERT(ethdr != NULL);
 
-        ether_addr_copy(dest_addr, &ethdr->d_addr);
-        ether_addr_copy(&ports_eth_addr[port], &ethdr->s_addr);
-        ethdr->ether_type = rte_be_to_cpu_16(ETHER_TYPE_IPv4);
+        rte_ether_addr_copy(dest_addr, &ethdr->d_addr);
+        rte_ether_addr_copy(&ports_eth_addr[port], &ethdr->s_addr);
+        ethdr->ether_type = rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4);
 
         /* Put new packet into the output queue */
 
@@ -344,13 +296,13 @@ It is the mcast_out_pkt() function that performs the packet duplication (either 
         /* Create new mbuf for the header. */
 
         if (unlikely ((hdr = rte_pktmbuf_alloc(header_pool)) == NULL))
-            return (NULL);
+            return NULL;
 
         /* If requested, then make a new clone packet. */
 
         if (use_clone != 0 && unlikely ((pkt = rte_pktmbuf_clone(pkt, clone_pool)) == NULL)) {
             rte_pktmbuf_free(hdr);
-            return (NULL);
+            return NULL;
         }
 
         /* prepend new header */
@@ -360,15 +312,14 @@ It is the mcast_out_pkt() function that performs the packet duplication (either 
         /* update header's fields */
 
         hdr->pkt.pkt_len = (uint16_t)(hdr->pkt.data_len + pkt->pkt.pkt_len);
-        hdr->pkt.nb_segs = (uint8_t)(pkt->pkt.nb_segs + 1);
+        hdr->pkt.nb_segs = pkt->pkt.nb_segs + 1;
 
         /* copy metadata from source packet */
 
         hdr->pkt.in_port = pkt->pkt.in_port;
         hdr->pkt.vlan_macip = pkt->pkt.vlan_macip;
         hdr->pkt.hash = pkt->pkt.hash;
-        hdr->ol_flags = pkt->ol_flags;
         rte_mbuf_sanity_check(hdr, RTE_MBUF_PKT, 1);
 
-        return (hdr);
+        return hdr;
     }

@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #include <signal.h>
@@ -39,13 +10,14 @@
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
+#include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
 #include <rte_reorder.h>
 
-#define RX_DESC_PER_QUEUE 128
-#define TX_DESC_PER_QUEUE 512
+#define RX_DESC_PER_QUEUE 1024
+#define TX_DESC_PER_QUEUE 1024
 
 #define MAX_PKTS_BURST 32
 #define REORDER_BUFFER_SIZE 8192
@@ -54,22 +26,12 @@
 
 #define RING_SIZE 16384
 
-/* uncommnet below line to enable debug logs */
-/* #define DEBUG */
-
-#ifdef DEBUG
-#define LOG_LEVEL RTE_LOG_DEBUG
-#define LOG_DEBUG(log_type, fmt, args...) RTE_LOG(DEBUG, log_type, fmt, ##args)
-#else
-#define LOG_LEVEL RTE_LOG_INFO
-#define LOG_DEBUG(log_type, fmt, args...) do {} while (0)
-#endif
-
 /* Macros for printing using RTE_LOG */
 #define RTE_LOGTYPE_REORDERAPP          RTE_LOGTYPE_USER1
 
 unsigned int portmask;
 unsigned int disable_reorder;
+unsigned int insight_worker;
 volatile uint8_t quit_signal;
 
 static struct rte_mempool *mbuf_pool;
@@ -84,11 +46,6 @@ struct worker_thread_args {
 struct send_thread_args {
 	struct rte_ring *ring_in;
 	struct rte_reorder_buffer *buffer;
-};
-
-struct output_buffer {
-	unsigned count;
-	struct rte_mbuf *mbufs[MAX_PKTS_BURST];
 };
 
 volatile struct app_stats {
@@ -115,6 +72,14 @@ volatile struct app_stats {
 	} tx __rte_cache_aligned;
 } app_stats;
 
+/* per worker lcore stats */
+struct wkr_stats_per {
+		uint64_t deq_pkts;
+		uint64_t enq_pkts;
+		uint64_t enq_failed_pkts;
+} __rte_cache_aligned;
+
+static struct wkr_stats_per wkr_stats[RTE_MAX_LCORE] = { {0} };
 /**
  * Get the last enabled lcore ID
  *
@@ -178,10 +143,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -196,6 +158,7 @@ parse_args(int argc, char **argv)
 	char *prgname = argv[0];
 	static struct option lgopts[] = {
 		{"disable-reorder", 0, 0, 0},
+		{"insight-worker", 0, 0, 0},
 		{NULL, 0, 0, 0}
 	};
 
@@ -219,6 +182,11 @@ parse_args(int argc, char **argv)
 				printf("reorder disabled\n");
 				disable_reorder = 1;
 			}
+			if (!strcmp(lgopts[option_index].name,
+						"insight-worker")) {
+				printf("print all worker statistics\n");
+				insight_worker = 1;
+			}
 			break;
 		default:
 			print_usage(prgname);
@@ -231,37 +199,118 @@ parse_args(int argc, char **argv)
 	}
 
 	argv[optind-1] = prgname;
-	optind = 0; /* reset getopt lib */
+	optind = 1; /* reset getopt lib */
+	return 0;
+}
+
+/*
+ * Tx buffer error callback
+ */
+static void
+flush_tx_error_callback(struct rte_mbuf **unsent, uint16_t count,
+		void *userdata __rte_unused) {
+
+	/* free the mbufs which failed from transmit */
+	app_stats.tx.ro_tx_failed_pkts += count;
+	RTE_LOG_DP(DEBUG, REORDERAPP, "%s:Packet loss with tx_burst\n", __func__);
+	pktmbuf_free_bulk(unsent, count);
+
+}
+
+static inline int
+free_tx_buffers(struct rte_eth_dev_tx_buffer *tx_buffer[]) {
+	uint16_t port_id;
+
+	/* initialize buffers for all ports */
+	RTE_ETH_FOREACH_DEV(port_id) {
+		/* skip ports that are not enabled */
+		if ((portmask & (1 << port_id)) == 0)
+			continue;
+
+		rte_free(tx_buffer[port_id]);
+	}
 	return 0;
 }
 
 static inline int
-configure_eth_port(uint8_t port_id)
+configure_tx_buffers(struct rte_eth_dev_tx_buffer *tx_buffer[])
 {
-	struct ether_addr addr;
+	uint16_t port_id;
+	int ret;
+
+	/* initialize buffers for all ports */
+	RTE_ETH_FOREACH_DEV(port_id) {
+		/* skip ports that are not enabled */
+		if ((portmask & (1 << port_id)) == 0)
+			continue;
+
+		/* Initialize TX buffers */
+		tx_buffer[port_id] = rte_zmalloc_socket("tx_buffer",
+				RTE_ETH_TX_BUFFER_SIZE(MAX_PKTS_BURST), 0,
+				rte_eth_dev_socket_id(port_id));
+		if (tx_buffer[port_id] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n",
+				 port_id);
+
+		rte_eth_tx_buffer_init(tx_buffer[port_id], MAX_PKTS_BURST);
+
+		ret = rte_eth_tx_buffer_set_err_callback(tx_buffer[port_id],
+				flush_tx_error_callback, NULL);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+			"Cannot set error callback for tx buffer on port %u\n",
+				 port_id);
+	}
+	return 0;
+}
+
+static inline int
+configure_eth_port(uint16_t port_id)
+{
+	struct rte_ether_addr addr;
 	const uint16_t rxRings = 1, txRings = 1;
-	const uint8_t nb_ports = rte_eth_dev_count();
 	int ret;
 	uint16_t q;
+	uint16_t nb_rxd = RX_DESC_PER_QUEUE;
+	uint16_t nb_txd = TX_DESC_PER_QUEUE;
+	struct rte_eth_dev_info dev_info;
+	struct rte_eth_txconf txconf;
+	struct rte_eth_conf port_conf = port_conf_default;
 
-	if (port_id > nb_ports)
+	if (!rte_eth_dev_is_valid_port(port_id))
 		return -1;
 
+	ret = rte_eth_dev_info_get(port_id, &dev_info);
+	if (ret != 0) {
+		printf("Error during getting device (port %u) info: %s\n",
+				port_id, strerror(-ret));
+		return ret;
+	}
+
+	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+		port_conf.txmode.offloads |=
+			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
 	ret = rte_eth_dev_configure(port_id, rxRings, txRings, &port_conf_default);
 	if (ret != 0)
 		return ret;
 
+	ret = rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd, &nb_txd);
+	if (ret != 0)
+		return ret;
+
 	for (q = 0; q < rxRings; q++) {
-		ret = rte_eth_rx_queue_setup(port_id, q, RX_DESC_PER_QUEUE,
+		ret = rte_eth_rx_queue_setup(port_id, q, nb_rxd,
 				rte_eth_dev_socket_id(port_id), NULL,
 				mbuf_pool);
 		if (ret < 0)
 			return ret;
 	}
 
+	txconf = dev_info.default_txconf;
+	txconf.offloads = port_conf.txmode.offloads;
 	for (q = 0; q < txRings; q++) {
-		ret = rte_eth_tx_queue_setup(port_id, q, TX_DESC_PER_QUEUE,
-				rte_eth_dev_socket_id(port_id), NULL);
+		ret = rte_eth_tx_queue_setup(port_id, q, nb_txd,
+				rte_eth_dev_socket_id(port_id), &txconf);
 		if (ret < 0)
 			return ret;
 	}
@@ -270,15 +319,23 @@ configure_eth_port(uint8_t port_id)
 	if (ret < 0)
 		return ret;
 
-	rte_eth_macaddr_get(port_id, &addr);
+	ret = rte_eth_macaddr_get(port_id, &addr);
+	if (ret != 0) {
+		printf("Failed to get MAC address (port %u): %s\n",
+				port_id, rte_strerror(-ret));
+		return ret;
+	}
+
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
-			(unsigned)port_id,
+			port_id,
 			addr.addr_bytes[0], addr.addr_bytes[1],
 			addr.addr_bytes[2], addr.addr_bytes[3],
 			addr.addr_bytes[4], addr.addr_bytes[5]);
 
-	rte_eth_promiscuous_enable(port_id);
+	ret = rte_eth_promiscuous_enable(port_id);
+	if (ret != 0)
+		return ret;
 
 	return 0;
 }
@@ -286,15 +343,39 @@ configure_eth_port(uint8_t port_id)
 static void
 print_stats(void)
 {
-	const uint8_t nb_ports = rte_eth_dev_count();
-	unsigned i;
+	uint16_t i;
 	struct rte_eth_stats eth_stats;
+	unsigned int lcore_id, last_lcore_id, master_lcore_id, end_w_lcore_id;
+
+	last_lcore_id   = get_last_lcore_id();
+	master_lcore_id = rte_get_master_lcore();
+	end_w_lcore_id  = get_previous_lcore_id(last_lcore_id);
 
 	printf("\nRX thread stats:\n");
 	printf(" - Pkts rxd:				%"PRIu64"\n",
 						app_stats.rx.rx_pkts);
 	printf(" - Pkts enqd to workers ring:		%"PRIu64"\n",
 						app_stats.rx.enqueue_pkts);
+
+	for (lcore_id = 0; lcore_id <= end_w_lcore_id; lcore_id++) {
+		if (insight_worker
+			&& rte_lcore_is_enabled(lcore_id)
+			&& lcore_id != master_lcore_id) {
+			printf("\nWorker thread stats on core [%u]:\n",
+					lcore_id);
+			printf(" - Pkts deqd from workers ring:		%"PRIu64"\n",
+					wkr_stats[lcore_id].deq_pkts);
+			printf(" - Pkts enqd to tx ring:		%"PRIu64"\n",
+					wkr_stats[lcore_id].enq_pkts);
+			printf(" - Pkts enq to tx failed:		%"PRIu64"\n",
+					wkr_stats[lcore_id].enq_failed_pkts);
+		}
+
+		app_stats.wkr.dequeue_pkts += wkr_stats[lcore_id].deq_pkts;
+		app_stats.wkr.enqueue_pkts += wkr_stats[lcore_id].enq_pkts;
+		app_stats.wkr.enqueue_failed_pkts +=
+			wkr_stats[lcore_id].enq_failed_pkts;
+	}
 
 	printf("\nWorker thread stats:\n");
 	printf(" - Pkts deqd from workers ring:		%"PRIu64"\n",
@@ -316,7 +397,7 @@ print_stats(void)
 	printf(" - Pkts tx failed w/o reorder:		%"PRIu64"\n",
 						app_stats.tx.early_pkts_tx_failed_woro);
 
-	for (i = 0; i < nb_ports; i++) {
+	RTE_ETH_FOREACH_DEV(i) {
 		rte_eth_stats_get(i, &eth_stats);
 		printf("\nPort %u stats:\n", i);
 		printf(" - Pkts in:   %"PRIu64"\n", eth_stats.ipackets);
@@ -344,11 +425,10 @@ int_handler(int sig_num)
 static int
 rx_thread(struct rte_ring *ring_out)
 {
-	const uint8_t nb_ports = rte_eth_dev_count();
 	uint32_t seqn = 0;
 	uint16_t i, ret = 0;
 	uint16_t nb_rx_pkts;
-	uint8_t port_id;
+	uint16_t port_id;
 	struct rte_mbuf *pkts[MAX_PKTS_BURST];
 
 	RTE_LOG(INFO, REORDERAPP, "%s() started on lcore %u\n", __func__,
@@ -356,14 +436,14 @@ rx_thread(struct rte_ring *ring_out)
 
 	while (!quit_signal) {
 
-		for (port_id = 0; port_id < nb_ports; port_id++) {
+		RTE_ETH_FOREACH_DEV(port_id) {
 			if ((portmask & (1 << port_id)) != 0) {
 
 				/* receive packets */
 				nb_rx_pkts = rte_eth_rx_burst(port_id, 0,
 								pkts, MAX_PKTS_BURST);
 				if (nb_rx_pkts == 0) {
-					LOG_DEBUG(REORDERAPP,
+					RTE_LOG_DP(DEBUG, REORDERAPP,
 					"%s():Received zero packets\n",	__func__);
 					continue;
 				}
@@ -374,8 +454,8 @@ rx_thread(struct rte_ring *ring_out)
 					pkts[i++]->seqn = seqn++;
 
 				/* enqueue to rx_to_workers ring */
-				ret = rte_ring_enqueue_burst(ring_out, (void *) pkts,
-								nb_rx_pkts);
+				ret = rte_ring_enqueue_burst(ring_out,
+						(void *)pkts, nb_rx_pkts, NULL);
 				app_stats.rx.enqueue_pkts += ret;
 				if (unlikely(ret < nb_rx_pkts)) {
 					app_stats.rx.enqueue_failed_pkts +=
@@ -396,62 +476,47 @@ rx_thread(struct rte_ring *ring_out)
 static int
 worker_thread(void *args_ptr)
 {
-	const uint8_t nb_ports = rte_eth_dev_count();
+	const uint16_t nb_ports = rte_eth_dev_count_avail();
 	uint16_t i, ret = 0;
 	uint16_t burst_size = 0;
 	struct worker_thread_args *args;
 	struct rte_mbuf *burst_buffer[MAX_PKTS_BURST] = { NULL };
 	struct rte_ring *ring_in, *ring_out;
 	const unsigned xor_val = (nb_ports > 1);
+	unsigned int core_id = rte_lcore_id();
 
 	args = (struct worker_thread_args *) args_ptr;
 	ring_in  = args->ring_in;
 	ring_out = args->ring_out;
 
 	RTE_LOG(INFO, REORDERAPP, "%s() started on lcore %u\n", __func__,
-							rte_lcore_id());
+							core_id);
 
 	while (!quit_signal) {
 
 		/* dequeue the mbufs from rx_to_workers ring */
 		burst_size = rte_ring_dequeue_burst(ring_in,
-				(void *)burst_buffer, MAX_PKTS_BURST);
+				(void *)burst_buffer, MAX_PKTS_BURST, NULL);
 		if (unlikely(burst_size == 0))
 			continue;
 
-		__sync_fetch_and_add(&app_stats.wkr.dequeue_pkts, burst_size);
+		wkr_stats[core_id].deq_pkts += burst_size;
 
 		/* just do some operation on mbuf */
 		for (i = 0; i < burst_size;)
 			burst_buffer[i++]->port ^= xor_val;
 
 		/* enqueue the modified mbufs to workers_to_tx ring */
-		ret = rte_ring_enqueue_burst(ring_out, (void *)burst_buffer, burst_size);
-		__sync_fetch_and_add(&app_stats.wkr.enqueue_pkts, ret);
+		ret = rte_ring_enqueue_burst(ring_out, (void *)burst_buffer,
+				burst_size, NULL);
+		wkr_stats[core_id].enq_pkts += ret;
 		if (unlikely(ret < burst_size)) {
 			/* Return the mbufs to their respective pool, dropping packets */
-			__sync_fetch_and_add(&app_stats.wkr.enqueue_failed_pkts,
-					(int)burst_size - ret);
+			wkr_stats[core_id].enq_failed_pkts += burst_size - ret;
 			pktmbuf_free_bulk(&burst_buffer[ret], burst_size - ret);
 		}
 	}
 	return 0;
-}
-
-static inline void
-flush_one_port(struct output_buffer *outbuf, uint8_t outp)
-{
-	unsigned nb_tx = rte_eth_tx_burst(outp, 0, outbuf->mbufs,
-			outbuf->count);
-	app_stats.tx.ro_tx_pkts += nb_tx;
-
-	if (unlikely(nb_tx < outbuf->count)) {
-		/* free the mbufs which failed from transmit */
-		app_stats.tx.ro_tx_failed_pkts += (outbuf->count - nb_tx);
-		LOG_DEBUG(REORDERAPP, "%s:Packet loss with tx_burst\n", __func__);
-		pktmbuf_free_bulk(&outbuf->mbufs[nb_tx], outbuf->count - nb_tx);
-	}
-	outbuf->count = 0;
 }
 
 /**
@@ -465,17 +530,20 @@ send_thread(struct send_thread_args *args)
 	unsigned int i, dret;
 	uint16_t nb_dq_mbufs;
 	uint8_t outp;
-	static struct output_buffer tx_buffers[RTE_MAX_ETHPORTS];
+	unsigned sent;
 	struct rte_mbuf *mbufs[MAX_PKTS_BURST];
 	struct rte_mbuf *rombufs[MAX_PKTS_BURST] = {NULL};
+	static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
 
 	RTE_LOG(INFO, REORDERAPP, "%s() started on lcore %u\n", __func__, rte_lcore_id());
+
+	configure_tx_buffers(tx_buffer);
 
 	while (!quit_signal) {
 
 		/* deque the mbufs from workers_to_tx ring */
 		nb_dq_mbufs = rte_ring_dequeue_burst(args->ring_in,
-				(void *)mbufs, MAX_PKTS_BURST);
+				(void *)mbufs, MAX_PKTS_BURST, NULL);
 
 		if (unlikely(nb_dq_mbufs == 0))
 			continue;
@@ -488,7 +556,8 @@ send_thread(struct send_thread_args *args)
 
 			if (ret == -1 && rte_errno == ERANGE) {
 				/* Too early pkts should be transmitted out directly */
-				LOG_DEBUG(REORDERAPP, "%s():Cannot reorder early packet "
+				RTE_LOG_DP(DEBUG, REORDERAPP,
+						"%s():Cannot reorder early packet "
 						"direct enqueuing to TX\n", __func__);
 				outp = mbufs[i]->port;
 				if ((portmask & (1 << outp)) == 0) {
@@ -515,7 +584,7 @@ send_thread(struct send_thread_args *args)
 		dret = rte_reorder_drain(args->buffer, rombufs, MAX_PKTS_BURST);
 		for (i = 0; i < dret; i++) {
 
-			struct output_buffer *outbuf;
+			struct rte_eth_dev_tx_buffer *outbuf;
 			uint8_t outp1;
 
 			outp1 = rombufs[i]->port;
@@ -525,12 +594,15 @@ send_thread(struct send_thread_args *args)
 				continue;
 			}
 
-			outbuf = &tx_buffers[outp1];
-			outbuf->mbufs[outbuf->count++] = rombufs[i];
-			if (outbuf->count == MAX_PKTS_BURST)
-				flush_one_port(outbuf, outp1);
+			outbuf = tx_buffer[outp1];
+			sent = rte_eth_tx_buffer(outp1, 0, outbuf, rombufs[i]);
+			if (sent)
+				app_stats.tx.ro_tx_pkts += sent;
 		}
 	}
+
+	free_tx_buffers(tx_buffer);
+
 	return 0;
 }
 
@@ -542,17 +614,21 @@ tx_thread(struct rte_ring *ring_in)
 {
 	uint32_t i, dqnum;
 	uint8_t outp;
-	static struct output_buffer tx_buffers[RTE_MAX_ETHPORTS];
+	unsigned sent;
 	struct rte_mbuf *mbufs[MAX_PKTS_BURST];
-	struct output_buffer *outbuf;
+	struct rte_eth_dev_tx_buffer *outbuf;
+	static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
 
 	RTE_LOG(INFO, REORDERAPP, "%s() started on lcore %u\n", __func__,
 							rte_lcore_id());
+
+	configure_tx_buffers(tx_buffer);
+
 	while (!quit_signal) {
 
 		/* deque the mbufs from workers_to_tx ring */
 		dqnum = rte_ring_dequeue_burst(ring_in,
-				(void *)mbufs, MAX_PKTS_BURST);
+				(void *)mbufs, MAX_PKTS_BURST, NULL);
 
 		if (unlikely(dqnum == 0))
 			continue;
@@ -567,10 +643,10 @@ tx_thread(struct rte_ring *ring_in)
 				continue;
 			}
 
-			outbuf = &tx_buffers[outp];
-			outbuf->mbufs[outbuf->count++] = mbufs[i];
-			if (outbuf->count == MAX_PKTS_BURST)
-				flush_one_port(outbuf, outp);
+			outbuf = tx_buffer[outp];
+			sent = rte_eth_tx_buffer(outp, 0, outbuf, mbufs[i]);
+			if (sent)
+				app_stats.tx.ro_tx_pkts += sent;
 		}
 	}
 
@@ -583,8 +659,8 @@ main(int argc, char **argv)
 	int ret;
 	unsigned nb_ports;
 	unsigned int lcore_id, last_lcore_id, master_lcore_id;
-	uint8_t port_id;
-	uint8_t nb_ports_available;
+	uint16_t port_id;
+	uint16_t nb_ports_available;
 	struct worker_thread_args worker_args = {NULL, NULL};
 	struct send_thread_args send_args = {NULL, NULL};
 	struct rte_ring *rx_to_workers;
@@ -596,7 +672,7 @@ main(int argc, char **argv)
 	/* Initialize EAL */
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
-		return -1;
+		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 
 	argc -= ret;
 	argv += ret;
@@ -604,7 +680,7 @@ main(int argc, char **argv)
 	/* Parse the application specific arguments */
 	ret = parse_args(argc, argv);
 	if (ret < 0)
-		return -1;
+		rte_exit(EXIT_FAILURE, "Invalid packet_ordering arguments\n");
 
 	/* Check if we have enought cores */
 	if (rte_lcore_count() < 3)
@@ -614,7 +690,7 @@ main(int argc, char **argv)
 				"1 lcore for packet TX\n"
 				"and at least 1 lcore for worker threads\n");
 
-	nb_ports = rte_eth_dev_count();
+	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports == 0)
 		rte_exit(EXIT_FAILURE, "Error: no ethernet ports detected\n");
 	if (nb_ports != 1 && (nb_ports & 1))
@@ -630,7 +706,7 @@ main(int argc, char **argv)
 	nb_ports_available = nb_ports;
 
 	/* initialize all ports */
-	for (port_id = 0; port_id < nb_ports; port_id++) {
+	RTE_ETH_FOREACH_DEV(port_id) {
 		/* skip ports that are not enabled */
 		if ((portmask & (1 << port_id)) == 0) {
 			printf("\nSkipping disabled port %d\n", port_id);
@@ -638,7 +714,7 @@ main(int argc, char **argv)
 			continue;
 		}
 		/* init port */
-		printf("Initializing port %u... done\n", (unsigned) port_id);
+		printf("Initializing port %u... done\n", port_id);
 
 		if (configure_eth_port(port_id) != 0)
 			rte_exit(EXIT_FAILURE, "Cannot initialize port %"PRIu8"\n",

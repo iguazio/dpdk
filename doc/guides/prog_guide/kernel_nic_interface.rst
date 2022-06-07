@@ -1,32 +1,7 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2015 Intel Corporation.
 
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.. _kni:
 
 Kernel NIC Interface
 ====================
@@ -54,57 +29,233 @@ The components of an application using the DPDK Kernel NIC Interface are shown i
 The DPDK KNI Kernel Module
 --------------------------
 
-The KNI kernel loadable module provides support for two types of devices:
+The KNI kernel loadable module ``rte_kni`` provides the kernel interface
+for DPDK applications.
 
-*   A Miscellaneous device (/dev/kni) that:
+When the ``rte_kni`` module is loaded, it will create a device ``/dev/kni``
+that is used by the DPDK KNI API functions to control and communicate with
+the kernel module.
 
-    *   Creates net devices (via ioctl  calls).
+The ``rte_kni`` kernel module contains several optional parameters which
+can be specified when the module is loaded to control its behavior:
 
-    *   Maintains a kernel thread context shared by all KNI instances
-        (simulating the RX side of the net driver).
+.. code-block:: console
 
-    *   For single kernel thread mode, maintains a kernel thread context shared by all KNI instances
-        (simulating the RX side of the net driver).
+    # modinfo rte_kni.ko
+    <snip>
+    parm:           lo_mode: KNI loopback mode (default=lo_mode_none):
+                    lo_mode_none        Kernel loopback disabled
+                    lo_mode_fifo        Enable kernel loopback with fifo
+                    lo_mode_fifo_skb    Enable kernel loopback with fifo and skb buffer
+                     (charp)
+    parm:           kthread_mode: Kernel thread mode (default=single):
+                    single    Single kernel thread mode enabled.
+                    multiple  Multiple kernel thread mode enabled.
+                     (charp)
+    parm:           carrier: Default carrier state for KNI interface (default=off):
+                    off   Interfaces will be created with carrier state set to off.
+                    on    Interfaces will be created with carrier state set to on.
+                     (charp)
 
-    *   For multiple kernel thread mode, maintains a kernel thread context for each KNI instance
-        (simulating the RX side of the new driver).
+Loading the ``rte_kni`` kernel module without any optional parameters is
+the typical way a DPDK application gets packets into and out of the kernel
+network stack.  Without any parameters, only one kernel thread is created
+for all KNI devices for packet receiving in kernel side, loopback mode is
+disabled, and the default carrier state of KNI interfaces is set to *off*.
 
-*   Net device:
+.. code-block:: console
 
-    *   Net functionality provided by implementing several operations such as netdev_ops,
-        header_ops, ethtool_ops that are defined by struct net_device,
-        including support for DPDK mbufs and FIFOs.
+    # insmod kmod/rte_kni.ko
 
-    *   The interface name is provided from userspace.
+.. _kni_loopback_mode:
 
-    *   The MAC address can be the real NIC MAC address or random.
+Loopback Mode
+~~~~~~~~~~~~~
+
+For testing, the ``rte_kni`` kernel module can be loaded in loopback mode
+by specifying the ``lo_mode`` parameter:
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko lo_mode=lo_mode_fifo
+
+The ``lo_mode_fifo`` loopback option will loop back ring enqueue/dequeue
+operations in kernel space.
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko lo_mode=lo_mode_fifo_skb
+
+The ``lo_mode_fifo_skb`` loopback option will loop back ring enqueue/dequeue
+operations and sk buffer copies in kernel space.
+
+If the ``lo_mode`` parameter is not specified, loopback mode is disabled.
+
+.. _kni_kernel_thread_mode:
+
+Kernel Thread Mode
+~~~~~~~~~~~~~~~~~~
+
+To provide flexibility of performance, the ``rte_kni`` KNI kernel module
+can be loaded with the ``kthread_mode`` parameter.  The ``rte_kni`` kernel
+module supports two options: "single kernel thread" mode and "multiple
+kernel thread" mode.
+
+Single kernel thread mode is enabled as follows:
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko kthread_mode=single
+
+This mode will create only one kernel thread for all KNI interfaces to
+receive data on the kernel side.  By default, this kernel thread is not
+bound to any particular core, but the user can set the core affinity for
+this kernel thread by setting the ``core_id`` and ``force_bind`` parameters
+in ``struct rte_kni_conf`` when the first KNI interface is created:
+
+For optimum performance, the kernel thread should be bound to a core in
+on the same socket as the DPDK lcores used in the application.
+
+The KNI kernel module can also be configured to start a separate kernel
+thread for each KNI interface created by the DPDK application.  Multiple
+kernel thread mode is enabled as follows:
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko kthread_mode=multiple
+
+This mode will create a separate kernel thread for each KNI interface to
+receive data on the kernel side.  The core affinity of each ``kni_thread``
+kernel thread can be specified by setting the ``core_id`` and ``force_bind``
+parameters in ``struct rte_kni_conf`` when each KNI interface is created.
+
+Multiple kernel thread mode can provide scalable higher performance if
+sufficient unused cores are available on the host system.
+
+If the ``kthread_mode`` parameter is not specified, the "single kernel
+thread" mode is used.
+
+.. _kni_default_carrier_state:
+
+Default Carrier State
+~~~~~~~~~~~~~~~~~~~~~
+
+The default carrier state of KNI interfaces created by the ``rte_kni``
+kernel module is controlled via the ``carrier`` option when the module
+is loaded.
+
+If ``carrier=off`` is specified, the kernel module will leave the carrier
+state of the interface *down* when the interface is management enabled.
+The DPDK application can set the carrier state of the KNI interface using the
+``rte_kni_update_link()`` function.  This is useful for DPDK applications
+which require that the carrier state of the KNI interface reflect the
+actual link state of the corresponding physical NIC port.
+
+If ``carrier=on`` is specified, the kernel module will automatically set
+the carrier state of the interface to *up* when the interface is management
+enabled.  This is useful for DPDK applications which use the KNI interface as
+a purely virtual interface that does not correspond to any physical hardware
+and do not wish to explicitly set the carrier state of the interface with
+``rte_kni_update_link()``.  It is also useful for testing in loopback mode
+where the NIC port may not be physically connected to anything.
+
+To set the default carrier state to *on*:
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko carrier=on
+
+To set the default carrier state to *off*:
+
+.. code-block:: console
+
+    # insmod kmod/rte_kni.ko carrier=off
+
+If the ``carrier`` parameter is not specified, the default carrier state
+of KNI interfaces will be set to *off*.
 
 KNI Creation and Deletion
 -------------------------
 
-The KNI interfaces are created by a DPDK application dynamically.
-The interface name and FIFO details are provided by the application through an ioctl call
-using the rte_kni_device_info struct which contains:
+Before any KNI interfaces can be created, the ``rte_kni`` kernel module must
+be loaded into the kernel and configured withe ``rte_kni_init()`` function.
 
-*   The interface name.
+The KNI interfaces are created by a DPDK application dynamically via the
+``rte_kni_alloc()`` function.
 
-*   Physical addresses of the corresponding memzones for the relevant FIFOs.
+The ``struct rte_kni_conf`` structure contains fields which allow the
+user to specify the interface name, set the MTU size, set an explicit or
+random MAC address and control the affinity of the kernel Rx thread(s)
+(both single and multi-threaded modes).
+By default the KNI sample example gets the MTU from the matching device,
+and in case of KNI PMD it is derived from mbuf buffer length.
 
-*   Mbuf mempool details, both physical and virtual (to calculate the offset for mbuf pointers).
+The ``struct rte_kni_ops`` structure contains pointers to functions to
+handle requests from the ``rte_kni`` kernel module.  These functions
+allow DPDK applications to perform actions when the KNI interfaces are
+manipulated by control commands or functions external to the application.
 
-*   PCI information.
+For example, the DPDK application may wish to enabled/disable a physical
+NIC port when a user enabled/disables a KNI interface with ``ip link set
+[up|down] dev <ifaceX>``.  The DPDK application can register a callback for
+``config_network_if`` which will be called when the interface management
+state changes.
 
-*   Core affinity.
+There are currently four callbacks for which the user can register
+application functions:
 
-Refer to rte_kni_common.h in the DPDK source code for more details.
+``config_network_if``:
 
-The physical addresses will be re-mapped into the kernel address space and stored in separate KNI contexts.
+    Called when the management state of the KNI interface changes.
+    For example, when the user runs ``ip link set [up|down] dev <ifaceX>``.
 
-Once KNI interfaces are created, the KNI context information can be queried by calling the rte_kni_info_get() function.
+``change_mtu``:
 
-The KNI interfaces can be deleted by a DPDK application dynamically after being created.
-Furthermore, all those KNI interfaces not deleted will be deleted on the release operation
-of the miscellaneous device (when the DPDK application is closed).
+    Called when the user changes the MTU size of the KNI
+    interface.  For example, when the user runs ``ip link set mtu <size>
+    dev <ifaceX>``.
+
+``config_mac_address``:
+
+    Called when the user changes the MAC address of the KNI interface.
+    For example, when the user runs ``ip link set address <MAC>
+    dev <ifaceX>``.  If the user sets this callback function to NULL,
+    but sets the ``port_id`` field to a value other than -1, a default
+    callback handler in the rte_kni library ``kni_config_mac_address()``
+    will be called which calls ``rte_eth_dev_default_mac_addr_set()``
+    on the specified ``port_id``.
+
+``config_promiscusity``:
+
+    Called when the user changes the promiscuity state of the KNI
+    interface.  For example, when the user runs ``ip link set promisc
+    [on|off] dev <ifaceX>``. If the user sets this callback function to
+    NULL, but sets the ``port_id`` field to a value other than -1, a default
+    callback handler in the rte_kni library ``kni_config_promiscusity()``
+    will be called which calls ``rte_eth_promiscuous_<enable|disable>()``
+    on the specified ``port_id``.
+
+``config_allmulticast``:
+
+    Called when the user changes the allmulticast state of the KNI interface.
+    For example, when the user runs ``ifconfig <ifaceX> [-]allmulti``. If the
+    user sets this callback function to NULL, but sets the ``port_id`` field to
+    a value other than -1, a default callback handler in the rte_kni library
+    ``kni_config_allmulticast()`` will be called which calls
+    ``rte_eth_allmulticast_<enable|disable>()`` on the specified ``port_id``.
+
+In order to run these callbacks, the application must periodically call
+the ``rte_kni_handle_request()`` function.  Any user callback function
+registered will be called directly from ``rte_kni_handle_request()`` so
+care must be taken to prevent deadlock and to not block any DPDK fastpath
+tasks.  Typically DPDK applications which use these callbacks will need
+to create a separate thread or secondary process to periodically call
+``rte_kni_handle_request()``.
+
+The KNI interfaces can be deleted by a DPDK application with
+``rte_kni_release()``.  All KNI interfaces not explicitly deleted will be
+deleted when the ``/dev/kni`` device is closed, either explicitly with
+``rte_kni_close()`` or when the DPDK application is closed.
 
 DPDK mbuf Flow
 --------------
@@ -126,12 +277,16 @@ Use Case: Ingress
 -----------------
 
 On the DPDK RX side, the mbuf is allocated by the PMD in the RX thread context.
-This thread will enqueue the mbuf in the rx_q FIFO.
+This thread will enqueue the mbuf in the rx_q FIFO,
+and the next pointers in mbuf-chain will convert to physical address.
 The KNI thread will poll all KNI active devices for the rx_q.
 If an mbuf is dequeued, it will be converted to a sk_buff and sent to the net stack via netif_rx().
-The dequeued mbuf must be freed, so the same pointer is sent back in the free_q FIFO.
+The dequeued mbuf must be freed, so the same pointer is sent back in the free_q FIFO,
+and next pointers must convert back to virtual address if exists before put in the free_q FIFO.
 
 The RX thread, in the same main loop, polls this FIFO and frees the mbuf after dequeuing it.
+The address conversion of the next pointer is to prevent the chained mbuf
+in different hugepage segments from causing kernel crash.
 
 Use Case: Egress
 ----------------
@@ -142,137 +297,27 @@ The packet is received from the Linux net stack, by calling the kni_net_tx() cal
 The mbuf is dequeued (without waiting due the cache) and filled with data from sk_buff.
 The sk_buff is then freed and the mbuf sent in the tx_q FIFO.
 
-The DPDK TX thread dequeues the mbuf and sends it to the PMD (via rte_eth_tx_burst()).
+The DPDK TX thread dequeues the mbuf and sends it to the PMD via ``rte_eth_tx_burst()``.
 It then puts the mbuf back in the cache.
+
+IOVA = VA: Support
+------------------
+
+KNI operates in IOVA_VA scheme when
+
+- LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) and
+- EAL option `iova-mode=va` is passed or bus IOVA scheme in the DPDK is selected
+  as RTE_IOVA_VA.
+
+Due to IOVA to KVA address translations, based on the KNI use case there
+can be a performance impact. For mitigation, forcing IOVA to PA via EAL
+"--iova-mode=pa" option can be used, IOVA_DC bus iommu scheme can also
+result in IOVA as PA.
 
 Ethtool
 -------
 
-Ethtool is a Linux-specific tool with corresponding support in the kernel
-where each net device must register its own callbacks for the supported operations.
-The current implementation uses the igb/ixgbe modified Linux drivers for ethtool support.
-Ethtool is not supported in i40e and VMs (VF or EM devices).
-
-Link state and MTU change
--------------------------
-
-Link state and MTU change are network interface specific operations usually done via ifconfig.
-The request is initiated from the kernel side (in the context of the ifconfig process)
-and handled by the user space DPDK application.
-The application polls the request, calls the application handler and returns the response back into the kernel space.
-
-The application handlers can be registered upon interface creation or explicitly registered/unregistered in runtime.
-This provides flexibility in multiprocess scenarios
-(where the KNI is created in the primary process but the callbacks are handled in the secondary one).
-The constraint is that a single process can register and handle the requests.
-
-KNI Working as a Kernel vHost Backend
--------------------------------------
-
-vHost is a kernel module usually working as the backend of virtio (a para- virtualization driver framework)
-to accelerate the traffic from the guest to the host.
-The DPDK Kernel NIC interface provides the ability to hookup vHost traffic into userspace DPDK application.
-Together with the DPDK PMD virtio, it significantly improves the throughput between guest and host.
-In the scenario where DPDK is running as fast path in the host, kni-vhost is an efficient path for the traffic.
-
-Overview
-~~~~~~~~
-
-vHost-net has three kinds of real backend implementations. They are: 1) tap, 2) macvtap and 3) RAW socket.
-The main idea behind kni-vhost is making the KNI work as a RAW socket, attaching it as the backend instance of vHost-net.
-It is using the existing interface with vHost-net, so it does not require any kernel hacking,
-and is fully-compatible with the kernel vhost module.
-As vHost is still taking responsibility for communicating with the front-end virtio,
-it naturally supports both legacy virtio -net and the DPDK PMD virtio.
-There is a little penalty that comes from the non-polling mode of vhost.
-However, it scales throughput well when using KNI in multi-thread mode.
-
-.. _figure_vhost_net_arch2:
-
-.. figure:: img/vhost_net_arch.*
-
-   vHost-net Architecture Overview
-
-
-Packet Flow
-~~~~~~~~~~~
-
-There is only a minor difference from the original KNI traffic flows.
-On transmit side, vhost kthread calls the RAW socket's ops sendmsg and it puts the packets into the KNI transmit FIFO.
-On the receive side, the kni kthread gets packets from the KNI receive FIFO, puts them into the queue of the raw socket,
-and wakes up the task in vhost kthread to begin receiving.
-All the packet copying, irrespective of whether it is on the transmit or receive side,
-happens in the context of vhost kthread.
-Every vhost-net device is exposed to a front end virtio device in the guest.
-
-.. _figure_kni_traffic_flow:
-
-.. figure:: img/kni_traffic_flow.*
-
-   KNI Traffic Flow
-
-
-Sample Usage
-~~~~~~~~~~~~
-
-Before starting to use KNI as the backend of vhost, the CONFIG_RTE_KNI_VHOST configuration option must be turned on.
-Otherwise, by default, KNI will not enable its backend support capability.
-
-Of course, as a prerequisite, the vhost/vhost-net kernel CONFIG should be chosen before compiling the kernel.
-
-#.  Compile the DPDK and insert uio_pci_generic/igb_uio kernel modules as normal.
-
-#.  Insert the KNI kernel module:
-
-    .. code-block:: console
-
-        insmod ./rte_kni.ko
-
-    If using KNI in multi-thread mode, use the following command line:
-
-    .. code-block:: console
-
-        insmod ./rte_kni.ko kthread_mode=multiple
-
-#.  Running the KNI sample application:
-
-    .. code-block:: console
-
-        ./kni -c -0xf0 -n 4 -- -p 0x3 -P -config="(0,4,6),(1,5,7)"
-
-    This command runs the kni sample application with two physical ports.
-    Each port pins two forwarding cores (ingress/egress) in user space.
-
-#.  Assign a raw socket to vhost-net during qemu-kvm startup.
-    The DPDK does not provide a script to do this since it is easy for the user to customize.
-    The following shows the key steps to launch qemu-kvm with kni-vhost:
-
-    .. code-block:: bash
-
-        #!/bin/bash
-        echo 1 > /sys/class/net/vEth0/sock_en
-        fd=`cat /sys/class/net/vEth0/sock_fd`
-        qemu-kvm \
-        -name vm1 -cpu host -m 2048 -smp 1 -hda /opt/vm-fc16.img \
-        -netdev tap,fd=$fd,id=hostnet1,vhost=on \
-        -device virti-net-pci,netdev=hostnet1,id=net1,bus=pci.0,addr=0x4
-
-It is simple to enable raw socket using sysfs sock_en and get raw socket fd using sock_fd under the KNI device node.
-
-Then, using the qemu-kvm command with the -netdev option to assign such raw socket fd as vhost's backend.
-
-.. note::
-
-    The key word tap must exist as qemu-kvm now only supports vhost with a tap backend, so here we cheat qemu-kvm by an existing fd.
-
-Compatibility Configure Option
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-There is a CONFIG_RTE_KNI_VHOST_VNET_HDR_EN configuration option in DPDK configuration file.
-By default, it set to n, which means do not turn on the virtio net header,
-which is used to support additional features (such as, csum offload, vlan offload, generic-segmentation and so on),
-since the kni-vhost does not yet support those features.
-
-Even if the option is turned on, kni-vhost will ignore the information that the header contains.
-When working with legacy virtio on the guest, it is better to turn off unsupported offload features using ethtool -K.
-Otherwise, there may be problems such as an incorrect L4 checksum error.
+Ethtool is a Linux-specific tool with corresponding support in the kernel.
+The current version of kni provides minimal ethtool functionality
+including querying version and link state. It does not support link
+control, statistics, or dumping device registers.

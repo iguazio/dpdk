@@ -1,38 +1,11 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2015 Intel Corporation.
 
 Libpcap and Ring Based Poll Mode Drivers
 ========================================
 
 In addition to Poll Mode Drivers (PMDs) for physical and virtual hardware,
-the DPDK also includes two pure-software PMDs. These two drivers are:
+the DPDK also includes pure-software PMDs, two of these drivers are:
 
 *   A libpcap -based PMD (librte_pmd_pcap) that reads and writes packets using libpcap,
     - both from files on disk, as well as from physical NIC devices using standard Linux kernel drivers.
@@ -45,7 +18,7 @@ the DPDK also includes two pure-software PMDs. These two drivers are:
     The libpcap -based PMD is disabled by default in the build configuration files,
     owing to an external dependency on the libpcap development files which must be installed on the board.
     Once the libpcap development files are installed,
-    the library can be enabled by setting CONFIG_RTE_LIBRTE_PMD_PCAP=y and recompiling the Intel®  DPDK.
+    the library can be enabled by setting CONFIG_RTE_LIBRTE_PMD_PCAP=y and recompiling the DPDK.
 
 Using the Drivers from the EAL Command Line
 -------------------------------------------
@@ -62,14 +35,16 @@ Libpcap-based PMD
 ~~~~~~~~~~~~~~~~~
 
 Pcap-based devices can be created using the virtual device --vdev option.
-The device name must start with the eth_pcap prefix followed by numbers or letters.
+The device name must start with the net_pcap prefix followed by numbers or letters.
 The name is unique for each device. Each device can have multiple stream options and multiple devices can be used.
 Multiple device definitions can be arranged using multiple --vdev.
 Device name and stream options must be separated by commas as shown below:
 
 .. code-block:: console
 
-   $RTE_TARGET/app/testpmd -c f -n 4 --vdev  'eth_pcap0,stream_opt0=..,stream_opt1=..' --vdev='eth_pcap1,stream_opt0=..'
+   $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+       --vdev 'net_pcap0,stream_opt0=..,stream_opt1=..' \
+       --vdev='net_pcap1,stream_opt0=..'
 
 Device Streams
 ^^^^^^^^^^^^^^
@@ -96,10 +71,18 @@ The different stream types are:
         tx_pcap=/path/to/file.pcap
 
 *   rx_iface: Defines a reception stream based on a network interface name.
-    The driver reads packets coming from the given interface using the Linux kernel driver for that interface.
+    The driver reads packets from the given interface using the Linux kernel driver for that interface.
+    The driver captures both the incoming and outgoing packets on that interface.
     The value is an interface name.
 
         rx_iface=eth0
+
+*   rx_iface_in: Defines a reception stream based on a network interface name.
+    The driver reads packets from the given interface using the Linux kernel driver for that interface.
+    The driver captures only the incoming packets on that interface.
+    The value is an interface name.
+
+        rx_iface_in=eth0
 
 *   tx_iface: Defines a transmission stream based on a network interface name.
     The driver sends packets to the given interface using the Linux kernel driver for that interface.
@@ -113,6 +96,44 @@ The different stream types are:
 
         iface=eth0
 
+Runtime Config Options
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Use PCAP interface physical MAC
+
+ In case ``iface=`` configuration is set, user may want to use the selected interface's physical MAC
+ address. This can be done with a ``devarg`` ``phy_mac``, for example::
+
+   --vdev 'net_pcap0,iface=eth0,phy_mac=1'
+
+- Use the RX PCAP file to infinitely receive packets
+
+ In case ``rx_pcap=`` configuration is set, user may want to use the selected PCAP file for rudimental
+ performance testing. This can be done with a ``devarg`` ``infinite_rx``, for example::
+
+   --vdev 'net_pcap0,rx_pcap=file_rx.pcap,infinite_rx=1'
+
+ When this mode is used, it is recommended to drop all packets on transmit by not providing a tx_pcap or tx_iface.
+
+ This option is device wide, so all queues on a device will either have this enabled or disabled.
+ This option should only be provided once per device.
+
+- Drop all packets on transmit
+
+ The user may want to drop all packets on tx for a device. This can be done by not providing a tx_pcap or tx_iface, for example::
+
+   --vdev 'net_pcap0,rx_pcap=file_rx.pcap'
+
+ In this case, one tx drop queue is created for each rxq on that device.
+
+ - Receive no packets on Rx
+
+ The user may want to run without receiving any packets on Rx. This can be done by not providing a rx_pcap or rx_iface, for example::
+
+   --vdev 'net_pcap0,tx_pcap=file_tx.pcap'
+
+In this case, one dummy rx queue is created for each tx queue argument passed
+
 Examples of Usage
 ^^^^^^^^^^^^^^^^^
 
@@ -120,25 +141,47 @@ Read packets from one pcap file and write them to another:
 
 .. code-block:: console
 
-    $RTE_TARGET/app/testpmd -c '0xf' -n 4 --vdev 'eth_pcap0,rx_pcap=/path/to/ file_rx.pcap,tx_pcap=/path/to/file_tx.pcap' -- --port-topology=chained
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_pcap=file_rx.pcap,tx_pcap=file_tx.pcap' \
+        -- --port-topology=chained
 
 Read packets from a network interface and write them to a pcap file:
 
 .. code-block:: console
 
-    $RTE_TARGET/app/testpmd -c '0xf' -n 4 --vdev 'eth_pcap0,rx_iface=eth0,tx_pcap=/path/to/file_tx.pcap' -- --port-topology=chained
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_iface=eth0,tx_pcap=file_tx.pcap' \
+        -- --port-topology=chained
 
 Read packets from a pcap file and write them to a network interface:
 
 .. code-block:: console
 
-    $RTE_TARGET/app/testpmd -c '0xf' -n 4 --vdev 'eth_pcap0,rx_pcap=/path/to/ file_rx.pcap,tx_iface=eth1' -- --port-topology=chained
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_pcap=file_rx.pcap,tx_iface=eth1' \
+        -- --port-topology=chained
 
 Forward packets through two network interfaces:
 
 .. code-block:: console
 
-    $RTE_TARGET/app/testpmd -c '0xf' -n 4 --vdev 'eth_pcap0,iface=eth0' --vdev='eth_pcap1;iface=eth1'
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,iface=eth0' --vdev='net_pcap1;iface=eth1'
+
+Enable 2 tx queues on a network interface:
+
+.. code-block:: console
+
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_iface=eth1,tx_iface=eth1,tx_iface=eth1' \
+        -- --txq 2
+
+Read only incoming packets from a network interface and write them back to the same network interface:
+
+.. code-block:: console
+
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_iface_in=eth1,tx_iface=eth1'
 
 Using libpcap-based PMD with the testpmd Application
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -162,19 +205,27 @@ Otherwise, the first 512 packets from the input pcap file will be discarded by t
 
 .. code-block:: console
 
-    $RTE_TARGET/app/testpmd -c '0xf' -n 4 --vdev 'eth_pcap0,rx_pcap=/path/to/ file_rx.pcap,tx_pcap=/path/to/file_tx.pcap' -- --port-topology=chained --no-flush-rx
+    $RTE_TARGET/app/testpmd -l 0-3 -n 4 \
+        --vdev 'net_pcap0,rx_pcap=file_rx.pcap,tx_pcap=file_tx.pcap' \
+        -- --port-topology=chained --no-flush-rx
+
+.. note::
+
+   The network interface provided to the PMD should be up. The PMD will return
+   an error if interface is down, and the PMD itself won't change the status
+   of the external network interface.
 
 
 Rings-based PMD
 ~~~~~~~~~~~~~~~
 
 To run a DPDK application on a machine without any Ethernet devices, a pair of ring-based rte_ethdevs can be used as below.
-The device names passed to the --vdev option must start with eth_ring and take no additional parameters.
+The device names passed to the --vdev option must start with net_ring and take no additional parameters.
 Multiple devices may be specified, separated by commas.
 
 .. code-block:: console
 
-    ./testpmd -c E -n 4 --vdev=eth_ring0 --vdev=eth_ring1 -- -i
+    ./testpmd -l 1-3 -n 4 --vdev=net_ring0 --vdev=net_ring1 -- -i
     EAL: Detected lcore 1 as core 1 on socket 0
     ...
 
@@ -217,7 +268,7 @@ Using the Poll Mode Driver from an Application
 Both drivers can provide similar APIs to allow the user to create a PMD, that is,
 rte_ethdev structure, instances at run-time in the end-application,
 for example, using rte_eth_from_rings() or rte_eth_from_pcaps() APIs.
-For the rings- based PMD, this functionality could be used, for example,
+For the rings-based PMD, this functionality could be used, for example,
 to allow data exchange between cores using rings to be done in exactly the
 same way as sending or receiving packets from an Ethernet device.
 For the libpcap-based PMD, it allows an application to open one or more pcap files
@@ -231,26 +282,30 @@ for reception on the same port (error handling omitted for clarity):
 
 .. code-block:: c
 
-    struct rte_ring *r1, *r2;
-    int port1, port2;
+    #define RING_SIZE 256
+    #define NUM_RINGS 2
+    #define SOCKET0 0
 
-    r1 = rte_ring_create("R1", 256, SOCKET0,RING_F_SP_ENQ|RING_F_SC_DEQ);
-    r2 = rte_ring_create("R2", 256, SOCKET0, RING_F_SP_ENQ|RING_F_SC_DEQ);
+    struct rte_ring *ring[NUM_RINGS];
+    int port0, port1;
 
-    /* create an ethdev where RX and TX are done to/from r1, and * another from r2 */
+    ring[0] = rte_ring_create("R0", RING_SIZE, SOCKET0, RING_F_SP_ENQ|RING_F_SC_DEQ);
+    ring[1] = rte_ring_create("R1", RING_SIZE, SOCKET0, RING_F_SP_ENQ|RING_F_SC_DEQ);
 
-    port1 = rte_eth_from_rings(r1, 1, r1, 1, SOCKET0);
-    port2 = rte_eth_from_rings(r2, 1, r2, 1, SOCKET0);
+    /* create two ethdev's */
+
+    port0 = rte_eth_from_rings("net_ring0", ring, NUM_RINGS, ring, NUM_RINGS, SOCKET0);
+    port1 = rte_eth_from_rings("net_ring1", ring, NUM_RINGS, ring, NUM_RINGS, SOCKET0);
 
 
 To create two pseudo-Ethernet ports where the traffic is switched between them,
-that is, traffic sent to port 1 is read back from port 2 and vice-versa,
+that is, traffic sent to port 0 is read back from port 1 and vice-versa,
 the final two lines could be changed as below:
 
 .. code-block:: c
 
-    port1 = rte_eth_from_rings(r1, 1, r2, 1, SOCKET0);
-    port2 = rte_eth_from_rings(r2, 1, r1, 1, SOCKET0);
+    port0 = rte_eth_from_rings("net_ring0", &ring[0], 1, &ring[1], 1, SOCKET0);
+    port1 = rte_eth_from_rings("net_ring1", &ring[1], 1, &ring[0], 1, SOCKET0);
 
 This type of configuration could be useful in a pipeline model, for example,
 where one may want to have inter-core communication using pseudo Ethernet devices rather than raw rings,

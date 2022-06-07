@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 .. _Ring_Library:
 
@@ -38,7 +11,9 @@ Instead of having a linked list of infinite size, the rte_ring has the following
 
 *   FIFO
 
-*   Maximum size is fixed, the pointers are stored in a table
+*   Maximum size is fixed, the objects are stored in a table
+
+*   Objects can be pointers or elements of multiple of 4 byte size
 
 *   Lockless implementation
 
@@ -56,19 +31,19 @@ Instead of having a linked list of infinite size, the rte_ring has the following
 
 The advantages of this data structure over a linked list queue are as follows:
 
-*   Faster; only requires a single Compare-And-Swap instruction of sizeof(void \*) instead of several double-Compare-And-Swap instructions.
+*   Faster; only requires a single 32 bit Compare-And-Swap instruction instead of several pointer size Compare-And-Swap instructions.
 
 *   Simpler than a full lockless queue.
 
 *   Adapted to bulk enqueue/dequeue operations.
-    As pointers are stored in a table, a dequeue of several objects will not produce as many cache misses as in a linked queue.
+    As objects are stored in a table, a dequeue of several objects will not produce as many cache misses as in a linked queue.
     Also, a bulk dequeue of many objects does not cost more than a dequeue of a simple object.
 
 The disadvantages:
 
 *   Size is fixed
 
-*   Having many rings costs more in terms of memory than a linked list queue. An empty ring contains at least N pointers.
+*   Having many rings costs more in terms of memory than a linked list queue. An empty ring contains at least N objects.
 
 A simplified representation of a Ring is shown in with consumer and producer head and tail pointers to objects stored in the data structure.
 
@@ -101,21 +76,6 @@ Name
 
 A ring is identified by a unique name.
 It is not possible to create two rings with the same name (rte_ring_create() returns NULL if this is attempted).
-
-Water Marking
-~~~~~~~~~~~~~
-
-The ring can have a high water mark (threshold).
-Once an enqueue operation reaches the high water mark, the producer is notified, if the water mark is configured.
-
-This mechanism can be used, for example, to exert a back pressure on I/O to inform the LAN to PAUSE.
-
-Debug
-~~~~~
-
-When debug is enabled (CONFIG_RTE_LIBRTE_RING_DEBUG is set),
-the library stores some per-ring statistic counters about the number of enqueues/dequeues.
-These statistics are per-core to avoid concurrent accesses or atomic operations.
 
 Use Cases
 ---------
@@ -167,7 +127,7 @@ Enqueue Second Step
 
 The second step is to modify *ring->prod_head* in ring structure to point to the same location as prod_next.
 
-A pointer to the added object is copied in the ring (obj4).
+The added object is copied in the ring (obj4).
 
 
 .. _figure_ring-enqueue2:
@@ -220,7 +180,7 @@ Dequeue Second Step
 
 The second step is to modify ring->cons_head in the ring structure to point to the same location as cons_next.
 
-The pointer to the dequeued object (obj1) is copied in the pointer given by the user.
+The dequeued object (obj1) is copied in the pointer given by the user.
 
 
 .. _figure_ring-dequeue2:
@@ -252,8 +212,8 @@ In this example, only the producer head and tail (prod_head and prod_tail) are m
 
 The initial state is to have a prod_head and prod_tail pointing at the same location.
 
-Multiple Consumer Enqueue First Step
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multiple Producers Enqueue First Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 On both cores, *ring->prod_head* and ring->cons_tail are copied in local variables.
 The prod_next local variable points to the next element of the table,
@@ -266,11 +226,11 @@ If there is not enough room in the ring (this is detected by checking cons_tail)
 
 .. figure:: img/ring-mp-enqueue1.*
 
-   Multiple consumer enqueue first step
+   Multiple producer enqueue first step
 
 
-Multiple Consumer Enqueue Second Step
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multiple Producers Enqueue Second Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The second step is to modify ring->prod_head in the ring structure to point to the same location as prod_next.
 This operation is done using a Compare And Swap (CAS) instruction, which does the following operations atomically:
@@ -288,11 +248,11 @@ In the figure, the operation succeeded on core 1, and step one restarted on core
 
 .. figure:: img/ring-mp-enqueue2.*
 
-   Multiple consumer enqueue second step
+   Multiple producer enqueue second step
 
 
-Multiple Consumer Enqueue Third Step
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multiple Producers Enqueue Third Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The CAS operation is retried on core 2 with success.
 
@@ -303,11 +263,11 @@ The core 1 updates one element of the ring(obj4), and the core 2 updates another
 
 .. figure:: img/ring-mp-enqueue3.*
 
-   Multiple consumer enqueue third step
+   Multiple producer enqueue third step
 
 
-Multiple Consumer Enqueue Fourth Step
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multiple Producers Enqueue Fourth Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Each core now wants to update ring->prod_tail.
 A core can only update it if ring->prod_tail is equal to the prod_head local variable.
@@ -318,11 +278,11 @@ This is only true on core 1. The operation is finished on core 1.
 
 .. figure:: img/ring-mp-enqueue4.*
 
-   Multiple consumer enqueue fourth step
+   Multiple producer enqueue fourth step
 
 
-Multiple Consumer Enqueue Last Step
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multiple Producers Enqueue Last Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Once ring->prod_tail is updated by core 1, core 2 is allowed to update it too.
 The operation is also finished on core 2.
@@ -332,7 +292,7 @@ The operation is also finished on core 2.
 
 .. figure:: img/ring-mp-enqueue5.*
 
-   Multiple consumer enqueue last step
+   Multiple producer enqueue last step
 
 
 Modulo 32-bit Indexes
@@ -340,7 +300,7 @@ Modulo 32-bit Indexes
 
 In the preceding figures, the prod_head, prod_tail, cons_head and cons_tail indexes are represented by arrows.
 In the actual implementation, these values are not between 0 and size(ring)-1 as would be assumed.
-The indexes are between 0 and 2^32 -1, and we mask their value when we access the pointer table (the ring itself).
+The indexes are between 0 and 2^32 -1, and we mask their value when we access the object table (the ring itself).
 32-bit modulo also implies that operations on indexes (such as, add/subtract) will automatically do 2^32 modulo
 if the result overflows the 32-bit number range.
 
@@ -388,6 +348,109 @@ even if only the first term of subtraction has overflowed:
 
     uint32_t entries = (prod_tail - cons_head);
     uint32_t free_entries = (mask + cons_tail -prod_head);
+
+Producer/consumer synchronization modes
+---------------------------------------
+
+rte_ring supports different synchronization modes for producers and consumers.
+These modes can be specified at ring creation/init time via ``flags``
+parameter.
+That should help users to configure ring in the most suitable way for his
+specific usage scenarios.
+Currently supported modes:
+
+.. _Ring_Library_MPMC_Mode:
+
+MP/MC (default one)
+~~~~~~~~~~~~~~~~~~~
+
+Multi-producer (/multi-consumer) mode. This is a default enqueue (/dequeue)
+mode for the ring. In this mode multiple threads can enqueue (/dequeue)
+objects to (/from) the ring. For 'classic' DPDK deployments (with one thread
+per core) this is usually the most suitable and fastest synchronization mode.
+As a well known limitation - it can perform quite pure on some overcommitted
+scenarios.
+
+.. _Ring_Library_SPSC_Mode:
+
+SP/SC
+~~~~~
+Single-producer (/single-consumer) mode. In this mode only one thread at a time
+is allowed to enqueue (/dequeue) objects to (/from) the ring.
+
+.. _Ring_Library_MT_RTS_Mode:
+
+MP_RTS/MC_RTS
+~~~~~~~~~~~~~
+
+Multi-producer (/multi-consumer) with Relaxed Tail Sync (RTS) mode.
+The main difference from the original MP/MC algorithm is that
+tail value is increased not by every thread that finished enqueue/dequeue,
+but only by the last one.
+That allows threads to avoid spinning on ring tail value,
+leaving actual tail value change to the last thread at a given instance.
+That technique helps to avoid the Lock-Waiter-Preemption (LWP) problem on tail
+update and improves average enqueue/dequeue times on overcommitted systems.
+To achieve that RTS requires 2 64-bit CAS for each enqueue(/dequeue) operation:
+one for head update, second for tail update.
+In comparison the original MP/MC algorithm requires one 32-bit CAS
+for head update and waiting/spinning on tail value.
+
+.. _Ring_Library_MT_HTS_Mode:
+
+MP_HTS/MC_HTS
+~~~~~~~~~~~~~
+
+Multi-producer (/multi-consumer) with Head/Tail Sync (HTS) mode.
+In that mode enqueue/dequeue operation is fully serialized:
+at any given moment only one enqueue/dequeue operation can proceed.
+This is achieved by allowing a thread to proceed with changing ``head.value``
+only when ``head.value == tail.value``.
+Both head and tail values are updated atomically (as one 64-bit value).
+To achieve that 64-bit CAS is used by head update routine.
+That technique also avoids the Lock-Waiter-Preemption (LWP) problem on tail
+update and helps to improve ring enqueue/dequeue behavior in overcommitted
+scenarios. Another advantage of fully serialized producer/consumer -
+it provides the ability to implement MT safe peek API for rte_ring.
+
+Ring Peek API
+-------------
+
+For ring with serialized producer/consumer (HTS sync mode) it is possible
+to split public enqueue/dequeue API into two phases:
+
+*   enqueue/dequeue start
+
+*   enqueue/dequeue finish
+
+That allows user to inspect objects in the ring without removing them
+from it (aka MT safe peek) and reserve space for the objects in the ring
+before actual enqueue.
+Note that this API is available only for two sync modes:
+
+*   Single Producer/Single Consumer (SP/SC)
+
+*   Multi-producer/Multi-consumer with Head/Tail Sync (HTS)
+
+It is a user responsibility to create/init ring with appropriate sync modes
+selected. As an example of usage:
+
+.. code-block:: c
+
+    /* read 1 elem from the ring: */
+    uint32_t n = rte_ring_dequeue_bulk_start(ring, &obj, 1, NULL);
+    if (n != 0) {
+        /* examine object */
+        if (object_examine(obj) == KEEP)
+            /* decided to keep it in the ring. */
+            rte_ring_dequeue_finish(ring, 0);
+        else
+            /* decided to remove it from the ring. */
+            rte_ring_dequeue_finish(ring, n);
+    }
+
+Note that between ``_start_`` and ``_finish_`` none other thread can proceed
+with enqueue(/dequeue) operation till ``_finish_`` completes.
 
 References
 ----------

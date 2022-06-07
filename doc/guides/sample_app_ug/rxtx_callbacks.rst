@@ -1,33 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2015 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2015 Intel Corporation.
 
 RX/TX Callbacks Sample Application
 ==================================
@@ -41,27 +13,17 @@ In the sample application a user defined callback is applied to all received
 packets to add a timestamp. A separate callback is applied to all packets
 prior to transmission to calculate the elapsed time, in CPU cycles.
 
+If hardware timestamping is supported by the NIC, the sample application will
+also display the average latency since the packet was timestamped in hardware,
+on top of the latency since the packet was received and processed by the RX
+callback.
 
 Compiling the Application
 -------------------------
 
-To compile the application export the path to the DPDK source tree and go to
-the example directory:
+To compile the sample application see :doc:`compiling`.
 
-.. code-block:: console
-
-    export RTE_SDK=/path/to/rte_sdk
-
-    cd ${RTE_SDK}/examples/rxtx_callbacks
-
-
-Set the target, for example:
-
-.. code-block:: console
-
-    export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-See the *DPDK Getting Started* Guide for possible ``RTE_TARGET`` values.
+The application is located in the ``rxtx_callbacks`` sub-directory.
 
 The callbacks feature requires that the ``CONFIG_RTE_ETHDEV_RXTX_CALLBACKS``
 setting is on in the ``config/common_`` config file that applies to the
@@ -71,21 +33,17 @@ target. This is generally on by default:
 
     CONFIG_RTE_ETHDEV_RXTX_CALLBACKS=y
 
-Build the application as follows:
-
-.. code-block:: console
-
-    make
-
-
 Running the Application
 -----------------------
 
-To run the example in a ``linuxapp`` environment:
+To run the example in a ``linux`` environment:
 
 .. code-block:: console
 
-    ./build/rxtx_callbacks -c 2 -n 4
+    ./build/rxtx_callbacks -l 1 -n 4 -- [-t]
+
+Use -t to enable hardware timestamping. If not supported by the NIC, an error
+will be displayed.
 
 Refer to *DPDK Getting Started Guide* for general information on running
 applications and the Environment Abstraction Layer (EAL) options.
@@ -124,16 +82,13 @@ comments:
 .. code-block:: c
 
     static inline int
-    port_init(uint8_t port, struct rte_mempool *mbuf_pool)
+    port_init(uint16_t port, struct rte_mempool *mbuf_pool)
     {
         struct rte_eth_conf port_conf = port_conf_default;
         const uint16_t rx_rings = 1, tx_rings = 1;
-        struct ether_addr addr;
+        struct rte_ether_addr addr;
         int retval;
         uint16_t q;
-
-        if (port >= rte_eth_dev_count())
-            return -1;
 
         /* Configure the Ethernet device. */
         retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
@@ -162,8 +117,9 @@ comments:
             return retval;
 
         /* Enable RX in promiscuous mode for the Ethernet device. */
-        rte_eth_promiscuous_enable(port);
-
+        retval = rte_eth_promiscuous_enable(port);
+        if (retval != 0)
+            return retval;
 
         /* Add the callbacks for RX and TX.*/
         rte_eth_add_rx_callback(port, 0, add_timestamps, NULL);
@@ -196,7 +152,7 @@ all packets received:
 .. code-block:: c
 
     static uint16_t
-    add_timestamps(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
+    add_timestamps(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
             struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
     {
         unsigned i;
@@ -222,7 +178,7 @@ packets prior to transmission:
 .. code-block:: c
 
     static uint16_t
-    calc_latency(uint8_t port __rte_unused, uint16_t qidx __rte_unused,
+    calc_latency(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
             struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
     {
         uint64_t cycles = 0;

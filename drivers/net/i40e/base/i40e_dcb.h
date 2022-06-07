@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #ifndef _I40E_DCB_H_
 #define _I40E_DCB_H_
@@ -54,10 +25,24 @@ POSSIBILITY OF SUCH DAMAGE.
 #define I40E_IEEE_SUBTYPE_PFC_CFG	11
 #define I40E_IEEE_SUBTYPE_APP_PRI	12
 
+#define I40E_CEE_DCBX_OUI		0x001b21
+#define I40E_CEE_DCBX_TYPE		2
+
+#define I40E_CEE_SUBTYPE_CTRL		1
+#define I40E_CEE_SUBTYPE_PG_CFG		2
+#define I40E_CEE_SUBTYPE_PFC_CFG	3
+#define I40E_CEE_SUBTYPE_APP_PRI	4
+
+#define I40E_CEE_MAX_FEAT_TYPE		3
 #define I40E_LLDP_ADMINSTATUS_DISABLED		0
 #define I40E_LLDP_ADMINSTATUS_ENABLED_RX	1
 #define I40E_LLDP_ADMINSTATUS_ENABLED_TX	2
 #define I40E_LLDP_ADMINSTATUS_ENABLED_RXTX	3
+
+#define I40E_LLDP_CURRENT_STATUS_XL710_OFFSET	0x2B
+#define I40E_LLDP_CURRENT_STATUS_X722_OFFSET	0x31
+#define I40E_LLDP_CURRENT_STATUS_OFFSET		1
+#define I40E_LLDP_CURRENT_STATUS_SIZE		1
 
 /* Defines for LLDP TLV header */
 #define I40E_LLDP_MIB_HLEN		14
@@ -74,9 +59,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #define I40E_IEEE_ETS_MAXTC_SHIFT	0
 #define I40E_IEEE_ETS_MAXTC_MASK	(0x7 << I40E_IEEE_ETS_MAXTC_SHIFT)
 #define I40E_IEEE_ETS_CBS_SHIFT		6
-#define I40E_IEEE_ETS_CBS_MASK		(0x1 << I40E_IEEE_ETS_CBS_SHIFT)
+#define I40E_IEEE_ETS_CBS_MASK		BIT(I40E_IEEE_ETS_CBS_SHIFT)
 #define I40E_IEEE_ETS_WILLING_SHIFT	7
-#define I40E_IEEE_ETS_WILLING_MASK	(0x1 << I40E_IEEE_ETS_WILLING_SHIFT)
+#define I40E_IEEE_ETS_WILLING_MASK	BIT(I40E_IEEE_ETS_WILLING_SHIFT)
 #define I40E_IEEE_ETS_PRIO_0_SHIFT	0
 #define I40E_IEEE_ETS_PRIO_0_MASK	(0x7 << I40E_IEEE_ETS_PRIO_0_SHIFT)
 #define I40E_IEEE_ETS_PRIO_1_SHIFT	4
@@ -97,9 +82,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #define I40E_IEEE_PFC_CAP_SHIFT		0
 #define I40E_IEEE_PFC_CAP_MASK		(0xF << I40E_IEEE_PFC_CAP_SHIFT)
 #define I40E_IEEE_PFC_MBC_SHIFT		6
-#define I40E_IEEE_PFC_MBC_MASK		(0x1 << I40E_IEEE_PFC_MBC_SHIFT)
+#define I40E_IEEE_PFC_MBC_MASK		BIT(I40E_IEEE_PFC_MBC_SHIFT)
 #define I40E_IEEE_PFC_WILLING_SHIFT	7
-#define I40E_IEEE_PFC_WILLING_MASK	(0x1 << I40E_IEEE_PFC_WILLING_SHIFT)
+#define I40E_IEEE_PFC_WILLING_MASK	BIT(I40E_IEEE_PFC_WILLING_SHIFT)
 
 /* Defines for IEEE APP TLV */
 #define I40E_IEEE_APP_SEL_SHIFT		0
@@ -136,6 +121,36 @@ struct i40e_lldp_org_tlv {
 	__be32 ouisubtype;
 	u8 tlvinfo[1];
 };
+
+struct i40e_cee_tlv_hdr {
+	__be16 typelen;
+	u8 operver;
+	u8 maxver;
+};
+
+struct i40e_cee_ctrl_tlv {
+	struct i40e_cee_tlv_hdr hdr;
+	__be32 seqno;
+	__be32 ackno;
+};
+
+struct i40e_cee_feat_tlv {
+	struct i40e_cee_tlv_hdr hdr;
+	u8 en_will_err; /* Bits: |En|Will|Err|Reserved(5)| */
+#define I40E_CEE_FEAT_TLV_ENABLE_MASK	0x80
+#define I40E_CEE_FEAT_TLV_WILLING_MASK	0x40
+#define I40E_CEE_FEAT_TLV_ERR_MASK	0x20
+	u8 subtype;
+	u8 tlvinfo[1];
+};
+
+struct i40e_cee_app_prio {
+	__be16 protocol;
+	u8 upper_oui_sel; /* Bits: |Upper OUI(6)|Selector(2)| */
+#define I40E_CEE_APP_SELECTOR_MASK	0x03
+	__be16 lower_oui;
+	u8 prio_map;
+};
 #pragma pack()
 
 /*
@@ -168,6 +183,12 @@ struct i40e_dcbx_variables {
 	u32 deftsaassignment;
 };
 
+
+enum i40e_get_fw_lldp_status_resp {
+	I40E_GET_FW_LLDP_STATUS_DISABLED = 0,
+	I40E_GET_FW_LLDP_STATUS_ENABLED = 1
+};
+
 enum i40e_status_code i40e_get_dcbx_status(struct i40e_hw *hw,
 					   u16 *status);
 enum i40e_status_code i40e_lldp_to_dcb_config(u8 *lldpmib,
@@ -176,6 +197,12 @@ enum i40e_status_code i40e_aq_get_dcb_config(struct i40e_hw *hw, u8 mib_type,
 					     u8 bridgetype,
 					     struct i40e_dcbx_config *dcbcfg);
 enum i40e_status_code i40e_get_dcb_config(struct i40e_hw *hw);
-enum i40e_status_code i40e_init_dcb(struct i40e_hw *hw);
-
+enum i40e_status_code i40e_init_dcb(struct i40e_hw *hw,
+				    bool enable_mib_change);
+enum i40e_status_code
+i40e_get_fw_lldp_status(struct i40e_hw *hw,
+			enum i40e_get_fw_lldp_status_resp *lldp_status);
+enum i40e_status_code i40e_set_dcb_config(struct i40e_hw *hw);
+enum i40e_status_code i40e_dcb_config_to_lldp(u8 *lldpmib, u16 *miblen,
+					      struct i40e_dcbx_config *dcbcfg);
 #endif /* _I40E_DCB_H_ */

@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 Packet Framework
 ================
@@ -124,6 +97,10 @@ Port Types
    | 8 | Sink             | Output port used to drop all input packets. Similar to Linux kernel /dev/null         |
    |   |                  | character device.                                                                     |
    |   |                  |                                                                                       |
+   +---+------------------+---------------------------------------------------------------------------------------+
+   | 9 | Sym_crypto       | Output port used to extract DPDK Cryptodev operations from a fixed offset of the      |
+   |   |                  | packet and then enqueue to the Cryptodev PMD. Input port used to dequeue the          |
+   |   |                  | Cryptodev operations from the Cryptodev PMD and then retrieve the packets from them.  |
    +---+------------------+---------------------------------------------------------------------------------------+
 
 Port Interface
@@ -454,7 +431,7 @@ The possible options are:
 
 .. _table_qos_23:
 
-.. table:: Configuration Parameters Specific to Extendible Bucket Hash Table
+.. table:: Configuration Parameters Specific to Extendable Bucket Hash Table
 
    +---+---------------------------+--------------------------------------------------+
    | # | Parameter                 | Details                                          |
@@ -576,7 +553,7 @@ either with pre-computed signature or "do-sig").
    |   |                         |                              |                           |                               |
    +---+-------------------------+------------------------------+---------------------------+-------------------------------+
    | 2 | Bucket extensions array | n_buckets_ext (configurable) | 32                        | This array is only created    |
-   |   |                         |                              |                           | for extendible bucket tables. |
+   |   |                         |                              |                           | for extendable bucket tables. |
    |   |                         |                              |                           |                               |
    +---+-------------------------+------------------------------+---------------------------+-------------------------------+
    | 3 | Key array               | n_keys                       | key_size (configurable)   | Keys added to the hash table. |
@@ -601,7 +578,7 @@ either with pre-computed signature or "do-sig").
    |   |                  |                    | Entry 0 stores the index (0 .. 3) of the MRU key, while entry 3  |
    |   |                  |                    | stores the index of the LRU key.                                 |
    |   |                  |                    |                                                                  |
-   |   |                  |                    | For extendible bucket tables, this field represents the next     |
+   |   |                  |                    | For extendable bucket tables, this field represents the next     |
    |   |                  |                    | pointer (i.e. the pointer to the next group of 4 keys linked to  |
    |   |                  |                    | the current bucket). The next pointer is not NULL if the bucket  |
    |   |                  |                    | is currently extended or NULL otherwise.                         |
@@ -864,7 +841,7 @@ Single Key Size Hash Tables
    |   |                         |                              |                      |                                    |
    +---+-------------------------+------------------------------+----------------------+------------------------------------+
    | 2 | Bucket extensions array | n_buckets_ext (configurable) | *8-byte key size:*   | This array is only created for     |
-   |   |                         |                              |                      | extendible bucket tables.          |
+   |   |                         |                              |                      | extendable bucket tables.          |
    |   |                         |                              |                      |                                    |
    |   |                         |                              | 64 + 4 x entry_size  |                                    |
    |   |                         |                              |                      |                                    |
@@ -885,7 +862,7 @@ Single Key Size Hash Tables
    +===+===============+====================+===============================================================================+
    | 1 | Valid         | 8                  | Bit X (X = 0 .. 3) is set to 1 if key X is valid or to 0 otherwise.           |
    |   |               |                    |                                                                               |
-   |   |               |                    | Bit 4 is only used for extendible bucket tables to help with the              |
+   |   |               |                    | Bit 4 is only used for extendable bucket tables to help with the              |
    |   |               |                    | implementation of the branchless logic. In this case, bit 4 is set to 1 if    |
    |   |               |                    | next pointer is valid (not NULL) or to 0 otherwise.                           |
    |   |               |                    |                                                                               |
@@ -894,7 +871,7 @@ Single Key Size Hash Tables
    |   |               |                    | stored as array of 4 entries of 2 bytes each. Entry 0 stores the index        |
    |   |               |                    | (0 .. 3) of the MRU key, while entry 3 stores the index of the LRU key.       |
    |   |               |                    |                                                                               |
-   |   |               |                    | For extendible bucket tables, this field represents the next pointer (i.e.    |
+   |   |               |                    | For extendable bucket tables, this field represents the next pointer (i.e.    |
    |   |               |                    | the pointer to the next group of 4 keys linked to the current bucket). The    |
    |   |               |                    | next pointer is not NULL if the bucket is currently extended or NULL          |
    |   |               |                    | otherwise.                                                                    |
@@ -1105,6 +1082,11 @@ with each table entry having its own set of enabled user actions and its own cop
    |   |                                   | checksum.                                                           |
    |   |                                   |                                                                     |
    +---+-----------------------------------+---------------------------------------------------------------------+
+   | 7 | Sym Crypto                        | Generate Cryptodev session based on the user-specified algorithm    |
+   |   |                                   | and key(s), and assemble the cryptodev operation based on the       |
+   |   |                                   | predefined offsets.                                                 |
+   |   |                                   |                                                                     |
+   +---+-----------------------------------+---------------------------------------------------------------------+
 
 Multicore Scaling
 -----------------
@@ -1160,7 +1142,7 @@ Typical devices with acceleration capabilities are:
 
 *   Inline accelerators: NICs, switches, FPGAs, etc;
 
-*   Look-aside accelerators: chipsets, FPGAs, etc.
+*   Look-aside accelerators: chipsets, FPGAs, Intel QuickAssist, etc.
 
 Usually, to support a specific functional block, specific implementation of Packet Framework tables and/or ports and/or actions has to be provided for each accelerator,
 with all the implementations sharing the same API: pure SW implementation (no acceleration), implementation using accelerator A, implementation using accelerator B, etc.

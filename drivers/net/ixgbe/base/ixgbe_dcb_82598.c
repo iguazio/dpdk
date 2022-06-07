@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 
 #include "ixgbe_type.h"
@@ -65,14 +36,6 @@ s32 ixgbe_dcb_get_tc_stats_82598(struct ixgbe_hw *hw,
 		stats->qprc[tc] += IXGBE_READ_REG(hw, IXGBE_QPRC(tc));
 		/* Received Bytes */
 		stats->qbrc[tc] += IXGBE_READ_REG(hw, IXGBE_QBRC(tc));
-
-#if 0
-		/* Can we get rid of these??  Consequently, getting rid
-		 * of the tc_stats structure.
-		 */
-		tc_stats_array[up]->in_overflow_discards = 0;
-		tc_stats_array[up]->out_overflow_discards = 0;
-#endif
 	}
 
 	return IXGBE_SUCCESS;
@@ -110,7 +73,9 @@ s32 ixgbe_dcb_get_pfc_stats_82598(struct ixgbe_hw *hw,
 /**
  * ixgbe_dcb_config_rx_arbiter_82598 - Config Rx data arbiter
  * @hw: pointer to hardware structure
- * @dcb_config: pointer to ixgbe_dcb_config structure
+ * @refill: refill credits index by traffic class
+ * @max: max credits index by traffic class
+ * @tsa: transmission selection algorithm indexed by traffic class
  *
  * Configure Rx Data Arbiter and credits for each traffic class.
  */
@@ -165,7 +130,10 @@ s32 ixgbe_dcb_config_rx_arbiter_82598(struct ixgbe_hw *hw, u16 *refill,
 /**
  * ixgbe_dcb_config_tx_desc_arbiter_82598 - Config Tx Desc. arbiter
  * @hw: pointer to hardware structure
- * @dcb_config: pointer to ixgbe_dcb_config structure
+ * @refill: refill credits index by traffic class
+ * @max: max credits index by traffic class
+ * @bwg_id: bandwidth grouping indexed by traffic class
+ * @tsa: transmission selection algorithm indexed by traffic class
  *
  * Configure Tx Descriptor Arbiter and credits for each traffic class.
  */
@@ -191,7 +159,7 @@ s32 ixgbe_dcb_config_tx_desc_arbiter_82598(struct ixgbe_hw *hw,
 	for (i = 0; i < IXGBE_DCB_MAX_TRAFFIC_CLASS; i++) {
 		max_credits = max[i];
 		reg = max_credits << IXGBE_TDTQ2TCCR_MCL_SHIFT;
-		reg |= refill[i];
+		reg |= (u32)(refill[i]);
 		reg |= (u32)(bwg_id[i]) << IXGBE_TDTQ2TCCR_BWG_SHIFT;
 
 		if (tsa[i] == ixgbe_dcb_tsa_group_strict_cee)
@@ -209,7 +177,10 @@ s32 ixgbe_dcb_config_tx_desc_arbiter_82598(struct ixgbe_hw *hw,
 /**
  * ixgbe_dcb_config_tx_data_arbiter_82598 - Config Tx data arbiter
  * @hw: pointer to hardware structure
- * @dcb_config: pointer to ixgbe_dcb_config structure
+ * @refill: refill credits index by traffic class
+ * @max: max credits index by traffic class
+ * @bwg_id: bandwidth grouping indexed by traffic class
+ * @tsa: transmission selection algorithm indexed by traffic class
  *
  * Configure Tx Data Arbiter and credits for each traffic class.
  */
@@ -254,7 +225,7 @@ s32 ixgbe_dcb_config_tx_data_arbiter_82598(struct ixgbe_hw *hw,
 /**
  * ixgbe_dcb_config_pfc_82598 - Config priority flow control
  * @hw: pointer to hardware structure
- * @dcb_config: pointer to ixgbe_dcb_config structure
+ * @pfc_en: enabled pfc bitmask
  *
  * Configure Priority Flow Control for each traffic class.
  */
@@ -338,7 +309,11 @@ s32 ixgbe_dcb_config_tc_stats_82598(struct ixgbe_hw *hw)
 /**
  * ixgbe_dcb_hw_config_82598 - Config and enable DCB
  * @hw: pointer to hardware structure
- * @dcb_config: pointer to ixgbe_dcb_config structure
+ * @link_speed: unused
+ * @refill: refill credits index by traffic class
+ * @max: max credits index by traffic class
+ * @bwg_id: bandwidth grouping indexed by traffic class
+ * @tsa: transmission selection algorithm indexed by traffic class
  *
  * Configure dcb settings and enable dcb mode.
  */

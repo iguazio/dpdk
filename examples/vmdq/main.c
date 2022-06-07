@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdint.h>
@@ -47,9 +18,7 @@
 #include <rte_log.h>
 #include <rte_memory.h>
 #include <rte_memcpy.h>
-#include <rte_memzone.h>
 #include <rte_eal.h>
-#include <rte_per_lcore.h>
 #include <rte_launch.h>
 #include <rte_atomic.h>
 #include <rte_cycles.h>
@@ -58,23 +27,20 @@
 #include <rte_per_lcore.h>
 #include <rte_branch_prediction.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_random.h>
 #include <rte_debug.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
-#include <rte_ring.h>
-#include <rte_log.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
-#include <rte_memcpy.h>
 
-#define MAX_QUEUES 128
+#define MAX_QUEUES 1024
 /*
- * For 10 GbE, 128 queues require roughly
- * 128*512 (RX/TX_queue_nb * RX/TX_ring_descriptors_nb) per port.
+ * 1024 queues require to meet the needs of a large number of vmdq_pools.
+ * (RX/TX_queue_nb * RX/TX_ring_descriptors_nb) per port.
  */
-#define NUM_MBUFS_PER_PORT (128*512)
+#define NUM_MBUFS_PER_PORT (MAX_QUEUES * RTE_MAX(RTE_TEST_RX_DESC_DEFAULT, \
+						RTE_TEST_TX_DESC_DEFAULT))
 #define MBUF_CACHE_SIZE 64
 
 #define MAX_PKT_BURST 32
@@ -82,8 +48,8 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 128
-#define RTE_TEST_TX_DESC_DEFAULT 512
+#define RTE_TEST_RX_DESC_DEFAULT 1024
+#define RTE_TEST_TX_DESC_DEFAULT 1024
 
 #define INVALID_PORT_ID 0xFF
 
@@ -93,16 +59,13 @@ static uint32_t enabled_port_mask;
 /* number of pools (if user does not specify any, 8 by default */
 static uint32_t num_queues = 8;
 static uint32_t num_pools = 8;
+static uint8_t rss_enable;
 
 /* empty vmdq configuration structure. Filled in programatically */
 static const struct rte_eth_conf vmdq_conf_default = {
 	.rxmode = {
 		.mq_mode        = ETH_MQ_RX_VMDQ_ONLY,
 		.split_hdr_size = 0,
-		.header_split   = 0, /**< Header Split disabled */
-		.hw_ip_checksum = 0, /**< IP checksum offload disabled */
-		.hw_vlan_filter = 0, /**< VLAN filtering disabled */
-		.jumbo_frame    = 0, /**< Jumbo Frame Support disabled */
 	},
 
 	.txmode = {
@@ -124,7 +87,7 @@ static const struct rte_eth_conf vmdq_conf_default = {
 };
 
 static unsigned lcore_ids[RTE_MAX_LCORE];
-static uint8_t ports[RTE_MAX_ETHPORTS];
+static uint16_t ports[RTE_MAX_ETHPORTS];
 static unsigned num_ports; /**< The number of ports specified in command line */
 
 /* array used for printing out statistics */
@@ -144,12 +107,12 @@ const uint16_t num_vlans = RTE_DIM(vlan_tags);
 static uint16_t num_pf_queues,  num_vmdq_queues;
 static uint16_t vmdq_pool_base, vmdq_queue_base;
 /* pool mac addr template, pool mac addr is like: 52 54 00 12 port# pool# */
-static struct ether_addr pool_addr_template = {
+static struct rte_ether_addr pool_addr_template = {
 	.addr_bytes = {0x52, 0x54, 0x00, 0x12, 0x00, 0x00}
 };
 
 /* ethernet addresses of ports */
-static struct ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
+static struct rte_ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
 
 #define MAX_QUEUE_NUM_10G 128
 #define MAX_QUEUE_NUM_1G 8
@@ -181,6 +144,13 @@ get_eth_conf(struct rte_eth_conf *eth_conf, uint32_t num_pools)
 	(void)(rte_memcpy(eth_conf, &vmdq_conf_default, sizeof(*eth_conf)));
 	(void)(rte_memcpy(&eth_conf->rx_adv_conf.vmdq_rx_conf, &conf,
 		   sizeof(eth_conf->rx_adv_conf.vmdq_rx_conf)));
+	if (rss_enable) {
+		eth_conf->rxmode.mq_mode = ETH_MQ_RX_VMDQ_RSS;
+		eth_conf->rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IP |
+							ETH_RSS_UDP |
+							ETH_RSS_TCP |
+							ETH_RSS_SCTP;
+	}
 	return 0;
 }
 
@@ -189,23 +159,32 @@ get_eth_conf(struct rte_eth_conf *eth_conf, uint32_t num_pools)
  * coming from the mbuf_pool passed as parameter
  */
 static inline int
-port_init(uint8_t port, struct rte_mempool *mbuf_pool)
+port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_rxconf *rxconf;
+	struct rte_eth_txconf *txconf;
 	struct rte_eth_conf port_conf;
 	uint16_t rxRings, txRings;
-	const uint16_t rxRingSize = RTE_TEST_RX_DESC_DEFAULT, txRingSize = RTE_TEST_TX_DESC_DEFAULT;
+	uint16_t rxRingSize = RTE_TEST_RX_DESC_DEFAULT;
+	uint16_t txRingSize = RTE_TEST_TX_DESC_DEFAULT;
 	int retval;
 	uint16_t q;
 	uint16_t queues_per_pool;
 	uint32_t max_nb_pools;
+	uint64_t rss_hf_tmp;
 
 	/*
 	 * The max pool number from dev_info will be used to validate the pool
 	 * number specified in cmd line
 	 */
-	rte_eth_dev_info_get(port, &dev_info);
+	retval = rte_eth_dev_info_get(port, &dev_info);
+	if (retval != 0) {
+		printf("Error during getting device (port %u) info: %s\n",
+				port, strerror(-retval));
+		return retval;
+	}
+
 	max_nb_pools = (uint32_t)dev_info.max_vmdq_pools;
 	/*
 	 * We allow to process part of VMDQ pools specified by num_pools in
@@ -236,8 +215,19 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 		num_pf_queues, num_pools, queues_per_pool);
 	printf("vmdq queue base: %d pool base %d\n",
 		vmdq_queue_base, vmdq_pool_base);
-	if (port >= rte_eth_dev_count())
+	if (!rte_eth_dev_is_valid_port(port))
 		return -1;
+
+	rss_hf_tmp = port_conf.rx_adv_conf.rss_conf.rss_hf;
+	port_conf.rx_adv_conf.rss_conf.rss_hf &=
+		dev_info.flow_type_rss_offloads;
+	if (port_conf.rx_adv_conf.rss_conf.rss_hf != rss_hf_tmp) {
+		printf("Port %u modified RSS hash function based on hardware support,"
+			"requested:%#"PRIx64" configured:%#"PRIx64"\n",
+			port,
+			rss_hf_tmp,
+			port_conf.rx_adv_conf.rss_conf.rss_hf);
+	}
 
 	/*
 	 * Though in this example, we only receive packets from the first queue
@@ -249,13 +239,36 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 	 */
 	rxRings = (uint16_t)dev_info.max_rx_queues;
 	txRings = (uint16_t)dev_info.max_tx_queues;
+
+	retval = rte_eth_dev_info_get(port, &dev_info);
+	if (retval != 0) {
+		printf("Error during getting device (port %u) info: %s\n",
+				port, strerror(-retval));
+		return retval;
+	}
+
+	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+		port_conf.txmode.offloads |=
+			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
 	retval = rte_eth_dev_configure(port, rxRings, txRings, &port_conf);
 	if (retval != 0)
 		return retval;
 
-	rte_eth_dev_info_get(port, &dev_info);
+	retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &rxRingSize,
+				&txRingSize);
+	if (retval != 0)
+		return retval;
+	if (RTE_MAX(rxRingSize, txRingSize) > RTE_MAX(RTE_TEST_RX_DESC_DEFAULT,
+			RTE_TEST_TX_DESC_DEFAULT)) {
+		printf("Mbuf pool has an insufficient size for port %u.\n",
+			port);
+		return -1;
+	}
+
 	rxconf = &dev_info.default_rxconf;
 	rxconf->rx_drop_en = 1;
+	txconf = &dev_info.default_txconf;
+	txconf->offloads = port_conf.txmode.offloads;
 	for (q = 0; q < rxRings; q++) {
 		retval = rte_eth_rx_queue_setup(port, q, rxRingSize,
 					rte_eth_dev_socket_id(port),
@@ -270,7 +283,7 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 	for (q = 0; q < txRings; q++) {
 		retval = rte_eth_tx_queue_setup(port, q, txRingSize,
 					rte_eth_dev_socket_id(port),
-					NULL);
+					txconf);
 		if (retval < 0) {
 			printf("initialise tx queue %d failed\n", q);
 			return retval;
@@ -283,7 +296,12 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 	}
 
-	rte_eth_macaddr_get(port, &vmdq_ports_eth_addr[port]);
+	retval = rte_eth_macaddr_get(port, &vmdq_ports_eth_addr[port]);
+	if (retval < 0) {
+		printf("port %d MAC address get failed: %s\n", port,
+		       rte_strerror(-retval));
+		return retval;
+	}
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
 			(unsigned)port,
@@ -300,7 +318,7 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 	 * Removes this after i40e fixes this issue.
 	 */
 	for (q = 0; q < num_pools; q++) {
-		struct ether_addr mac;
+		struct rte_ether_addr mac;
 		mac = pool_addr_template;
 		mac.addr_bytes[4] = port;
 		mac.addr_bytes[5] = q;
@@ -352,10 +370,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -365,7 +380,8 @@ static void
 vmdq_usage(const char *prgname)
 {
 	printf("%s [EAL options] -- -p PORTMASK]\n"
-	"  --nb-pools NP: number of pools\n",
+	"  --nb-pools NP: number of pools\n"
+	"  --enable-rss: enable RSS (disabled by default)\n",
 	       prgname);
 }
 
@@ -379,6 +395,7 @@ vmdq_parse_args(int argc, char **argv)
 	const char *prgname = argv[0];
 	static struct option long_option[] = {
 		{"nb-pools", required_argument, NULL, 0},
+		{"enable-rss", 0, NULL, 0},
 		{NULL, 0, 0, 0}
 	};
 
@@ -396,11 +413,18 @@ vmdq_parse_args(int argc, char **argv)
 			}
 			break;
 		case 0:
-			if (vmdq_parse_num_pools(optarg) == -1) {
-				printf("invalid number of pools\n");
-				vmdq_usage(prgname);
-				return -1;
+			if (!strcmp(long_option[option_index].name,
+			    "nb-pools")) {
+				if (vmdq_parse_num_pools(optarg) == -1) {
+					printf("invalid number of pools\n");
+					vmdq_usage(prgname);
+					return -1;
+				}
 			}
+
+			if (!strcmp(long_option[option_index].name,
+			    "enable-rss"))
+				rss_enable = 1;
 			break;
 
 		default:
@@ -426,27 +450,28 @@ vmdq_parse_args(int argc, char **argv)
 static void
 update_mac_address(struct rte_mbuf *m, unsigned dst_port)
 {
-	struct ether_hdr *eth;
+	struct rte_ether_hdr *eth;
 	void *tmp;
 
-	eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	/* 02:00:00:00:00:xx */
 	tmp = &eth->d_addr.addr_bytes[0];
 	*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dst_port << 40);
 
 	/* src addr */
-	ether_addr_copy(&vmdq_ports_eth_addr[dst_port], &eth->s_addr);
+	rte_ether_addr_copy(&vmdq_ports_eth_addr[dst_port], &eth->s_addr);
 }
 
 /* When we receive a HUP signal, print out our stats */
 static void
 sighup_handler(int signum)
 {
-	unsigned q;
-	for (q = 0; q < num_queues; q++) {
-		if (q % (num_queues/num_pools) == 0)
-			printf("\nPool %u: ", q/(num_queues/num_pools));
+	unsigned int q = vmdq_queue_base;
+	for (; q < num_queues; q++) {
+		if ((q - vmdq_queue_base) % (num_vmdq_queues / num_pools) == 0)
+			printf("\nPool %u: ", (q - vmdq_queue_base) /
+			       (num_vmdq_queues / num_pools));
 		printf("%lu ", rxPackets[q]);
 	}
 	printf("\nFinished handling signal %d\n", signum);
@@ -457,7 +482,7 @@ sighup_handler(int signum)
  * and writing to OUTPUT_PORT
  */
 static int
-lcore_main(__attribute__((__unused__)) void *dummy)
+lcore_main(__rte_unused void *dummy)
 {
 	const uint16_t lcore_id = (uint16_t)rte_lcore_id();
 	const uint16_t num_cores = (uint16_t)rte_lcore_count();
@@ -505,7 +530,7 @@ lcore_main(__attribute__((__unused__)) void *dummy)
 
 	for (;;) {
 		struct rte_mbuf *buf[MAX_PKT_BURST];
-		const uint16_t buf_size = sizeof(buf) / sizeof(buf[0]);
+		const uint16_t buf_size = RTE_DIM(buf);
 
 		for (p = 0; p < num_ports; p++) {
 			const uint8_t sport = ports[p];
@@ -556,9 +581,9 @@ static unsigned check_ports_num(unsigned nb_ports)
 	}
 
 	for (portid = 0; portid < num_ports; portid++) {
-		if (ports[portid] >= nb_ports) {
-			printf("\nSpecified port ID(%u) exceeds max system port ID(%u)\n",
-				ports[portid], (nb_ports - 1));
+		if (!rte_eth_dev_is_valid_port(ports[portid])) {
+			printf("\nSpecified port ID(%u) is not valid\n",
+				ports[portid]);
 			ports[portid] = INVALID_PORT_ID;
 			valid_num_ports--;
 		}
@@ -574,7 +599,7 @@ main(int argc, char *argv[])
 	unsigned lcore_id, core_id = 0;
 	int ret;
 	unsigned nb_ports, valid_num_ports;
-	uint8_t portid;
+	uint16_t portid;
 
 	signal(SIGHUP, sighup_handler);
 
@@ -597,9 +622,7 @@ main(int argc, char *argv[])
 	if (rte_lcore_count() > RTE_MAX_LCORE)
 		rte_exit(EXIT_FAILURE, "Not enough cores\n");
 
-	nb_ports = rte_eth_dev_count();
-	if (nb_ports > RTE_MAX_ETHPORTS)
-		nb_ports = RTE_MAX_ETHPORTS;
+	nb_ports = rte_eth_dev_count_avail();
 
 	/*
 	 * Update the global var NUM_PORTS and global array PORTS
@@ -619,7 +642,7 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
 	/* initialize all ports */
-	for (portid = 0; portid < nb_ports; portid++) {
+	RTE_ETH_FOREACH_DEV(portid) {
 		/* skip ports that are not enabled */
 		if ((enabled_port_mask & (1 << portid)) == 0) {
 			printf("\nSkipping disabled port %d\n", portid);

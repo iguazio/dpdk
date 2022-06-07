@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #include "e1000_api.h"
 
@@ -102,6 +73,7 @@ void e1000_init_phy_ops_generic(struct e1000_hw *hw)
 /**
  *  e1000_null_set_page - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @data: dummy variable
  **/
 s32 e1000_null_set_page(struct e1000_hw E1000_UNUSEDARG *hw,
 			u16 E1000_UNUSEDARG data)
@@ -114,6 +86,8 @@ s32 e1000_null_set_page(struct e1000_hw E1000_UNUSEDARG *hw,
 /**
  *  e1000_null_read_reg - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @offset: dummy variable
+ *  @data: dummy variable
  **/
 s32 e1000_null_read_reg(struct e1000_hw E1000_UNUSEDARG *hw,
 			u32 E1000_UNUSEDARG offset, u16 E1000_UNUSEDARG *data)
@@ -137,6 +111,7 @@ void e1000_null_phy_generic(struct e1000_hw E1000_UNUSEDARG *hw)
 /**
  *  e1000_null_lplu_state - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @active: dummy variable
  **/
 s32 e1000_null_lplu_state(struct e1000_hw E1000_UNUSEDARG *hw,
 			  bool E1000_UNUSEDARG active)
@@ -149,6 +124,8 @@ s32 e1000_null_lplu_state(struct e1000_hw E1000_UNUSEDARG *hw,
 /**
  *  e1000_null_write_reg - No-op function, return 0
  *  @hw: pointer to the HW structure
+ *  @offset: dummy variable
+ *  @data: dummy variable
  **/
 s32 e1000_null_write_reg(struct e1000_hw E1000_UNUSEDARG *hw,
 			 u32 E1000_UNUSEDARG offset, u16 E1000_UNUSEDARG data)
@@ -620,7 +597,7 @@ s32 e1000_write_sfp_data_byte(struct e1000_hw *hw, u16 offset, u8 data)
 				 * lane and update whole word
 				 */
 				data_local = i2ccmd & 0xFF00;
-				data_local |= data;
+				data_local |= (u32)data;
 				i2ccmd = ((offset <<
 					E1000_I2CCMD_REG_ADDR_SHIFT) |
 					E1000_I2CCMD_OPCODE_WRITE | data_local);
@@ -1303,6 +1280,7 @@ s32 e1000_copper_link_setup_m88_gen2(struct e1000_hw *hw)
 			phy_data |= M88E1000_PSCR_AUTO_X_1000T;
 			break;
 		}
+		/* Fall through */
 	case 0:
 	default:
 		phy_data |= M88E1000_PSCR_AUTO_X_MODE;
@@ -1693,7 +1671,7 @@ s32 e1000_copper_link_autoneg(struct e1000_hw *hw)
 s32 e1000_setup_copper_link_generic(struct e1000_hw *hw)
 {
 	s32 ret_val;
-	bool link;
+	bool link = true;
 
 	DEBUGFUNC("e1000_setup_copper_link_generic");
 
@@ -1833,9 +1811,9 @@ s32 e1000_phy_force_speed_duplex_m88(struct e1000_hw *hw)
 					     phy_data);
 		if (ret_val)
 			return ret_val;
-	}
 
-	DEBUGOUT1("M88E1000 PSCR: %X\n", phy_data);
+		DEBUGOUT1("M88E1000 PSCR: %X\n", phy_data);
+	}
 
 	ret_val = phy->ops.read_reg(hw, PHY_CONTROL, &phy_data);
 	if (ret_val)
@@ -3093,6 +3071,7 @@ s32 e1000_determine_phy_address(struct e1000_hw *hw)
 /**
  *  e1000_get_phy_addr_for_bm_page - Retrieve PHY page address
  *  @page: page to access
+ *  @reg: register to access
  *
  *  Returns the phy address for the page requested.
  **/
@@ -3498,16 +3477,10 @@ STATIC s32 e1000_access_phy_wakeup_reg_bm(struct e1000_hw *hw, u32 offset,
 void e1000_power_up_phy_copper(struct e1000_hw *hw)
 {
 	u16 mii_reg = 0;
-	u16 power_reg = 0;
 
 	/* The PHY will retain its settings across a power down/up cycle */
 	hw->phy.ops.read_reg(hw, PHY_CONTROL, &mii_reg);
 	mii_reg &= ~MII_CR_POWER_DOWN;
-	if (hw->phy.type == e1000_phy_i210) {
-		hw->phy.ops.read_reg(hw, GS40G_COPPER_SPEC, &power_reg);
-		power_reg &= ~GS40G_CS_POWER_DOWN;
-		hw->phy.ops.write_reg(hw, GS40G_COPPER_SPEC, power_reg);
-	}
 	hw->phy.ops.write_reg(hw, PHY_CONTROL, mii_reg);
 }
 
@@ -3522,17 +3495,10 @@ void e1000_power_up_phy_copper(struct e1000_hw *hw)
 void e1000_power_down_phy_copper(struct e1000_hw *hw)
 {
 	u16 mii_reg = 0;
-	u16 power_reg = 0;
 
 	/* The PHY will retain its settings across a power down/up cycle */
 	hw->phy.ops.read_reg(hw, PHY_CONTROL, &mii_reg);
 	mii_reg |= MII_CR_POWER_DOWN;
-	/* i210 Phy requires an additional bit for power up/down */
-	if (hw->phy.type == e1000_phy_i210) {
-		hw->phy.ops.read_reg(hw, GS40G_COPPER_SPEC, &power_reg);
-		power_reg |= GS40G_CS_POWER_DOWN;
-		hw->phy.ops.write_reg(hw, GS40G_COPPER_SPEC, power_reg);
-	}
 	hw->phy.ops.write_reg(hw, PHY_CONTROL, mii_reg);
 	msec_delay(1);
 }
@@ -3543,6 +3509,7 @@ void e1000_power_down_phy_copper(struct e1000_hw *hw)
  *  @offset: register offset to be read
  *  @data: pointer to the read data
  *  @locked: semaphore has already been acquired or not
+ *  @page_set: BM_WUC_PAGE already set and access enabled
  *
  *  Acquires semaphore, if necessary, then reads the PHY register at offset
  *  and stores the retrieved information in data.  Release any acquired
@@ -3563,7 +3530,6 @@ STATIC s32 __e1000_read_phy_reg_hv(struct e1000_hw *hw, u32 offset, u16 *data,
 		if (ret_val)
 			return ret_val;
 	}
-
 	/* Page 800 works differently than the rest so it has its own func */
 	if (page == BM_WUC_PAGE) {
 		ret_val = e1000_access_phy_wakeup_reg_bm(hw, offset, data,
@@ -3654,6 +3620,7 @@ s32 e1000_read_phy_reg_page_hv(struct e1000_hw *hw, u32 offset, u16 *data)
  *  @offset: register offset to write to
  *  @data: data to write at register offset
  *  @locked: semaphore has already been acquired or not
+ *  @page_set: BM_WUC_PAGE already set and access enabled
  *
  *  Acquires semaphore, if necessary, then writes the data to PHY register
  *  at the offset.  Release any acquired semaphores before exiting.
@@ -3673,7 +3640,6 @@ STATIC s32 __e1000_write_phy_reg_hv(struct e1000_hw *hw, u32 offset, u16 data,
 		if (ret_val)
 			return ret_val;
 	}
-
 	/* Page 800 works differently than the rest so it has its own func */
 	if (page == BM_WUC_PAGE) {
 		ret_val = e1000_access_phy_wakeup_reg_bm(hw, offset, &data,
@@ -4168,12 +4134,13 @@ s32 e1000_read_phy_reg_mphy(struct e1000_hw *hw, u32 address, u32 *data)
 	*data = E1000_READ_REG(hw, E1000_MPHY_DATA);
 
 	/* Disable access to mPHY if it was originally disabled */
-	if (locked)
+	if (locked) {
 		ready = e1000_is_mphy_ready(hw);
 		if (!ready)
 			return -E1000_ERR_PHY;
 		E1000_WRITE_REG(hw, E1000_MPHY_ADDR_CTRL,
 				E1000_MPHY_DIS_ACCESS);
+	}
 
 	return E1000_SUCCESS;
 }
@@ -4233,12 +4200,13 @@ s32 e1000_write_phy_reg_mphy(struct e1000_hw *hw, u32 address, u32 data,
 	E1000_WRITE_REG(hw, E1000_MPHY_DATA, data);
 
 	/* Disable access to mPHY if it was originally disabled */
-	if (locked)
+	if (locked) {
 		ready = e1000_is_mphy_ready(hw);
 		if (!ready)
 			return -E1000_ERR_PHY;
 		E1000_WRITE_REG(hw, E1000_MPHY_ADDR_CTRL,
 				E1000_MPHY_DIS_ACCESS);
+	}
 
 	return E1000_SUCCESS;
 }
@@ -4270,4 +4238,76 @@ bool e1000_is_mphy_ready(struct e1000_hw *hw)
 		DEBUGOUT("ERROR READING mPHY control register, phy is busy.\n");
 
 	return ready;
+}
+
+/**
+ *  __e1000_access_xmdio_reg - Read/write XMDIO register
+ *  @hw: pointer to the HW structure
+ *  @address: XMDIO address to program
+ *  @dev_addr: device address to program
+ *  @data: pointer to value to read/write from/to the XMDIO address
+ *  @read: boolean flag to indicate read or write
+ **/
+STATIC s32 __e1000_access_xmdio_reg(struct e1000_hw *hw, u16 address,
+				    u8 dev_addr, u16 *data, bool read)
+{
+	s32 ret_val;
+
+	DEBUGFUNC("__e1000_access_xmdio_reg");
+
+	ret_val = hw->phy.ops.write_reg(hw, E1000_MMDAC, dev_addr);
+	if (ret_val)
+		return ret_val;
+
+	ret_val = hw->phy.ops.write_reg(hw, E1000_MMDAAD, address);
+	if (ret_val)
+		return ret_val;
+
+	ret_val = hw->phy.ops.write_reg(hw, E1000_MMDAC, E1000_MMDAC_FUNC_DATA |
+					dev_addr);
+	if (ret_val)
+		return ret_val;
+
+	if (read)
+		ret_val = hw->phy.ops.read_reg(hw, E1000_MMDAAD, data);
+	else
+		ret_val = hw->phy.ops.write_reg(hw, E1000_MMDAAD, *data);
+	if (ret_val)
+		return ret_val;
+
+	/* Recalibrate the device back to 0 */
+	ret_val = hw->phy.ops.write_reg(hw, E1000_MMDAC, 0);
+	if (ret_val)
+		return ret_val;
+
+	return ret_val;
+}
+
+/**
+ *  e1000_read_xmdio_reg - Read XMDIO register
+ *  @hw: pointer to the HW structure
+ *  @addr: XMDIO address to program
+ *  @dev_addr: device address to program
+ *  @data: value to be read from the EMI address
+ **/
+s32 e1000_read_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr, u16 *data)
+{
+	DEBUGFUNC("e1000_read_xmdio_reg");
+
+		return __e1000_access_xmdio_reg(hw, addr, dev_addr, data, true);
+}
+
+/**
+ *  e1000_write_xmdio_reg - Write XMDIO register
+ *  @hw: pointer to the HW structure
+ *  @addr: XMDIO address to program
+ *  @dev_addr: device address to program
+ *  @data: value to be written to the XMDIO address
+ **/
+s32 e1000_write_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr, u16 data)
+{
+	DEBUGFUNC("e1000_write_xmdio_reg");
+
+		return __e1000_access_xmdio_reg(hw, addr, dev_addr, &data,
+						false);
 }

@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #include <stdio.h>
@@ -68,39 +39,40 @@ struct rte_acl_field_def ipv4_field_formats[NUM_FIELDS_IPV4] = {
 		.size = sizeof(uint8_t),
 		.field_index = PROTO_FIELD_IPV4,
 		.input_index = PROTO_FIELD_IPV4,
-		.offset = sizeof(struct ether_hdr) +
-			offsetof(struct ipv4_hdr, next_proto_id),
+		.offset = sizeof(struct rte_ether_hdr) +
+			offsetof(struct rte_ipv4_hdr, next_proto_id),
 	},
 	{
 		.type = RTE_ACL_FIELD_TYPE_MASK,
 		.size = sizeof(uint32_t),
 		.field_index = SRC_FIELD_IPV4,
 		.input_index = SRC_FIELD_IPV4,
-		.offset = sizeof(struct ether_hdr) +
-			offsetof(struct ipv4_hdr, src_addr),
+		.offset = sizeof(struct rte_ether_hdr) +
+			offsetof(struct rte_ipv4_hdr, src_addr),
 	},
 	{
 		.type = RTE_ACL_FIELD_TYPE_MASK,
 		.size = sizeof(uint32_t),
 		.field_index = DST_FIELD_IPV4,
 		.input_index = DST_FIELD_IPV4,
-		.offset = sizeof(struct ether_hdr) +
-			offsetof(struct ipv4_hdr, dst_addr),
+		.offset = sizeof(struct rte_ether_hdr) +
+			offsetof(struct rte_ipv4_hdr, dst_addr),
 	},
 	{
 		.type = RTE_ACL_FIELD_TYPE_RANGE,
 		.size = sizeof(uint16_t),
 		.field_index = SRCP_FIELD_IPV4,
 		.input_index = SRCP_FIELD_IPV4,
-		.offset = sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr),
+		.offset = sizeof(struct rte_ether_hdr) +
+			sizeof(struct rte_ipv4_hdr),
 	},
 	{
 		.type = RTE_ACL_FIELD_TYPE_RANGE,
 		.size = sizeof(uint16_t),
 		.field_index = DSTP_FIELD_IPV4,
 		.input_index = SRCP_FIELD_IPV4,
-		.offset = sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) +
-			sizeof(uint16_t),
+		.offset = sizeof(struct rte_ether_hdr) +
+			sizeof(struct rte_ipv4_hdr) + sizeof(uint16_t),
 	},
 };
 
@@ -159,7 +131,6 @@ app_main_loop_worker_pipeline_acl(void) {
 			.ops = &rte_port_ring_writer_ops,
 			.arg_create = (void *) &port_ring_params,
 			.f_action = NULL,
-			.f_action_bulk = NULL,
 			.arg_ah = NULL,
 		};
 

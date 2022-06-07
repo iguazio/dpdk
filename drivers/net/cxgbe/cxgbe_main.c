@@ -1,34 +1,6 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2014-2015 Chelsio Communications.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Chelsio Communications nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2014-2018 Chelsio Communications.
+ * All rights reserved.
  */
 
 #include <sys/queue.h>
@@ -51,21 +23,112 @@
 #include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_memory.h>
-#include <rte_memzone.h>
 #include <rte_tailq.h>
 #include <rte_eal.h>
 #include <rte_alarm.h>
 #include <rte_ether.h>
-#include <rte_ethdev.h>
-#include <rte_atomic.h>
-#include <rte_malloc.h>
+#include <rte_ethdev_driver.h>
+#include <rte_ethdev_pci.h>
 #include <rte_random.h>
 #include <rte_dev.h>
+#include <rte_kvargs.h>
 
-#include "common.h"
-#include "t4_regs.h"
-#include "t4_msg.h"
+#include "base/common.h"
+#include "base/t4_regs.h"
+#include "base/t4_msg.h"
 #include "cxgbe.h"
+#include "cxgbe_pfvf.h"
+#include "clip_tbl.h"
+#include "l2t.h"
+#include "smt.h"
+#include "mps_tcam.h"
+
+static const u16 cxgbe_filter_mode_features[] = {
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE |
+	 F_PROTOCOL | F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE |
+	 F_PROTOCOL | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE | F_TOS |
+	 F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE | F_TOS |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_PROTOCOL | F_TOS |
+	 F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_PROTOCOL | F_VLAN |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_PROTOCOL | F_VNIC_ID |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_TOS | F_VLAN |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_TOS | F_VNIC_ID |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_VLAN | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_MACMATCH | F_VNIC_ID | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_ETHERTYPE | F_PROTOCOL | F_TOS |
+	 F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_ETHERTYPE | F_VLAN | F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_ETHERTYPE | F_VLAN | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_ETHERTYPE | F_VNIC_ID | F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_ETHERTYPE | F_VNIC_ID | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VLAN | F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VLAN | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VNIC_ID |
+	 F_PORT),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VNIC_ID |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_VLAN | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_PROTOCOL | F_VNIC_ID | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_TOS | F_VLAN | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_TOS | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MPSHITTYPE | F_VLAN | F_VNIC_ID | F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_ETHERTYPE | F_PROTOCOL | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_ETHERTYPE | F_TOS | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_PROTOCOL | F_VLAN | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_PROTOCOL | F_VNIC_ID | F_PORT |
+	 F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_TOS | F_VLAN | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_MACMATCH | F_TOS | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_ETHERTYPE | F_VLAN | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_ETHERTYPE | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_FRAGMENTATION | F_PROTOCOL | F_TOS | F_VLAN | F_FCOE),
+	(F_FRAGMENTATION | F_PROTOCOL | F_TOS | F_VNIC_ID | F_FCOE),
+	(F_FRAGMENTATION | F_VLAN | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE | F_PROTOCOL | F_PORT |
+	 F_FCOE),
+	(F_MPSHITTYPE | F_MACMATCH | F_ETHERTYPE | F_TOS | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_MACMATCH | F_PROTOCOL | F_VLAN | F_PORT),
+	(F_MPSHITTYPE | F_MACMATCH | F_PROTOCOL | F_VNIC_ID | F_PORT),
+	(F_MPSHITTYPE | F_MACMATCH | F_TOS | F_VLAN | F_PORT),
+	(F_MPSHITTYPE | F_MACMATCH | F_TOS | F_VNIC_ID | F_PORT),
+	(F_MPSHITTYPE | F_ETHERTYPE | F_VLAN | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_ETHERTYPE | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VLAN | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_PROTOCOL | F_TOS | F_VNIC_ID | F_PORT | F_FCOE),
+	(F_MPSHITTYPE | F_VLAN | F_VNIC_ID | F_PORT),
+};
+
+/**
+ * Allocate a chunk of memory. The allocated memory is cleared.
+ */
+void *t4_alloc_mem(size_t size)
+{
+	return rte_zmalloc(NULL, size, 0);
+}
+
+/**
+ * Free memory allocated through t4_alloc_mem().
+ */
+void t4_free_mem(void *addr)
+{
+	rte_free(addr);
+}
 
 /*
  * Response queue handler for the FW event queue.
@@ -99,6 +162,26 @@ static int fwevtq_handler(struct sge_rspq *q, const __be64 *rsp,
 		const struct cpl_fw6_msg *msg = (const void *)rsp;
 
 		t4_handle_fw_rpl(q->adapter, msg->data);
+	} else if (opcode == CPL_ABORT_RPL_RSS) {
+		const struct cpl_abort_rpl_rss *p = (const void *)rsp;
+
+		cxgbe_hash_del_filter_rpl(q->adapter, p);
+	} else if (opcode == CPL_SET_TCB_RPL) {
+		const struct cpl_set_tcb_rpl *p = (const void *)rsp;
+
+		cxgbe_filter_rpl(q->adapter, p);
+	} else if (opcode == CPL_ACT_OPEN_RPL) {
+		const struct cpl_act_open_rpl *p = (const void *)rsp;
+
+		cxgbe_hash_filter_rpl(q->adapter, p);
+	} else if (opcode == CPL_L2T_WRITE_RPL) {
+		const struct cpl_l2t_write_rpl *p = (const void *)rsp;
+
+		cxgbe_do_l2t_write_rpl(q->adapter, p);
+	} else if (opcode == CPL_SMT_WRITE_RPL) {
+		const struct cpl_smt_write_rpl *p = (const void *)rsp;
+
+		cxgbe_do_smt_write_rpl(q->adapter, p);
 	} else {
 		dev_err(adapter, "unexpected CPL %#x on FW event queue\n",
 			opcode);
@@ -107,7 +190,84 @@ out:
 	return 0;
 }
 
-int setup_sge_fwevtq(struct adapter *adapter)
+/**
+ * Setup sge control queues to pass control information.
+ */
+int cxgbe_setup_sge_ctrl_txq(struct adapter *adapter)
+{
+	struct sge *s = &adapter->sge;
+	int err = 0, i = 0;
+
+	for_each_port(adapter, i) {
+		struct port_info *pi = adap2pinfo(adapter, i);
+		char name[RTE_ETH_NAME_MAX_LEN];
+		struct sge_ctrl_txq *q = &s->ctrlq[i];
+
+		q->q.size = 1024;
+		err = t4_sge_alloc_ctrl_txq(adapter, q,
+					    adapter->eth_dev,  i,
+					    s->fw_evtq.cntxt_id,
+					    rte_socket_id());
+		if (err) {
+			dev_err(adapter, "Failed to alloc ctrl txq. Err: %d",
+				err);
+			goto out;
+		}
+		snprintf(name, sizeof(name), "%s_ctrl_pool_%d",
+			 pi->eth_dev->device->driver->name,
+			 pi->eth_dev->data->port_id);
+		q->mb_pool = rte_pktmbuf_pool_create(name, s->ctrlq[i].q.size,
+						     RTE_CACHE_LINE_SIZE,
+						     RTE_MBUF_PRIV_ALIGN,
+						     RTE_MBUF_DEFAULT_BUF_SIZE,
+						     SOCKET_ID_ANY);
+		if (!q->mb_pool) {
+			err = -rte_errno;
+			dev_err(adapter,
+				"Can't create ctrl pool for port %d. Err: %d\n",
+				pi->eth_dev->data->port_id, err);
+			goto out;
+		}
+	}
+	return 0;
+out:
+	t4_free_sge_resources(adapter);
+	return err;
+}
+
+/**
+ * cxgbe_poll_for_completion: Poll rxq for completion
+ * @q: rxq to poll
+ * @ms: milliseconds to delay
+ * @cnt: number of times to poll
+ * @c: completion to check for 'done' status
+ *
+ * Polls the rxq for reples until completion is done or the count
+ * expires.
+ */
+int cxgbe_poll_for_completion(struct sge_rspq *q, unsigned int ms,
+			      unsigned int cnt, struct t4_completion *c)
+{
+	unsigned int i;
+	unsigned int work_done, budget = 32;
+
+	if (!c)
+		return -EINVAL;
+
+	for (i = 0; i < cnt; i++) {
+		cxgbe_poll(q, NULL, budget, &work_done);
+		t4_os_lock(&c->lock);
+		if (c->done) {
+			t4_os_unlock(&c->lock);
+			return 0;
+		}
+		t4_os_unlock(&c->lock);
+		rte_delay_ms(ms);
+	}
+	return -ETIMEDOUT;
+}
+
+int cxgbe_setup_sge_fwevtq(struct adapter *adapter)
 {
 	struct sge *s = &adapter->sge;
 	int err = 0;
@@ -198,19 +358,191 @@ int cxgb4_set_rspq_intr_params(struct sge_rspq *q, unsigned int us,
 	return 0;
 }
 
+/**
+ * Allocate an active-open TID and set it to the supplied value.
+ */
+int cxgbe_alloc_atid(struct tid_info *t, void *data)
+{
+	int atid = -1;
+
+	t4_os_lock(&t->atid_lock);
+	if (t->afree) {
+		union aopen_entry *p = t->afree;
+
+		atid = p - t->atid_tab;
+		t->afree = p->next;
+		p->data = data;
+		t->atids_in_use++;
+	}
+	t4_os_unlock(&t->atid_lock);
+	return atid;
+}
+
+/**
+ * Release an active-open TID.
+ */
+void cxgbe_free_atid(struct tid_info *t, unsigned int atid)
+{
+	union aopen_entry *p = &t->atid_tab[atid];
+
+	t4_os_lock(&t->atid_lock);
+	p->next = t->afree;
+	t->afree = p;
+	t->atids_in_use--;
+	t4_os_unlock(&t->atid_lock);
+}
+
+/**
+ * Populate a TID_RELEASE WR.  Caller must properly size the skb.
+ */
+static void mk_tid_release(struct rte_mbuf *mbuf, unsigned int tid)
+{
+	struct cpl_tid_release *req;
+
+	req = rte_pktmbuf_mtod(mbuf, struct cpl_tid_release *);
+	INIT_TP_WR_MIT_CPL(req, CPL_TID_RELEASE, tid);
+}
+
+/**
+ * Release a TID and inform HW.  If we are unable to allocate the release
+ * message we defer to a work queue.
+ */
+void cxgbe_remove_tid(struct tid_info *t, unsigned int chan, unsigned int tid,
+		      unsigned short family)
+{
+	struct rte_mbuf *mbuf;
+	struct adapter *adap = container_of(t, struct adapter, tids);
+
+	WARN_ON(tid >= t->ntids);
+
+	if (t->tid_tab[tid]) {
+		t->tid_tab[tid] = NULL;
+		rte_atomic32_dec(&t->conns_in_use);
+		if (t->hash_base && tid >= t->hash_base) {
+			if (family == FILTER_TYPE_IPV4)
+				rte_atomic32_dec(&t->hash_tids_in_use);
+		} else {
+			if (family == FILTER_TYPE_IPV4)
+				rte_atomic32_dec(&t->tids_in_use);
+		}
+	}
+
+	mbuf = rte_pktmbuf_alloc((&adap->sge.ctrlq[chan])->mb_pool);
+	if (mbuf) {
+		mbuf->data_len = sizeof(struct cpl_tid_release);
+		mbuf->pkt_len = mbuf->data_len;
+		mk_tid_release(mbuf, tid);
+		t4_mgmt_tx(&adap->sge.ctrlq[chan], mbuf);
+	}
+}
+
+/**
+ * Insert a TID.
+ */
+void cxgbe_insert_tid(struct tid_info *t, void *data, unsigned int tid,
+		      unsigned short family)
+{
+	t->tid_tab[tid] = data;
+	if (t->hash_base && tid >= t->hash_base) {
+		if (family == FILTER_TYPE_IPV4)
+			rte_atomic32_inc(&t->hash_tids_in_use);
+	} else {
+		if (family == FILTER_TYPE_IPV4)
+			rte_atomic32_inc(&t->tids_in_use);
+	}
+
+	rte_atomic32_inc(&t->conns_in_use);
+}
+
+/**
+ * Free TID tables.
+ */
+static void tid_free(struct tid_info *t)
+{
+	if (t->tid_tab) {
+		if (t->ftid_bmap)
+			rte_bitmap_free(t->ftid_bmap);
+
+		if (t->ftid_bmap_array)
+			t4_os_free(t->ftid_bmap_array);
+
+		t4_os_free(t->tid_tab);
+	}
+
+	memset(t, 0, sizeof(struct tid_info));
+}
+
+/**
+ * Allocate and initialize the TID tables.  Returns 0 on success.
+ */
+static int tid_init(struct tid_info *t)
+{
+	size_t size;
+	unsigned int ftid_bmap_size;
+	unsigned int natids = t->natids;
+	unsigned int max_ftids = t->nftids;
+
+	ftid_bmap_size = rte_bitmap_get_memory_footprint(t->nftids);
+	size = t->ntids * sizeof(*t->tid_tab) +
+		max_ftids * sizeof(*t->ftid_tab) +
+		natids * sizeof(*t->atid_tab);
+
+	t->tid_tab = t4_os_alloc(size);
+	if (!t->tid_tab)
+		return -ENOMEM;
+
+	t->atid_tab = (union aopen_entry *)&t->tid_tab[t->ntids];
+	t->ftid_tab = (struct filter_entry *)&t->atid_tab[t->natids];
+	t->ftid_bmap_array = t4_os_alloc(ftid_bmap_size);
+	if (!t->ftid_bmap_array) {
+		tid_free(t);
+		return -ENOMEM;
+	}
+
+	t4_os_lock_init(&t->atid_lock);
+	t4_os_lock_init(&t->ftid_lock);
+
+	t->afree = NULL;
+	t->atids_in_use = 0;
+	rte_atomic32_init(&t->tids_in_use);
+	rte_atomic32_set(&t->tids_in_use, 0);
+	rte_atomic32_init(&t->conns_in_use);
+	rte_atomic32_set(&t->conns_in_use, 0);
+
+	/* Setup the free list for atid_tab and clear the stid bitmap. */
+	if (natids) {
+		while (--natids)
+			t->atid_tab[natids - 1].next = &t->atid_tab[natids];
+		t->afree = t->atid_tab;
+	}
+
+	t->ftid_bmap = rte_bitmap_init(t->nftids, t->ftid_bmap_array,
+				       ftid_bmap_size);
+	if (!t->ftid_bmap) {
+		tid_free(t);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 static inline bool is_x_1g_port(const struct link_config *lc)
 {
-	return ((lc->supported & FW_PORT_CAP_SPEED_1G) != 0);
+	return (lc->pcaps & FW_PORT_CAP32_SPEED_1G) != 0;
 }
 
 static inline bool is_x_10g_port(const struct link_config *lc)
 {
-	return ((lc->supported & FW_PORT_CAP_SPEED_10G) != 0 ||
-		(lc->supported & FW_PORT_CAP_SPEED_40G) != 0 ||
-		(lc->supported & FW_PORT_CAP_SPEED_100G) != 0);
+	unsigned int speeds, high_speeds;
+
+	speeds = V_FW_PORT_CAP32_SPEED(G_FW_PORT_CAP32_SPEED(lc->pcaps));
+	high_speeds = speeds &
+		      ~(FW_PORT_CAP32_SPEED_100M | FW_PORT_CAP32_SPEED_1G);
+
+	return high_speeds != 0;
 }
 
-inline void init_rspq(struct adapter *adap, struct sge_rspq *q,
+static inline void init_rspq(struct adapter *adap, struct sge_rspq *q,
 		      unsigned int us, unsigned int cnt,
 		      unsigned int size, unsigned int iqe_size)
 {
@@ -220,9 +552,9 @@ inline void init_rspq(struct adapter *adap, struct sge_rspq *q,
 	q->size = size;
 }
 
-int cfg_queue_count(struct rte_eth_dev *eth_dev)
+int cxgbe_cfg_queue_count(struct rte_eth_dev *eth_dev)
 {
-	struct port_info *pi = (struct port_info *)(eth_dev->data->dev_private);
+	struct port_info *pi = eth_dev->data->dev_private;
 	struct adapter *adap = pi->adapter;
 	struct sge *s = &adap->sge;
 	unsigned int max_queues = s->max_ethqsets / adap->params.nports;
@@ -247,10 +579,9 @@ int cfg_queue_count(struct rte_eth_dev *eth_dev)
 	return 0;
 }
 
-void cfg_queues(struct rte_eth_dev *eth_dev)
+void cxgbe_cfg_queues(struct rte_eth_dev *eth_dev)
 {
-	struct rte_config *config = rte_eal_get_configuration();
-	struct port_info *pi = (struct port_info *)(eth_dev->data->dev_private);
+	struct port_info *pi = eth_dev->data->dev_private;
 	struct adapter *adap = pi->adapter;
 	struct sge *s = &adap->sge;
 	unsigned int i, nb_ports = 0, qidx = 0;
@@ -268,12 +599,12 @@ void cfg_queues(struct rte_eth_dev *eth_dev)
 		 * We default up to # of cores queues per 1G/10G port.
 		 */
 		if (nb_ports)
-			q_per_port = (MAX_ETH_QSETS -
+			q_per_port = (s->max_ethqsets -
 				     (adap->params.nports - nb_ports)) /
 				     nb_ports;
 
-		if (q_per_port > config->lcore_count)
-			q_per_port = config->lcore_count;
+		if (q_per_port > rte_lcore_count())
+			q_per_port = rte_lcore_count();
 
 		for_each_port(adap, i) {
 			struct port_info *pi = adap2pinfo(adap, i);
@@ -292,12 +623,10 @@ void cfg_queues(struct rte_eth_dev *eth_dev)
 			qidx += pi->n_rx_qsets;
 		}
 
-		s->max_ethqsets = qidx;
-
 		for (i = 0; i < ARRAY_SIZE(s->ethrxq); i++) {
 			struct sge_eth_rxq *r = &s->ethrxq[i];
 
-			init_rspq(adap, &r->rspq, 0, 0, 1024, 64);
+			init_rspq(adap, &r->rspq, 5, 32, 1024, 64);
 			r->usembufs = 1;
 			r->fl.size = (r->usembufs ? 1024 : 72);
 		}
@@ -343,43 +672,65 @@ static void setup_memwin(struct adapter *adap)
 					MEMWIN_NIC));
 }
 
-static int init_rss(struct adapter *adap)
+int cxgbe_init_rss(struct adapter *adap)
 {
 	unsigned int i;
-	int err;
 
-	err = t4_init_rss_mode(adap, adap->mbox);
-	if (err)
-		return err;
+	if (is_pf4(adap)) {
+		int err;
+
+		err = t4_init_rss_mode(adap, adap->mbox);
+		if (err)
+			return err;
+	}
 
 	for_each_port(adap, i) {
 		struct port_info *pi = adap2pinfo(adap, i);
 
-		pi->rss = rte_zmalloc(NULL, pi->rss_size, 0);
+		pi->rss = rte_zmalloc(NULL, pi->rss_size * sizeof(u16), 0);
 		if (!pi->rss)
 			return -ENOMEM;
+
+		pi->rss_hf = CXGBE_RSS_HF_ALL;
 	}
 	return 0;
 }
 
-static void print_port_info(struct adapter *adap)
+/**
+ * Dump basic information about the adapter.
+ */
+void cxgbe_print_adapter_info(struct adapter *adap)
+{
+	/**
+	 * Hardware/Firmware/etc. Version/Revision IDs.
+	 */
+	t4_dump_version_info(adap);
+}
+
+void cxgbe_print_port_info(struct adapter *adap)
 {
 	int i;
 	char buf[80];
 	struct rte_pci_addr *loc = &adap->pdev->addr;
 
 	for_each_port(adap, i) {
-		const struct port_info *pi = &adap->port[i];
+		const struct port_info *pi = adap2pinfo(adap, i);
 		char *bufp = buf;
 
-		if (pi->link_cfg.supported & FW_PORT_CAP_SPEED_100M)
-			bufp += sprintf(bufp, "100/");
-		if (pi->link_cfg.supported & FW_PORT_CAP_SPEED_1G)
-			bufp += sprintf(bufp, "1000/");
-		if (pi->link_cfg.supported & FW_PORT_CAP_SPEED_10G)
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_100M)
+			bufp += sprintf(bufp, "100M/");
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_1G)
+			bufp += sprintf(bufp, "1G/");
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_10G)
 			bufp += sprintf(bufp, "10G/");
-		if (pi->link_cfg.supported & FW_PORT_CAP_SPEED_40G)
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_25G)
+			bufp += sprintf(bufp, "25G/");
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_40G)
 			bufp += sprintf(bufp, "40G/");
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_50G)
+			bufp += sprintf(bufp, "50G/");
+		if (pi->link_cfg.pcaps & FW_PORT_CAP32_SPEED_100G)
+			bufp += sprintf(bufp, "100G/");
 		if (bufp != buf)
 			--bufp;
 		sprintf(bufp, "BASE-%s",
@@ -393,6 +744,334 @@ static void print_port_info(struct adapter *adap)
 			 (adap->flags & USING_MSIX) ? " MSI-X" :
 			 (adap->flags & USING_MSI) ? " MSI" : "");
 	}
+}
+
+static int check_devargs_handler(const char *key, const char *value, void *p)
+{
+	if (!strncmp(key, CXGBE_DEVARG_CMN_KEEP_OVLAN, strlen(key)) ||
+	    !strncmp(key, CXGBE_DEVARG_CMN_TX_MODE_LATENCY, strlen(key)) ||
+	    !strncmp(key, CXGBE_DEVARG_VF_FORCE_LINK_UP, strlen(key))) {
+		if (!strncmp(value, "1", 1)) {
+			bool *dst_val = (bool *)p;
+
+			*dst_val = true;
+		}
+	}
+
+	if (!strncmp(key, CXGBE_DEVARG_PF_FILTER_MODE, strlen(key)) ||
+	    !strncmp(key, CXGBE_DEVARG_PF_FILTER_MASK, strlen(key))) {
+		u32 *dst_val = (u32 *)p;
+		char *endptr = NULL;
+		u32 arg_val;
+
+		arg_val = strtoul(value, &endptr, 16);
+		if (errno || endptr == value)
+			return -EINVAL;
+
+		*dst_val = arg_val;
+	}
+
+	return 0;
+}
+
+static int cxgbe_get_devargs(struct rte_devargs *devargs, const char *key,
+			     void *p)
+{
+	struct rte_kvargs *kvlist;
+	int ret = 0;
+
+	if (!devargs)
+		return 0;
+
+	kvlist = rte_kvargs_parse(devargs->args, NULL);
+	if (!kvlist)
+		return 0;
+
+	if (!rte_kvargs_count(kvlist, key))
+		goto out;
+
+	ret = rte_kvargs_process(kvlist, key, check_devargs_handler, p);
+
+out:
+	rte_kvargs_free(kvlist);
+
+	return ret;
+}
+
+static void cxgbe_get_devargs_int(struct adapter *adap, bool *dst,
+				  const char *key, bool default_value)
+{
+	struct rte_pci_device *pdev = adap->pdev;
+	int ret;
+	bool devarg_value = default_value;
+
+	*dst = default_value;
+	if (!pdev)
+		return;
+
+	ret = cxgbe_get_devargs(pdev->device.devargs, key, &devarg_value);
+	if (ret)
+		return;
+
+	*dst = devarg_value;
+}
+
+static void cxgbe_get_devargs_u32(struct adapter *adap, u32 *dst,
+				  const char *key, u32 default_value)
+{
+	struct rte_pci_device *pdev = adap->pdev;
+	u32 devarg_value = default_value;
+	int ret;
+
+	*dst = default_value;
+	if (!pdev)
+		return;
+
+	ret = cxgbe_get_devargs(pdev->device.devargs, key, &devarg_value);
+	if (ret)
+		return;
+
+	*dst = devarg_value;
+}
+
+void cxgbe_process_devargs(struct adapter *adap)
+{
+	cxgbe_get_devargs_int(adap, &adap->devargs.keep_ovlan,
+			      CXGBE_DEVARG_CMN_KEEP_OVLAN, false);
+	cxgbe_get_devargs_int(adap, &adap->devargs.tx_mode_latency,
+			      CXGBE_DEVARG_CMN_TX_MODE_LATENCY, false);
+	cxgbe_get_devargs_int(adap, &adap->devargs.force_link_up,
+			      CXGBE_DEVARG_VF_FORCE_LINK_UP, false);
+	cxgbe_get_devargs_u32(adap, &adap->devargs.filtermode,
+			      CXGBE_DEVARG_PF_FILTER_MODE, 0);
+	cxgbe_get_devargs_u32(adap, &adap->devargs.filtermask,
+			      CXGBE_DEVARG_PF_FILTER_MASK, 0);
+}
+
+static void configure_vlan_types(struct adapter *adapter)
+{
+	int i;
+
+	for_each_port(adapter, i) {
+		/* OVLAN Type 0x88a8 */
+		t4_set_reg_field(adapter, MPS_PORT_RX_OVLAN_REG(i, A_RX_OVLAN0),
+				 V_OVLAN_MASK(M_OVLAN_MASK) |
+				 V_OVLAN_ETYPE(M_OVLAN_ETYPE),
+				 V_OVLAN_MASK(M_OVLAN_MASK) |
+				 V_OVLAN_ETYPE(0x88a8));
+		/* OVLAN Type 0x9100 */
+		t4_set_reg_field(adapter, MPS_PORT_RX_OVLAN_REG(i, A_RX_OVLAN1),
+				 V_OVLAN_MASK(M_OVLAN_MASK) |
+				 V_OVLAN_ETYPE(M_OVLAN_ETYPE),
+				 V_OVLAN_MASK(M_OVLAN_MASK) |
+				 V_OVLAN_ETYPE(0x9100));
+
+		/* IVLAN 0X8100 */
+		t4_set_reg_field(adapter, MPS_PORT_RX_IVLAN(i),
+				 V_IVLAN_ETYPE(M_IVLAN_ETYPE),
+				 V_IVLAN_ETYPE(0x8100));
+
+		t4_set_reg_field(adapter, MPS_PORT_RX_CTL(i),
+				 F_OVLAN_EN0 | F_OVLAN_EN1 |
+				 F_IVLAN_EN,
+				 F_OVLAN_EN0 | F_OVLAN_EN1 |
+				 F_IVLAN_EN);
+	}
+
+	t4_tp_wr_bits_indirect(adapter, A_TP_INGRESS_CONFIG, V_RM_OVLAN(1),
+			       V_RM_OVLAN(!adapter->devargs.keep_ovlan));
+}
+
+static int cxgbe_get_filter_vnic_mode_from_devargs(u32 val)
+{
+	u32 vnic_mode;
+
+	vnic_mode = val & (CXGBE_DEVARGS_FILTER_MODE_PF_VF |
+			   CXGBE_DEVARGS_FILTER_MODE_VLAN_OUTER);
+	if (vnic_mode) {
+		switch (vnic_mode) {
+		case CXGBE_DEVARGS_FILTER_MODE_VLAN_OUTER:
+			return CXGBE_FILTER_VNIC_MODE_OVLAN;
+		case CXGBE_DEVARGS_FILTER_MODE_PF_VF:
+			return CXGBE_FILTER_VNIC_MODE_PFVF;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return CXGBE_FILTER_VNIC_MODE_NONE;
+}
+
+static int cxgbe_get_filter_mode_from_devargs(u32 val, bool closest_match)
+{
+	int vnic_mode, fmode = 0;
+	bool found = false;
+	u8 i;
+
+	if (val >= CXGBE_DEVARGS_FILTER_MODE_MAX) {
+		pr_err("Unsupported flags set in filter mode. Must be < 0x%x\n",
+		       CXGBE_DEVARGS_FILTER_MODE_MAX);
+		return -ERANGE;
+	}
+
+	vnic_mode = cxgbe_get_filter_vnic_mode_from_devargs(val);
+	if (vnic_mode < 0) {
+		pr_err("Unsupported Vnic-mode, more than 1 Vnic-mode selected\n");
+		return vnic_mode;
+	}
+
+	if (vnic_mode)
+		fmode |= F_VNIC_ID;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_PHYSICAL_PORT)
+		fmode |= F_PORT;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_ETHERNET_DSTMAC)
+		fmode |= F_MACMATCH;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_ETHERNET_ETHTYPE)
+		fmode |= F_ETHERTYPE;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_VLAN_INNER)
+		fmode |= F_VLAN;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_IP_TOS)
+		fmode |= F_TOS;
+	if (val & CXGBE_DEVARGS_FILTER_MODE_IP_PROTOCOL)
+		fmode |= F_PROTOCOL;
+
+	for (i = 0; i < ARRAY_SIZE(cxgbe_filter_mode_features); i++) {
+		if ((cxgbe_filter_mode_features[i] & fmode) == fmode) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		return -EINVAL;
+
+	return closest_match ? cxgbe_filter_mode_features[i] : fmode;
+}
+
+static int configure_filter_mode_mask(struct adapter *adap)
+{
+	u32 params[2], val[2], nparams = 0;
+	int ret;
+
+	if (!adap->devargs.filtermode && !adap->devargs.filtermask)
+		return 0;
+
+	if (!adap->devargs.filtermode || !adap->devargs.filtermask) {
+		pr_err("Unsupported, Provide both filtermode and filtermask devargs\n");
+		return -EINVAL;
+	}
+
+	if (adap->devargs.filtermask & ~adap->devargs.filtermode) {
+		pr_err("Unsupported, filtermask (0x%x) must be subset of filtermode (0x%x)\n",
+		       adap->devargs.filtermask, adap->devargs.filtermode);
+
+		return -EINVAL;
+	}
+
+	params[0] = CXGBE_FW_PARAM_DEV(FILTER) |
+		    V_FW_PARAMS_PARAM_Y(FW_PARAM_DEV_FILTER_MODE_MASK);
+
+	ret = cxgbe_get_filter_mode_from_devargs(adap->devargs.filtermode,
+						 true);
+	if (ret < 0) {
+		pr_err("Unsupported filtermode devargs combination:0x%x\n",
+		       adap->devargs.filtermode);
+		return ret;
+	}
+
+	val[0] = V_FW_PARAMS_PARAM_FILTER_MODE(ret);
+
+	ret = cxgbe_get_filter_mode_from_devargs(adap->devargs.filtermask,
+						 false);
+	if (ret < 0) {
+		pr_err("Unsupported filtermask devargs combination:0x%x\n",
+		       adap->devargs.filtermask);
+		return ret;
+	}
+
+	val[0] |= V_FW_PARAMS_PARAM_FILTER_MASK(ret);
+
+	nparams++;
+
+	ret = cxgbe_get_filter_vnic_mode_from_devargs(adap->devargs.filtermode);
+	if (ret < 0)
+		return ret;
+
+	if (ret) {
+		params[1] = CXGBE_FW_PARAM_DEV(FILTER) |
+			    V_FW_PARAMS_PARAM_Y(FW_PARAM_DEV_FILTER_VNIC_MODE);
+
+		val[1] = ret - 1;
+
+		nparams++;
+	}
+
+	return t4_set_params(adap, adap->mbox, adap->pf, 0, nparams,
+			     params, val);
+}
+
+static void configure_pcie_ext_tag(struct adapter *adapter)
+{
+	u16 v;
+	int pos = t4_os_find_pci_capability(adapter, PCI_CAP_ID_EXP);
+
+	if (!pos)
+		return;
+
+	if (pos > 0) {
+		t4_os_pci_read_cfg2(adapter, pos + PCI_EXP_DEVCTL, &v);
+		v |= PCI_EXP_DEVCTL_EXT_TAG;
+		t4_os_pci_write_cfg2(adapter, pos + PCI_EXP_DEVCTL, v);
+		if (is_t6(adapter->params.chip)) {
+			t4_set_reg_field(adapter, A_PCIE_CFG2,
+					 V_T6_TOTMAXTAG(M_T6_TOTMAXTAG),
+					 V_T6_TOTMAXTAG(7));
+			t4_set_reg_field(adapter, A_PCIE_CMD_CFG,
+					 V_T6_MINTAG(M_T6_MINTAG),
+					 V_T6_MINTAG(8));
+		} else {
+			t4_set_reg_field(adapter, A_PCIE_CFG2,
+					 V_TOTMAXTAG(M_TOTMAXTAG),
+					 V_TOTMAXTAG(3));
+			t4_set_reg_field(adapter, A_PCIE_CMD_CFG,
+					 V_MINTAG(M_MINTAG),
+					 V_MINTAG(8));
+		}
+	}
+}
+
+/* Figure out how many Queue Sets we can support */
+void cxgbe_configure_max_ethqsets(struct adapter *adapter)
+{
+	unsigned int ethqsets;
+
+	/*
+	 * We need to reserve an Ingress Queue for the Asynchronous Firmware
+	 * Event Queue.
+	 *
+	 * For each Queue Set, we'll need the ability to allocate two Egress
+	 * Contexts -- one for the Ingress Queue Free List and one for the TX
+	 * Ethernet Queue.
+	 */
+	if (is_pf4(adapter)) {
+		struct pf_resources *pfres = &adapter->params.pfres;
+
+		ethqsets = pfres->niqflint - 1;
+		if (pfres->neq < ethqsets * 2)
+			ethqsets = pfres->neq / 2;
+	} else {
+		struct vf_resources *vfres = &adapter->params.vfres;
+
+		ethqsets = vfres->niqflint - 1;
+		if (vfres->nethctrl != ethqsets)
+			ethqsets = min(vfres->nethctrl, ethqsets);
+		if (vfres->neq < ethqsets * 2)
+			ethqsets = vfres->neq / 2;
+	}
+
+	if (ethqsets > MAX_ETH_QSETS)
+		ethqsets = MAX_ETH_QSETS;
+	adapter->sge.max_ethqsets = ethqsets;
 }
 
 /*
@@ -411,7 +1090,7 @@ static int adap_init0_tweaks(struct adapter *adapter)
 	 * Line Size, etc.  The firmware default is for a 4KB Page Size and
 	 * 64B Cache Line Size ...
 	 */
-	t4_fixup_host_params_compat(adapter, PAGE_SIZE, L1_CACHE_BYTES,
+	t4_fixup_host_params_compat(adapter, CXGBE_PAGE_SIZE, L1_CACHE_BYTES,
 				    T5_LAST_REV);
 
 	/*
@@ -421,6 +1100,16 @@ static int adap_init0_tweaks(struct adapter *adapter)
 	rx_dma_offset = 0;
 	t4_set_reg_field(adapter, A_SGE_CONTROL, V_PKTSHIFT(M_PKTSHIFT),
 			 V_PKTSHIFT(rx_dma_offset));
+
+	t4_set_reg_field(adapter, A_SGE_FLM_CFG,
+			 V_CREDITCNT(M_CREDITCNT) | M_CREDITCNTPACKING,
+			 V_CREDITCNT(3) | V_CREDITCNTPACKING(1));
+
+	t4_set_reg_field(adapter, A_SGE_INGRESS_RX_THRESHOLD,
+			 V_THRESHOLD_3(M_THRESHOLD_3), V_THRESHOLD_3(32U));
+
+	t4_set_reg_field(adapter, A_SGE_CONTROL2, V_IDMAARBROUNDROBIN(1U),
+			 V_IDMAARBROUNDROBIN(1U));
 
 	/*
 	 * Don't include the "IP Pseudo Header" in CPL_RX_PKT checksums: Linux
@@ -437,13 +1126,12 @@ static int adap_init0_tweaks(struct adapter *adapter)
  */
 static int adap_init0_config(struct adapter *adapter, int reset)
 {
+	u32 finiver, finicsum, cfcsum, param, val;
 	struct fw_caps_config_cmd caps_cmd;
 	unsigned long mtype = 0, maddr = 0;
-	u32 finiver, finicsum, cfcsum;
-	int ret;
-	int config_issued = 0;
-	int cfg_addr;
+	u8 config_issued = 0;
 	char config_name[20];
+	int cfg_addr, ret;
 
 	/*
 	 * Reset device if necessary.
@@ -469,6 +1157,12 @@ static int adap_init0_config(struct adapter *adapter, int reset)
 	strcpy(config_name, "On Flash");
 	mtype = FW_MEMTYPE_CF_FLASH;
 	maddr = cfg_addr;
+
+	/* Enable HASH filter region when support is available. */
+	val = 1;
+	param = CXGBE_FW_PARAM_DEV(HASHFILTER_WITH_OFLD);
+	t4_set_params(adapter, adapter->mbox, adapter->pf, 0, 1,
+		      &param, &val);
 
 	/*
 	 * Issue a Capability Configuration command to the firmware to get it
@@ -523,12 +1217,12 @@ static int adap_init0_config(struct adapter *adapter, int reset)
 	 * This will allow the firmware to optimize aspects of the hardware
 	 * configuration which will result in improved performance.
 	 */
-	caps_cmd.niccaps &= cpu_to_be16(~(FW_CAPS_CONFIG_NIC_HASHFILTER |
-					  FW_CAPS_CONFIG_NIC_ETHOFLD));
+	caps_cmd.niccaps &= cpu_to_be16(~FW_CAPS_CONFIG_NIC_ETHOFLD);
 	caps_cmd.toecaps = 0;
 	caps_cmd.iscsicaps = 0;
 	caps_cmd.rdmacaps = 0;
 	caps_cmd.fcoecaps = 0;
+	caps_cmd.cryptocaps = 0;
 
 	/*
 	 * And now tell the firmware to use the configuration we just loaded.
@@ -567,7 +1261,7 @@ static int adap_init0_config(struct adapter *adapter, int reset)
 	/*
 	 * Return successfully and note that we're operating with parameters
 	 * not supplied by the driver, rather than from hard-wired
-	 * initialization constants burried in the driver.
+	 * initialization constants buried in the driver.
 	 */
 	dev_info(adapter,
 		 "Successfully configured using Firmware Configuration File \"%s\", version %#x, computed checksum %#x\n",
@@ -591,6 +1285,7 @@ bye:
 
 static int adap_init0(struct adapter *adap)
 {
+	struct fw_caps_config_cmd caps_cmd;
 	int ret = 0;
 	u32 v, port_vec;
 	enum dev_state state;
@@ -633,18 +1328,7 @@ static int adap_init0(struct adapter *adap)
 		state = (enum dev_state)((unsigned)state & ~DEV_STATE_INIT);
 	}
 
-	t4_get_fw_version(adap, &adap->params.fw_vers);
-	t4_get_tp_version(adap, &adap->params.tp_vers);
-
-	dev_info(adap, "fw: %u.%u.%u.%u, TP: %u.%u.%u.%u\n",
-		 G_FW_HDR_FW_VER_MAJOR(adap->params.fw_vers),
-		 G_FW_HDR_FW_VER_MINOR(adap->params.fw_vers),
-		 G_FW_HDR_FW_VER_MICRO(adap->params.fw_vers),
-		 G_FW_HDR_FW_VER_BUILD(adap->params.fw_vers),
-		 G_FW_HDR_FW_VER_MAJOR(adap->params.tp_vers),
-		 G_FW_HDR_FW_VER_MINOR(adap->params.tp_vers),
-		 G_FW_HDR_FW_VER_MICRO(adap->params.tp_vers),
-		 G_FW_HDR_FW_VER_BUILD(adap->params.tp_vers));
+	t4_get_version_info(adap);
 
 	ret = t4_get_core_clock(adap, &adap->params.vpd);
 	if (ret < 0) {
@@ -652,26 +1336,6 @@ static int adap_init0(struct adapter *adap)
 			__func__, -ret);
 		goto bye;
 	}
-
-	/*
-	 * Find out what ports are available to us.  Note that we need to do
-	 * this before calling adap_init0_no_config() since it needs nports
-	 * and portvec ...
-	 */
-	v = V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_DEV) |
-	    V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_DEV_PORTVEC);
-	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1, &v, &port_vec);
-	if (ret < 0) {
-		dev_err(adap, "%s: failure in t4_queury_params; error = %d\n",
-			__func__, ret);
-		goto bye;
-	}
-
-	adap->params.nports = hweight32(port_vec);
-	adap->params.portvec = port_vec;
-
-	dev_debug(adap, "%s: adap->params.nports = %u\n", __func__,
-		  adap->params.nports);
 
 	/*
 	 * If the firmware is initialized already (and we're not forcing a
@@ -697,6 +1361,33 @@ static int adap_init0(struct adapter *adap)
 		goto bye;
 	}
 
+	/* Now that we've successfully configured and initialized the adapter
+	 * (or found it already initialized), we can ask the Firmware what
+	 * resources it has provisioned for us.
+	 */
+	ret = t4_get_pfres(adap);
+	if (ret) {
+		dev_err(adap->pdev_dev,
+			"Unable to retrieve resource provisioning info\n");
+		goto bye;
+	}
+
+	/* Find out what ports are available to us. */
+	v = V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_DEV) |
+	    V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_DEV_PORTVEC);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1, &v, &port_vec);
+	if (ret < 0) {
+		dev_err(adap, "%s: failure in t4_query_params; error = %d\n",
+			__func__, ret);
+		goto bye;
+	}
+
+	adap->params.nports = hweight32(port_vec);
+	adap->params.portvec = port_vec;
+
+	dev_debug(adap, "%s: adap->params.nports = %u\n", __func__,
+		  adap->params.nports);
+
 	/*
 	 * Give the SGE code a chance to pull in anything that it needs ...
 	 * Note that this must be called after we retrieve our VPD parameters
@@ -712,22 +1403,79 @@ static int adap_init0(struct adapter *adap)
 	/*
 	 * Grab some of our basic fundamental operating parameters.
 	 */
-#define FW_PARAM_DEV(param) \
-	(V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_DEV) | \
-	 V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_DEV_##param))
+	params[0] = CXGBE_FW_PARAM_PFVF(L2T_START);
+	params[1] = CXGBE_FW_PARAM_PFVF(L2T_END);
+	params[2] = CXGBE_FW_PARAM_PFVF(FILTER_START);
+	params[3] = CXGBE_FW_PARAM_PFVF(FILTER_END);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 4, params, val);
+	if (ret < 0)
+		goto bye;
+	adap->l2t_start = val[0];
+	adap->l2t_end = val[1];
+	adap->tids.ftid_base = val[2];
+	adap->tids.nftids = val[3] - val[2] + 1;
 
-#define FW_PARAM_PFVF(param) \
-	(V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_PFVF) | \
-	 V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_PFVF_##param) |  \
-	 V_FW_PARAMS_PARAM_Y(0) | \
-	 V_FW_PARAMS_PARAM_Z(0))
+	params[0] = CXGBE_FW_PARAM_PFVF(CLIP_START);
+	params[1] = CXGBE_FW_PARAM_PFVF(CLIP_END);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 2, params, val);
+	if (ret < 0)
+		goto bye;
+	adap->clipt_start = val[0];
+	adap->clipt_end = val[1];
+
+	/*
+	 * Get device capabilities so we can determine what resources we need
+	 * to manage.
+	 */
+	memset(&caps_cmd, 0, sizeof(caps_cmd));
+	caps_cmd.op_to_write = htonl(V_FW_CMD_OP(FW_CAPS_CONFIG_CMD) |
+				     F_FW_CMD_REQUEST | F_FW_CMD_READ);
+	caps_cmd.cfvalid_to_len16 = htonl(FW_LEN16(caps_cmd));
+	ret = t4_wr_mbox(adap, adap->mbox, &caps_cmd, sizeof(caps_cmd),
+			 &caps_cmd);
+	if (ret < 0)
+		goto bye;
+
+	if ((caps_cmd.niccaps & cpu_to_be16(FW_CAPS_CONFIG_NIC_HASHFILTER)) &&
+	    is_t6(adap->params.chip)) {
+		if (cxgbe_init_hash_filter(adap) < 0)
+			goto bye;
+	}
+
+	/* See if FW supports FW_FILTER2 work request */
+	if (is_t4(adap->params.chip)) {
+		adap->params.filter2_wr_support = 0;
+	} else {
+		params[0] = CXGBE_FW_PARAM_DEV(FILTER2_WR);
+		ret = t4_query_params(adap, adap->mbox, adap->pf, 0,
+				      1, params, val);
+		adap->params.filter2_wr_support = (ret == 0 && val[0] != 0);
+	}
+
+	/* Check if FW supports returning vin.
+	 * If this is not supported, driver will interpret
+	 * these values from viid.
+	 */
+	params[0] = CXGBE_FW_PARAM_DEV(OPAQUE_VIID_SMT_EXTN);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0,
+			      1, params, val);
+	adap->params.viid_smt_extn_support = (ret == 0 && val[0] != 0);
+
+	/* query tid-related parameters */
+	params[0] = CXGBE_FW_PARAM_DEV(NTID);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1,
+			      params, val);
+	if (ret < 0)
+		goto bye;
+	adap->tids.ntids = val[0];
+	adap->tids.natids = min(adap->tids.ntids / 2, MAX_ATIDS);
 
 	/* If we're running on newer firmware, let it know that we're
 	 * prepared to deal with encapsulated CPL messages.  Older
 	 * firmware won't understand this and we'll just get
 	 * unencapsulated messages ...
 	 */
-	params[0] = FW_PARAM_PFVF(CPLFW4MSG_ENCAP);
+	params[0] = CXGBE_FW_PARAM_PFVF(CPLFW4MSG_ENCAP);
 	val[0] = 1;
 	(void)t4_set_params(adap, adap->mbox, adap->pf, 0, 1, params, val);
 
@@ -740,11 +1488,19 @@ static int adap_init0(struct adapter *adap)
 	if (is_t4(adap->params.chip)) {
 		adap->params.ulptx_memwrite_dsgl = false;
 	} else {
-		params[0] = FW_PARAM_DEV(ULPTX_MEMWRITE_DSGL);
+		params[0] = CXGBE_FW_PARAM_DEV(ULPTX_MEMWRITE_DSGL);
 		ret = t4_query_params(adap, adap->mbox, adap->pf, 0,
 				      1, params, val);
 		adap->params.ulptx_memwrite_dsgl = (ret == 0 && val[0] != 0);
 	}
+
+	/* Query for max number of packets that can be coalesced for Tx */
+	params[0] = CXGBE_FW_PARAM_PFVF(MAX_PKTS_PER_ETH_TX_PKTS_WR);
+	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1, params, val);
+	if (!ret && val[0] > 0)
+		adap->params.max_tx_coalesce_num = val[0];
+	else
+		adap->params.max_tx_coalesce_num = ETH_COALESCE_PKT_NUM;
 
 	/*
 	 * The MTU/MSS Table is initialized by now, so load their values.  If
@@ -784,7 +1540,13 @@ static int adap_init0(struct adapter *adap)
 			     adap->params.b_wnd);
 	}
 	t4_init_sge_params(adap);
+	ret = configure_filter_mode_mask(adap);
+	if (ret < 0)
+		goto bye;
 	t4_init_tp_params(adap);
+	configure_pcie_ext_tag(adap);
+	configure_vlan_types(adap);
+	cxgbe_configure_max_ethqsets(adap);
 
 	adap->params.drv_memwin = MEMWIN_NIC;
 	adap->flags |= FW_OK;
@@ -817,7 +1579,7 @@ void t4_os_portmod_changed(const struct adapter *adap, int port_id)
 		NULL, "LR", "SR", "ER", "passive DA", "active DA", "LRM"
 	};
 
-	const struct port_info *pi = &adap->port[port_id];
+	const struct port_info *pi = adap2pinfo(adap, port_id);
 
 	if (pi->mod_type == FW_PORT_MOD_TYPE_NONE)
 		dev_info(adap, "Port%d: port module unplugged\n", pi->port_id);
@@ -825,10 +1587,10 @@ void t4_os_portmod_changed(const struct adapter *adap, int port_id)
 		dev_info(adap, "Port%d: %s port module inserted\n", pi->port_id,
 			 mod_str[pi->mod_type]);
 	else if (pi->mod_type == FW_PORT_MOD_TYPE_NOTSUPPORTED)
-		dev_info(adap, "Port%d: unsupported optical port module inserted\n",
+		dev_info(adap, "Port%d: unsupported port module inserted\n",
 			 pi->port_id);
 	else if (pi->mod_type == FW_PORT_MOD_TYPE_UNKNOWN)
-		dev_info(adap, "Port%d: unknown port module inserted, forcing TWINAX\n",
+		dev_info(adap, "Port%d: unknown port module inserted\n",
 			 pi->port_id);
 	else if (pi->mod_type == FW_PORT_MOD_TYPE_ERROR)
 		dev_info(adap, "Port%d: transceiver module error\n",
@@ -838,34 +1600,48 @@ void t4_os_portmod_changed(const struct adapter *adap, int port_id)
 			 pi->port_id, pi->mod_type);
 }
 
+bool cxgbe_force_linkup(struct adapter *adap)
+{
+	if (is_pf4(adap))
+		return false;	/* force_linkup not required for pf driver */
+
+	return adap->devargs.force_link_up;
+}
+
 /**
  * link_start - enable a port
  * @dev: the port to enable
  *
  * Performs the MAC and PHY actions needed to enable a port.
  */
-int link_start(struct port_info *pi)
+int cxgbe_link_start(struct port_info *pi)
 {
 	struct adapter *adapter = pi->adapter;
+	u64 conf_offloads;
+	unsigned int mtu;
 	int ret;
+
+	mtu = pi->eth_dev->data->dev_conf.rxmode.max_rx_pkt_len -
+	      (RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN);
+
+	conf_offloads = pi->eth_dev->data->dev_conf.rxmode.offloads;
 
 	/*
 	 * We do not set address filters and promiscuity here, the stack does
 	 * that step explicitly.
 	 */
-	ret = t4_set_rxmode(adapter, adapter->mbox, pi->viid, 1500, -1, -1,
-			    -1, 1, true);
+	ret = t4_set_rxmode(adapter, adapter->mbox, pi->viid, mtu, -1, -1, -1,
+			    !!(conf_offloads & DEV_RX_OFFLOAD_VLAN_STRIP),
+			    true);
 	if (ret == 0) {
-		ret = t4_change_mac(adapter, adapter->mbox, pi->viid,
-				    pi->xact_addr_filt,
-				    (u8 *)&pi->eth_dev->data->mac_addrs[0],
-				    true, true);
+		ret = cxgbe_mpstcam_modify(pi, (int)pi->xact_addr_filt,
+				(u8 *)&pi->eth_dev->data->mac_addrs[0]);
 		if (ret >= 0) {
 			pi->xact_addr_filt = ret;
 			ret = 0;
 		}
 	}
-	if (ret == 0)
+	if (ret == 0 && is_pf4(adapter))
 		ret = t4_link_l1cfg(adapter, adapter->mbox, pi->tx_chan,
 				    &pi->link_cfg);
 	if (ret == 0) {
@@ -879,18 +1655,80 @@ int link_start(struct port_info *pi)
 		ret = t4_enable_vi_params(adapter, adapter->mbox, pi->viid,
 					  true, true, false);
 	}
+
+	if (ret == 0 && cxgbe_force_linkup(adapter))
+		pi->eth_dev->data->dev_link.link_status = ETH_LINK_UP;
 	return ret;
 }
 
 /**
- * cxgb4_write_rss - write the RSS table for a given port
+ * cxgbe_write_rss_conf - flash the RSS configuration for a given port
+ * @pi: the port
+ * @rss_hf: Hash configuration to apply
+ */
+int cxgbe_write_rss_conf(const struct port_info *pi, uint64_t rss_hf)
+{
+	struct adapter *adapter = pi->adapter;
+	const struct sge_eth_rxq *rxq;
+	u64 flags = 0;
+	u16 rss;
+	int err;
+
+	/*  Should never be called before setting up sge eth rx queues */
+	if (!(adapter->flags & FULL_INIT_DONE)) {
+		dev_err(adap, "%s No RXQs available on port %d\n",
+			__func__, pi->port_id);
+		return -EINVAL;
+	}
+
+	/* Don't allow unsupported hash functions */
+	if (rss_hf & ~CXGBE_RSS_HF_ALL)
+		return -EINVAL;
+
+	if (rss_hf & CXGBE_RSS_HF_IPV4_MASK)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP4TWOTUPEN;
+
+	if (rss_hf & ETH_RSS_NONFRAG_IPV4_TCP)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP4FOURTUPEN;
+
+	if (rss_hf & ETH_RSS_NONFRAG_IPV4_UDP)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP4FOURTUPEN |
+			 F_FW_RSS_VI_CONFIG_CMD_UDPEN;
+
+	if (rss_hf & CXGBE_RSS_HF_IPV6_MASK)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP6TWOTUPEN;
+
+	if (rss_hf & CXGBE_RSS_HF_TCP_IPV6_MASK)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP6TWOTUPEN |
+			 F_FW_RSS_VI_CONFIG_CMD_IP6FOURTUPEN;
+
+	if (rss_hf & CXGBE_RSS_HF_UDP_IPV6_MASK)
+		flags |= F_FW_RSS_VI_CONFIG_CMD_IP6TWOTUPEN |
+			 F_FW_RSS_VI_CONFIG_CMD_IP6FOURTUPEN |
+			 F_FW_RSS_VI_CONFIG_CMD_UDPEN;
+
+	rxq = &adapter->sge.ethrxq[pi->first_qset];
+	rss = rxq[0].rspq.abs_id;
+
+	/* If Tunnel All Lookup isn't specified in the global RSS
+	 * Configuration, then we need to specify a default Ingress
+	 * Queue for any ingress packets which aren't hashed.  We'll
+	 * use our first ingress queue ...
+	 */
+	err = t4_config_vi_rss(adapter, adapter->mbox, pi->viid,
+			       flags, rss);
+	return err;
+}
+
+/**
+ * cxgbe_write_rss - write the RSS table for a given port
  * @pi: the port
  * @queues: array of queue indices for RSS
  *
  * Sets up the portion of the HW RSS table for the port's VI to distribute
  * packets to the Rx queues in @queues.
  */
-int cxgb4_write_rss(const struct port_info *pi, const u16 *queues)
+int cxgbe_write_rss(const struct port_info *pi, const u16 *queues)
 {
 	u16 *rss;
 	int i, err;
@@ -911,20 +1749,6 @@ int cxgb4_write_rss(const struct port_info *pi, const u16 *queues)
 
 	err = t4_config_rss_range(adapter, adapter->pf, pi->viid, 0,
 				  pi->rss_size, rss, pi->rss_size);
-	/*
-	 * If Tunnel All Lookup isn't specified in the global RSS
-	 * Configuration, then we need to specify a default Ingress
-	 * Queue for any ingress packets which aren't hashed.  We'll
-	 * use our first ingress queue ...
-	 */
-	if (!err)
-		err = t4_config_vi_rss(adapter, adapter->mbox, pi->viid,
-				       F_FW_RSS_VI_CONFIG_CMD_IP6FOURTUPEN |
-				       F_FW_RSS_VI_CONFIG_CMD_IP6TWOTUPEN |
-				       F_FW_RSS_VI_CONFIG_CMD_IP4FOURTUPEN |
-				       F_FW_RSS_VI_CONFIG_CMD_IP4TWOTUPEN |
-				       F_FW_RSS_VI_CONFIG_CMD_UDPEN,
-				       rss[0]);
 	rte_free(rss);
 	return err;
 }
@@ -940,7 +1764,7 @@ int cxgb4_write_rss(const struct port_info *pi, const u16 *queues)
  * We always configure the RSS mapping for all ports since the mapping
  * table has plenty of entries.
  */
-int setup_rss(struct port_info *pi)
+int cxgbe_setup_rss(struct port_info *pi)
 {
 	int j, err;
 	struct adapter *adapter = pi->adapter;
@@ -948,13 +1772,17 @@ int setup_rss(struct port_info *pi)
 	dev_debug(adapter, "%s:  pi->rss_size = %u; pi->n_rx_qsets = %u\n",
 		  __func__, pi->rss_size, pi->n_rx_qsets);
 
-	if (!pi->flags & PORT_RSS_DONE) {
+	if (!(pi->flags & PORT_RSS_DONE)) {
 		if (adapter->flags & FULL_INIT_DONE) {
 			/* Fill default values with equal distribution */
 			for (j = 0; j < pi->rss_size; j++)
 				pi->rss[j] = j % pi->n_rx_qsets;
 
-			err = cxgb4_write_rss(pi, pi->rss);
+			err = cxgbe_write_rss(pi, pi->rss);
+			if (err)
+				return err;
+
+			err = cxgbe_write_rss_conf(pi, pi->rss_hf);
 			if (err)
 				return err;
 			pi->flags |= PORT_RSS_DONE;
@@ -966,33 +1794,152 @@ int setup_rss(struct port_info *pi)
 /*
  * Enable NAPI scheduling and interrupt generation for all Rx queues.
  */
-static void enable_rx(struct adapter *adap)
+static void enable_rx(struct adapter *adap, struct sge_rspq *q)
 {
-	struct sge *s = &adap->sge;
-	struct sge_rspq *q = &s->fw_evtq;
-	int i, j;
-
 	/* 0-increment GTS to start the timer and enable interrupts */
-	t4_write_reg(adap, MYPF_REG(A_SGE_PF_GTS),
+	t4_write_reg(adap, is_pf4(adap) ? MYPF_REG(A_SGE_PF_GTS) :
+					  T4VF_SGE_BASE_ADDR + A_SGE_VF_GTS,
 		     V_SEINTARM(q->intr_params) |
 		     V_INGRESSQID(q->cntxt_id));
+}
 
-	for_each_port(adap, i) {
-		const struct port_info *pi = &adap->port[i];
-		struct rte_eth_dev *eth_dev = pi->eth_dev;
+void cxgbe_enable_rx_queues(struct port_info *pi)
+{
+	struct adapter *adap = pi->adapter;
+	struct sge *s = &adap->sge;
+	unsigned int i;
 
-		for (j = 0; j < eth_dev->data->nb_rx_queues; j++) {
-			q = eth_dev->data->rx_queues[j];
+	for (i = 0; i < pi->n_rx_qsets; i++)
+		enable_rx(adap, &s->ethrxq[pi->first_qset + i].rspq);
+}
 
-			/*
-			 * 0-increment GTS to start the timer and enable
-			 * interrupts
-			 */
-			t4_write_reg(adap, MYPF_REG(A_SGE_PF_GTS),
-				     V_SEINTARM(q->intr_params) |
-				     V_INGRESSQID(q->cntxt_id));
-		}
+/**
+ * fw_caps_to_speed_caps - translate Firmware Port Caps to Speed Caps.
+ * @port_type: Firmware Port Type
+ * @fw_caps: Firmware Port Capabilities
+ * @speed_caps: Device Info Speed Capabilities
+ *
+ * Translate a Firmware Port Capabilities specification to Device Info
+ * Speed Capabilities.
+ */
+static void fw_caps_to_speed_caps(enum fw_port_type port_type,
+				  unsigned int fw_caps,
+				  u32 *speed_caps)
+{
+#define SET_SPEED(__speed_name) \
+	do { \
+		*speed_caps |= ETH_LINK_ ## __speed_name; \
+	} while (0)
+
+#define FW_CAPS_TO_SPEED(__fw_name) \
+	do { \
+		if (fw_caps & FW_PORT_CAP32_ ## __fw_name) \
+			SET_SPEED(__fw_name); \
+	} while (0)
+
+	switch (port_type) {
+	case FW_PORT_TYPE_BT_SGMII:
+	case FW_PORT_TYPE_BT_XFI:
+	case FW_PORT_TYPE_BT_XAUI:
+		FW_CAPS_TO_SPEED(SPEED_100M);
+		FW_CAPS_TO_SPEED(SPEED_1G);
+		FW_CAPS_TO_SPEED(SPEED_10G);
+		break;
+
+	case FW_PORT_TYPE_KX4:
+	case FW_PORT_TYPE_KX:
+	case FW_PORT_TYPE_FIBER_XFI:
+	case FW_PORT_TYPE_FIBER_XAUI:
+	case FW_PORT_TYPE_SFP:
+	case FW_PORT_TYPE_QSFP_10G:
+	case FW_PORT_TYPE_QSA:
+		FW_CAPS_TO_SPEED(SPEED_1G);
+		FW_CAPS_TO_SPEED(SPEED_10G);
+		break;
+
+	case FW_PORT_TYPE_KR:
+		SET_SPEED(SPEED_10G);
+		break;
+
+	case FW_PORT_TYPE_BP_AP:
+	case FW_PORT_TYPE_BP4_AP:
+		SET_SPEED(SPEED_1G);
+		SET_SPEED(SPEED_10G);
+		break;
+
+	case FW_PORT_TYPE_BP40_BA:
+	case FW_PORT_TYPE_QSFP:
+		SET_SPEED(SPEED_40G);
+		break;
+
+	case FW_PORT_TYPE_CR_QSFP:
+	case FW_PORT_TYPE_SFP28:
+	case FW_PORT_TYPE_KR_SFP28:
+		FW_CAPS_TO_SPEED(SPEED_1G);
+		FW_CAPS_TO_SPEED(SPEED_10G);
+		FW_CAPS_TO_SPEED(SPEED_25G);
+		break;
+
+	case FW_PORT_TYPE_CR2_QSFP:
+		SET_SPEED(SPEED_50G);
+		break;
+
+	case FW_PORT_TYPE_KR4_100G:
+	case FW_PORT_TYPE_CR4_QSFP:
+		FW_CAPS_TO_SPEED(SPEED_25G);
+		FW_CAPS_TO_SPEED(SPEED_40G);
+		FW_CAPS_TO_SPEED(SPEED_50G);
+		FW_CAPS_TO_SPEED(SPEED_100G);
+		break;
+
+	default:
+		break;
 	}
+
+#undef FW_CAPS_TO_SPEED
+#undef SET_SPEED
+}
+
+/**
+ * cxgbe_get_speed_caps - Fetch supported speed capabilities
+ * @pi: Underlying port's info
+ * @speed_caps: Device Info speed capabilities
+ *
+ * Fetch supported speed capabilities of the underlying port.
+ */
+void cxgbe_get_speed_caps(struct port_info *pi, u32 *speed_caps)
+{
+	*speed_caps = 0;
+
+	fw_caps_to_speed_caps(pi->port_type, pi->link_cfg.pcaps,
+			      speed_caps);
+
+	if (!(pi->link_cfg.pcaps & FW_PORT_CAP32_ANEG))
+		*speed_caps |= ETH_LINK_SPEED_FIXED;
+}
+
+/**
+ * cxgbe_set_link_status - Set device link up or down.
+ * @pi: Underlying port's info
+ * @status: 0 - down, 1 - up
+ *
+ * Set the device link up or down.
+ */
+int cxgbe_set_link_status(struct port_info *pi, bool status)
+{
+	struct adapter *adapter = pi->adapter;
+	int err = 0;
+
+	err = t4_enable_vi(adapter, adapter->mbox, pi->viid, status, status);
+	if (err) {
+		dev_err(adapter, "%s: disable_vi failed: %d\n", __func__, err);
+		return err;
+	}
+
+	if (!status)
+		t4_reset_link_config(adapter, pi->pidx);
+
+	return 0;
 }
 
 /**
@@ -1005,9 +1952,10 @@ static void enable_rx(struct adapter *adap)
  */
 int cxgbe_up(struct adapter *adap)
 {
-	enable_rx(adap);
+	enable_rx(adap, &adap->sge.fw_evtq);
 	t4_sge_tx_monitor_start(adap);
-	t4_intr_enable(adap);
+	if (is_pf4(adap))
+		t4_intr_enable(adap);
 	adap->flags |= FULL_INIT_DONE;
 
 	/* TODO: deadman watchdog ?? */
@@ -1019,17 +1967,7 @@ int cxgbe_up(struct adapter *adap)
  */
 int cxgbe_down(struct port_info *pi)
 {
-	struct adapter *adapter = pi->adapter;
-	int err = 0;
-
-	err = t4_enable_vi(adapter, adapter->mbox, pi->viid, false, false);
-	if (err) {
-		dev_err(adapter, "%s: disable_vi failed: %d\n", __func__, err);
-		return err;
-	}
-
-	t4_reset_link_config(adapter, pi->port_id);
-	return 0;
+	return cxgbe_set_link_status(pi, false);
 }
 
 /*
@@ -1041,7 +1979,13 @@ void cxgbe_close(struct adapter *adapter)
 	int i;
 
 	if (adapter->flags & FULL_INIT_DONE) {
-		t4_intr_disable(adapter);
+		tid_free(&adapter->tids);
+		t4_cleanup_mpstcam(adapter);
+		t4_cleanup_clip_tbl(adapter);
+		t4_cleanup_l2t(adapter);
+		t4_cleanup_smt(adapter);
+		if (is_pf4(adapter))
+			t4_intr_disable(adapter);
 		t4_sge_tx_monitor_stop(adapter);
 		t4_free_sge_resources(adapter);
 		for_each_port(adapter, i) {
@@ -1049,27 +1993,70 @@ void cxgbe_close(struct adapter *adapter)
 			if (pi->viid != 0)
 				t4_free_vi(adapter, adapter->mbox,
 					   adapter->pf, 0, pi->viid);
-			rte_free(pi->eth_dev->data->mac_addrs);
+			rte_eth_dev_release_port(pi->eth_dev);
 		}
 		adapter->flags &= ~FULL_INIT_DONE;
 	}
 
-	if (adapter->flags & FW_OK)
+	if (is_pf4(adapter) && (adapter->flags & FW_OK))
 		t4_fw_bye(adapter, adapter->mbox);
+}
+
+static void adap_smt_index(struct adapter *adapter, u32 *smt_start_idx,
+			   u32 *smt_size)
+{
+	u32 params[2], smt_val[2];
+	int ret;
+
+	params[0] = CXGBE_FW_PARAM_PFVF(GET_SMT_START);
+	params[1] = CXGBE_FW_PARAM_PFVF(GET_SMT_SIZE);
+
+	ret = t4_query_params(adapter, adapter->mbox, adapter->pf, 0,
+			      2, params, smt_val);
+
+	/* if FW doesn't recognize this command then set it to default setting
+	 * which is start index as 0 and size as 256.
+	 */
+	if (ret < 0) {
+		*smt_start_idx = 0;
+		*smt_size = SMT_SIZE;
+	} else {
+		*smt_start_idx = smt_val[0];
+		/* smt size can be zero, if nsmt is not yet configured in
+		 * the config file or set as zero, then configure all the
+		 * remaining entries to this PF itself.
+		 */
+		if (!smt_val[1])
+			*smt_size = SMT_SIZE - *smt_start_idx;
+		else
+			*smt_size = smt_val[1];
+	}
 }
 
 int cxgbe_probe(struct adapter *adapter)
 {
+	u32 smt_start_idx, smt_size;
 	struct port_info *pi;
 	int func, i;
 	int err = 0;
+	u32 whoami;
+	int chip;
 
-	func = G_SOURCEPF(t4_read_reg(adapter, A_PL_WHOAMI));
+	whoami = t4_read_reg(adapter, A_PL_WHOAMI);
+	chip = t4_get_chip_type(adapter,
+			CHELSIO_PCI_ID_VER(adapter->pdev->id.device_id));
+	if (chip < 0)
+		return chip;
+
+	func = CHELSIO_CHIP_VERSION(chip) <= CHELSIO_T5 ?
+	       G_SOURCEPF(whoami) : G_T6_SOURCEPF(whoami);
+
 	adapter->mbox = func;
 	adapter->pf = func;
 
 	t4_os_lock_init(&adapter->mbox_lock);
 	TAILQ_INIT(&adapter->mbox_list);
+	t4_os_lock_init(&adapter->win0_lock);
 
 	err = t4_prep_adapter(adapter);
 	if (err)
@@ -1100,7 +2087,7 @@ int cxgbe_probe(struct adapter *adapter)
 		qpp = 1 << ((t4_read_reg(adapter,
 				A_SGE_EGRESS_QUEUES_PER_PAGE_PF) >> s_qpp)
 				& M_QUEUESPERPAGEPF0);
-		num_seg = PAGE_SIZE / UDBS_SEG_SIZE;
+		num_seg = CXGBE_PAGE_SIZE / UDBS_SEG_SIZE;
 		if (qpp > num_seg)
 			dev_warn(adapter, "Incorrect SGE EGRESS QUEUES_PER_PAGE configuration, continuing in debug mode\n");
 
@@ -1115,21 +2102,16 @@ int cxgbe_probe(struct adapter *adapter)
 	}
 
 	for_each_port(adapter, i) {
-		char name[RTE_ETH_NAME_MAX_LEN];
-		struct rte_eth_dev_data *data = NULL;
 		const unsigned int numa_node = rte_socket_id();
+		char name[RTE_ETH_NAME_MAX_LEN];
+		struct rte_eth_dev *eth_dev;
 
-		pi = &adapter->port[i];
-		pi->adapter = adapter;
-		pi->xact_addr_filt = -1;
-		pi->port_id = i;
-
-		snprintf(name, sizeof(name), "cxgbe%d",
-			 adapter->eth_dev->data->port_id + i);
+		snprintf(name, sizeof(name), "%s_%d",
+			 adapter->pdev->device.name, i);
 
 		if (i == 0) {
 			/* First port is already allocated by DPDK */
-			pi->eth_dev = adapter->eth_dev;
+			eth_dev = adapter->eth_dev;
 			goto allocate_mac;
 		}
 
@@ -1139,34 +2121,44 @@ int cxgbe_probe(struct adapter *adapter)
 		 */
 
 		/* reserve an ethdev entry */
-		pi->eth_dev = rte_eth_dev_allocate(name, RTE_ETH_DEV_PCI);
-		if (!pi->eth_dev)
+		eth_dev = rte_eth_dev_allocate(name);
+		if (!eth_dev)
 			goto out_free;
 
-		data = rte_zmalloc_socket(name, sizeof(*data), 0, numa_node);
-		if (!data)
+		eth_dev->data->dev_private =
+			rte_zmalloc_socket(name, sizeof(struct port_info),
+					   RTE_CACHE_LINE_SIZE, numa_node);
+		if (!eth_dev->data->dev_private)
 			goto out_free;
-
-		data->port_id = adapter->eth_dev->data->port_id + i;
-
-		pi->eth_dev->data = data;
 
 allocate_mac:
-		pi->eth_dev->pci_dev = adapter->pdev;
-		pi->eth_dev->data->dev_private = pi;
-		pi->eth_dev->driver = adapter->eth_dev->driver;
+		pi = eth_dev->data->dev_private;
+		adapter->port[i] = pi;
+		pi->eth_dev = eth_dev;
+		pi->adapter = adapter;
+		pi->xact_addr_filt = -1;
+		pi->port_id = i;
+		pi->pidx = i;
+
+		pi->eth_dev->device = &adapter->pdev->device;
 		pi->eth_dev->dev_ops = adapter->eth_dev->dev_ops;
 		pi->eth_dev->tx_pkt_burst = adapter->eth_dev->tx_pkt_burst;
 		pi->eth_dev->rx_pkt_burst = adapter->eth_dev->rx_pkt_burst;
-		TAILQ_INIT(&pi->eth_dev->link_intr_cbs);
+
+		rte_eth_copy_pci_info(pi->eth_dev, adapter->pdev);
 
 		pi->eth_dev->data->mac_addrs = rte_zmalloc(name,
-							   ETHER_ADDR_LEN, 0);
+							RTE_ETHER_ADDR_LEN, 0);
 		if (!pi->eth_dev->data->mac_addrs) {
 			dev_err(adapter, "%s: Mem allocation failed for storing mac addr, aborting\n",
 				__func__);
 			err = -1;
 			goto out_free;
+		}
+
+		if (i > 0) {
+			/* First port will be notified by upper layer */
+			rte_eth_dev_probing_finish(eth_dev);
 		}
 	}
 
@@ -1179,11 +2171,59 @@ allocate_mac:
 		}
 	}
 
-	cfg_queues(adapter->eth_dev);
+	cxgbe_cfg_queues(adapter->eth_dev);
 
-	print_port_info(adapter);
+	cxgbe_print_adapter_info(adapter);
+	cxgbe_print_port_info(adapter);
 
-	err = init_rss(adapter);
+	adapter->clipt = t4_init_clip_tbl(adapter->clipt_start,
+					  adapter->clipt_end);
+	if (!adapter->clipt) {
+		/* We tolerate a lack of clip_table, giving up some
+		 * functionality
+		 */
+		dev_warn(adapter, "could not allocate CLIP. Continuing\n");
+	}
+
+	adap_smt_index(adapter, &smt_start_idx, &smt_size);
+	adapter->smt = t4_init_smt(smt_start_idx, smt_size);
+	if (!adapter->smt)
+		dev_warn(adapter, "could not allocate SMT, continuing\n");
+
+	adapter->l2t = t4_init_l2t(adapter->l2t_start, adapter->l2t_end);
+	if (!adapter->l2t) {
+		/* We tolerate a lack of L2T, giving up some functionality */
+		dev_warn(adapter, "could not allocate L2T. Continuing\n");
+	}
+
+	if (tid_init(&adapter->tids) < 0) {
+		/* Disable filtering support */
+		dev_warn(adapter, "could not allocate TID table, "
+			 "filter support disabled. Continuing\n");
+	}
+
+	t4_os_lock_init(&adapter->flow_lock);
+
+	adapter->mpstcam = t4_init_mpstcam(adapter);
+	if (!adapter->mpstcam)
+		dev_warn(adapter, "could not allocate mps tcam table."
+			 " Continuing\n");
+
+	if (is_hashfilter(adapter)) {
+		if (t4_read_reg(adapter, A_LE_DB_CONFIG) & F_HASHEN) {
+			u32 hash_base, hash_reg;
+
+			hash_reg = A_LE_DB_TID_HASHBASE;
+			hash_base = t4_read_reg(adapter, hash_reg);
+			adapter->tids.hash_base = hash_base / 4;
+		}
+	} else {
+		/* Disable hash filtering support */
+		dev_warn(adapter,
+			 "Maskless filter support disabled. Continuing\n");
+	}
+
+	err = cxgbe_init_rss(adapter);
 	if (err)
 		goto out_free;
 
@@ -1195,11 +2235,7 @@ out_free:
 		if (pi->viid != 0)
 			t4_free_vi(adapter, adapter->mbox, adapter->pf,
 				   0, pi->viid);
-		/* Skip first port since it'll be de-allocated by DPDK */
-		if (i == 0)
-			continue;
-		if (pi->eth_dev->data)
-			rte_free(pi->eth_dev->data);
+		rte_eth_dev_release_port(pi->eth_dev);
 	}
 
 	if (adapter->flags & FW_OK)

@@ -1,36 +1,8 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
+#include <glob.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -39,20 +11,48 @@
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
 
 
 #include <rte_log.h>
-#include <rte_config.h>
 
 #include "guest_channel.h"
 #include "channel_commands.h"
 
 #define RTE_LOGTYPE_GUEST_CHANNEL RTE_LOGTYPE_USER1
 
-static int global_fds[RTE_MAX_LCORE];
+/* Timeout for incoming message in milliseconds. */
+#define TIMEOUT 10
+
+static int global_fds[RTE_MAX_LCORE] = { [0 ... RTE_MAX_LCORE-1] = -1 };
 
 int
-guest_channel_host_connect(const char *path, unsigned lcore_id)
+guest_channel_host_check_exists(const char *path)
+{
+	char glob_path[PATH_MAX];
+	glob_t g;
+	int ret;
+
+	/* we cannot know in advance which cores have VM channels, so glob */
+	snprintf(glob_path, PATH_MAX, "%s.*", path);
+
+	ret = glob(glob_path, GLOB_NOSORT, NULL, &g);
+	if (ret != 0) {
+		/* couldn't read anything */
+		ret = 0;
+		goto out;
+	}
+
+	/* do we have at least one match? */
+	ret = g.gl_pathc > 0;
+
+out:
+	globfree(&g);
+	return ret;
+}
+
+int
+guest_channel_host_connect(const char *path, unsigned int lcore_id)
 {
 	int flags, ret;
 	struct channel_packet pkt;
@@ -65,7 +65,7 @@ guest_channel_host_connect(const char *path, unsigned lcore_id)
 		return -1;
 	}
 	/* check if path is already open */
-	if (global_fds[lcore_id] != 0) {
+	if (global_fds[lcore_id] != -1) {
 		RTE_LOG(ERR, GUEST_CHANNEL, "Channel(%u) is already open with fd %d\n",
 				lcore_id, global_fds[lcore_id]);
 		return -1;
@@ -104,20 +104,22 @@ guest_channel_host_connect(const char *path, unsigned lcore_id)
 	global_fds[lcore_id] = fd;
 	ret = guest_channel_send_msg(&pkt, lcore_id);
 	if (ret != 0) {
-		RTE_LOG(ERR, GUEST_CHANNEL, "Error on channel '%s' communications "
-				"test: %s\n", fd_path, strerror(ret));
+		RTE_LOG(ERR, GUEST_CHANNEL,
+				"Error on channel '%s' communications test: %s\n",
+				fd_path, ret > 0 ? strerror(ret) :
+				"channel not connected");
 		goto error;
 	}
 	RTE_LOG(INFO, GUEST_CHANNEL, "Channel '%s' is now connected\n", fd_path);
 	return 0;
 error:
 	close(fd);
-	global_fds[lcore_id] = 0;
+	global_fds[lcore_id] = -1;
 	return -1;
 }
 
 int
-guest_channel_send_msg(struct channel_packet *pkt, unsigned lcore_id)
+guest_channel_send_msg(struct channel_packet *pkt, unsigned int lcore_id)
 {
 	int ret, buffer_len = sizeof(*pkt);
 	void *buffer = pkt;
@@ -128,7 +130,7 @@ guest_channel_send_msg(struct channel_packet *pkt, unsigned lcore_id)
 		return -1;
 	}
 
-	if (global_fds[lcore_id] == 0) {
+	if (global_fds[lcore_id] < 0) {
 		RTE_LOG(ERR, GUEST_CHANNEL, "Channel is not connected\n");
 		return -1;
 	}
@@ -147,16 +149,84 @@ guest_channel_send_msg(struct channel_packet *pkt, unsigned lcore_id)
 	return 0;
 }
 
+int rte_power_guest_channel_send_msg(struct channel_packet *pkt,
+			unsigned int lcore_id)
+{
+	return guest_channel_send_msg(pkt, lcore_id);
+}
+
+int power_guest_channel_read_msg(void *pkt,
+		size_t pkt_len,
+		unsigned int lcore_id)
+{
+	int ret;
+	struct pollfd fds;
+
+	if (pkt_len == 0 || pkt == NULL)
+		return -1;
+
+	fds.fd = global_fds[lcore_id];
+	fds.events = POLLIN;
+
+	ret = poll(&fds, 1, TIMEOUT);
+	if (ret == 0) {
+		RTE_LOG(DEBUG, GUEST_CHANNEL, "Timeout occurred during poll function.\n");
+		return -1;
+	} else if (ret < 0) {
+		RTE_LOG(ERR, GUEST_CHANNEL, "Error occurred during poll function: %s\n",
+				strerror(errno));
+		return -1;
+	}
+
+	if (lcore_id >= RTE_MAX_LCORE) {
+		RTE_LOG(ERR, GUEST_CHANNEL, "Channel(%u) is out of range 0...%d\n",
+				lcore_id, RTE_MAX_LCORE-1);
+		return -1;
+	}
+
+	if (global_fds[lcore_id] < 0) {
+		RTE_LOG(ERR, GUEST_CHANNEL, "Channel is not connected\n");
+		return -1;
+	}
+
+	while (pkt_len > 0) {
+		ret = read(global_fds[lcore_id],
+				pkt, pkt_len);
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+
+		if (ret == 0) {
+			RTE_LOG(ERR, GUEST_CHANNEL, "Expected more data, but connection has been closed.\n");
+			return -1;
+		}
+		pkt = (char *)pkt + ret;
+		pkt_len -= ret;
+	}
+
+	return 0;
+}
+
+int rte_power_guest_channel_receive_msg(void *pkt,
+		size_t pkt_len,
+		unsigned int lcore_id)
+{
+	return power_guest_channel_read_msg(pkt, pkt_len, lcore_id);
+}
+
 void
-guest_channel_host_disconnect(unsigned lcore_id)
+guest_channel_host_disconnect(unsigned int lcore_id)
 {
 	if (lcore_id >= RTE_MAX_LCORE) {
 		RTE_LOG(ERR, GUEST_CHANNEL, "Channel(%u) is out of range 0...%d\n",
 				lcore_id, RTE_MAX_LCORE-1);
 		return;
 	}
-	if (global_fds[lcore_id] == 0)
+	if (global_fds[lcore_id] < 0)
 		return;
 	close(global_fds[lcore_id]);
-	global_fds[lcore_id] = 0;
+	global_fds[lcore_id] = -1;
 }

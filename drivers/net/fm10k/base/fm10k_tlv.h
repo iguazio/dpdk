@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2013 - 2015, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013 - 2015 Intel Corporation
+ */
 
 #ifndef _FM10K_TLV_H_
 #define _FM10K_TLV_H_
@@ -51,9 +22,9 @@ struct fm10k_msg_data;
  * mailbox size we will provide a message with the above header and it
  * will be segmented and transported to the mailbox to the other side where
  * it is reassembled.  It contains the following fields:
- * Len: Length of the message in bytes excluding the message header
+ * Length: Length of the message in bytes excluding the message header
  * Flags: TBD
- * Rule: These will be the message/argument types we pass
+ * Type/ID: These will be the message/argument types we pass
  */
 /* message data header */
 #define FM10K_TLV_ID_SHIFT		0
@@ -119,8 +90,6 @@ struct fm10k_msg_data {
 #define FM10K_MSG_HANDLER(id, attr, func) { id, attr, func }
 
 s32 fm10k_tlv_msg_init(u32 *, u16);
-s32 fm10k_tlv_attr_put_null_string(u32 *, u16, const unsigned char *);
-s32 fm10k_tlv_attr_get_null_string(u32 *, unsigned char *);
 s32 fm10k_tlv_attr_put_mac_vlan(u32 *, u16, const u8 *, u16);
 s32 fm10k_tlv_attr_get_mac_vlan(u32 *, u8 *, u16 *);
 s32 fm10k_tlv_attr_put_bool(u32 *, u16);
@@ -160,9 +129,6 @@ s32 fm10k_tlv_attr_get_value(u32 *, void *, u32);
 		fm10k_tlv_attr_get_value(attr, ptr, sizeof(s64))
 s32 fm10k_tlv_attr_put_le_struct(u32 *, u16, const void *, u32);
 s32 fm10k_tlv_attr_get_le_struct(u32 *, void *, u32);
-u32 *fm10k_tlv_attr_nest_start(u32 *, u16);
-s32 fm10k_tlv_attr_nest_stop(u32 *);
-s32 fm10k_tlv_attr_parse(u32 *, u32 **, const struct fm10k_tlv_attr *);
 s32 fm10k_tlv_msg_parse(struct fm10k_hw *, u32 *, struct fm10k_mbx_info *,
 			const struct fm10k_msg_data *);
 s32 fm10k_tlv_msg_error(struct fm10k_hw *hw, u32 **results,

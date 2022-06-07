@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2013-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2013-2015 Intel Corporation
  */
 
 #ifndef _FM10K_H_
@@ -68,6 +39,9 @@
 #define FM10K_MIN_TX_DESC  32
 #define FM10K_MAX_RX_DESC  (FM10K_MAX_RX_RING_SZ / sizeof(union fm10k_rx_desc))
 #define FM10K_MAX_TX_DESC  (FM10K_MAX_TX_RING_SZ / sizeof(struct fm10k_tx_desc))
+
+#define FM10K_TX_MAX_SEG     UINT8_MAX
+#define FM10K_TX_MAX_MTU_SEG UINT8_MAX
 
 /*
  * byte aligment for HW RX data buffer
@@ -123,9 +97,21 @@
 #define FM10K_VFTA_BIT(vlan_id)    (1 << ((vlan_id) & 0x1F))
 #define FM10K_VFTA_IDX(vlan_id)    ((vlan_id) >> 5)
 
+#define RTE_FM10K_RXQ_REARM_THRESH      32
+#define RTE_FM10K_VPMD_TX_BURST         32
+#define RTE_FM10K_MAX_RX_BURST          RTE_FM10K_RXQ_REARM_THRESH
+#define RTE_FM10K_TX_MAX_FREE_BUF_SZ    64
+#define RTE_FM10K_DESCS_PER_LOOP    4
+
+#define FM10K_MISC_VEC_ID               RTE_INTR_VEC_ZERO_OFFSET
+#define FM10K_RX_VEC_START              RTE_INTR_VEC_RXTX_OFFSET
+
 struct fm10k_macvlan_filter_info {
 	uint16_t vlan_num;       /* Total VLAN number */
 	uint16_t mac_num;        /* Total mac number */
+	uint16_t nb_queue_pools; /* Active queue pools number */
+	/* VMDQ ID for each MAC address */
+	uint8_t  mac_vmdq_id[FM10K_MAX_MACADDR_NUM];
 	uint32_t vfta[FM10K_VFTA_SIZE];        /* VLAN bitmap */
 };
 
@@ -135,6 +121,9 @@ struct fm10k_dev_info {
 	/* Protect the mailbox to avoid race condition */
 	rte_spinlock_t    mbx_lock;
 	struct fm10k_macvlan_filter_info    macvlan;
+	/* Flag to indicate if RX vector conditions satisfied */
+	bool rx_vec_allowed;
+	bool sm_down;
 };
 
 /*
@@ -165,19 +154,30 @@ struct fm10k_rx_queue {
 	struct rte_mempool *mp;
 	struct rte_mbuf **sw_ring;
 	volatile union fm10k_rx_desc *hw_ring;
-	struct rte_mbuf *pkt_first_seg; /**< First segment of current packet. */
-	struct rte_mbuf *pkt_last_seg;  /**< Last segment of current packet. */
+	struct rte_mbuf *pkt_first_seg; /* First segment of current packet. */
+	struct rte_mbuf *pkt_last_seg;  /* Last segment of current packet. */
 	uint64_t hw_ring_phys_addr;
+	uint64_t mbuf_initializer; /* value to init mbufs */
+	/* need to alloc dummy mbuf, for wraparound when scanning hw ring */
+	struct rte_mbuf fake_mbuf;
 	uint16_t next_dd;
 	uint16_t next_alloc;
 	uint16_t next_trigger;
 	uint16_t alloc_thresh;
 	volatile uint32_t *tail_ptr;
 	uint16_t nb_desc;
+	/* Number of faked desc added at the tail for Vector RX function */
+	uint16_t nb_fake_desc;
 	uint16_t queue_id;
-	uint8_t port_id;
+	/* Below 2 fields only valid in case vPMD is applied. */
+	uint16_t rxrearm_nb;     /* number of remaining to be re-armed */
+	uint16_t rxrearm_start;  /* the idx we start the re-arming from */
+	uint16_t rx_using_sse; /* indicates that vector RX is in use */
+	uint16_t port_id;
 	uint8_t drop_en;
-	uint8_t rx_deferred_start; /**< don't start this queue in dev start. */
+	uint8_t rx_deferred_start; /* don't start this queue in dev start. */
+	uint16_t rx_ftag_en; /* indicates FTAG RX supported */
+	uint64_t offloads; /* offloads of DEV_RX_OFFLOAD_* */
 };
 
 /*
@@ -191,30 +191,42 @@ struct fifo {
 	uint16_t *endp;
 };
 
+struct fm10k_txq_ops;
+
 struct fm10k_tx_queue {
 	struct rte_mbuf **sw_ring;
 	struct fm10k_tx_desc *hw_ring;
 	uint64_t hw_ring_phys_addr;
 	struct fifo rs_tracker;
+	const struct fm10k_txq_ops *ops; /* txq ops */
 	uint16_t last_free;
 	uint16_t next_free;
 	uint16_t nb_free;
 	uint16_t nb_used;
 	uint16_t free_thresh;
 	uint16_t rs_thresh;
+	/* Below 2 fields only valid in case vPMD is applied. */
+	uint16_t next_rs; /* Next pos to set RS flag */
+	uint16_t next_dd; /* Next pos to check DD flag */
 	volatile uint32_t *tail_ptr;
+	uint64_t offloads; /* Offloads of DEV_TX_OFFLOAD_* */
 	uint16_t nb_desc;
-	uint8_t port_id;
-	uint8_t tx_deferred_start; /** < don't start this queue in dev start. */
+	uint16_t port_id;
+	uint8_t tx_deferred_start; /** don't start this queue in dev start. */
 	uint16_t queue_id;
+	uint16_t tx_ftag_en; /* indicates FTAG TX supported */
+};
+
+struct fm10k_txq_ops {
+	void (*reset)(struct fm10k_tx_queue *txq);
 };
 
 #define MBUF_DMA_ADDR(mb) \
-	((uint64_t) ((mb)->buf_physaddr + (mb)->data_off))
+	((uint64_t) ((mb)->buf_iova + (mb)->data_off))
 
 /* enforce 512B alignment on default Rx DMA addresses */
 #define MBUF_DMA_ADDR_DEFAULT(mb) \
-	((uint64_t) RTE_ALIGN(((mb)->buf_physaddr + RTE_PKTMBUF_HEADROOM),\
+	((uint64_t) RTE_ALIGN(((mb)->buf_iova + RTE_PKTMBUF_HEADROOM),\
 			FM10K_RX_DATABUF_ALIGN))
 
 static inline void fifo_reset(struct fifo *fifo, uint32_t len)
@@ -247,7 +259,7 @@ static inline uint16_t fifo_remove(struct fifo *fifo)
 }
 
 static inline void
-fm10k_pktmbuf_reset(struct rte_mbuf *mb, uint8_t in_port)
+fm10k_pktmbuf_reset(struct rte_mbuf *mb, uint16_t in_port)
 {
 	rte_mbuf_refcnt_set(mb, 1);
 	mb->next = NULL;
@@ -293,7 +305,7 @@ fm10k_addr_alignment_valid(struct rte_mbuf *mb)
 	/* 8B aligned, and max Ethernet frame would not cross a 4KB boundary? */
 	if (RTE_ALIGN(addr, 8) == addr) {
 		boundary1 = RTE_ALIGN_FLOOR(addr, 4096);
-		boundary2 = RTE_ALIGN_FLOOR(addr + ETHER_MAX_VLAN_FRAME_LEN,
+		boundary2 = RTE_ALIGN_FLOOR(addr + RTE_ETHER_MAX_VLAN_FRAME_LEN,
 						4096);
 		if (boundary1 == boundary2)
 			return 1;
@@ -311,6 +323,34 @@ uint16_t fm10k_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 uint16_t fm10k_recv_scattered_pkts(void *rx_queue,
 		struct rte_mbuf **rx_pkts, uint16_t nb_pkts);
 
+uint32_t
+fm10k_dev_rx_queue_count(struct rte_eth_dev *dev, uint16_t rx_queue_id);
+
+int
+fm10k_dev_rx_descriptor_done(void *rx_queue, uint16_t offset);
+
+int
+fm10k_dev_rx_descriptor_status(void *rx_queue, uint16_t offset);
+
+int
+fm10k_dev_tx_descriptor_status(void *rx_queue, uint16_t offset);
+
+
 uint16_t fm10k_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint16_t nb_pkts);
+
+uint16_t fm10k_prep_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
+	uint16_t nb_pkts);
+
+int fm10k_rxq_vec_setup(struct fm10k_rx_queue *rxq);
+int fm10k_rx_vec_condition_check(struct rte_eth_dev *);
+void fm10k_rx_queue_release_mbufs_vec(struct fm10k_rx_queue *rxq);
+uint16_t fm10k_recv_pkts_vec(void *, struct rte_mbuf **, uint16_t);
+uint16_t fm10k_recv_scattered_pkts_vec(void *, struct rte_mbuf **,
+					uint16_t);
+uint16_t fm10k_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
+				    uint16_t nb_pkts);
+void fm10k_txq_vec_setup(struct fm10k_tx_queue *txq);
+int fm10k_tx_vec_condition_check(struct fm10k_tx_queue *txq);
+
 #endif

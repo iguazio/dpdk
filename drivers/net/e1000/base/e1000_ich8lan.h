@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #ifndef _E1000_ICH8LAN_H_
 #define _E1000_ICH8LAN_H_
@@ -69,22 +40,16 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define E1000_FWSM_WLOCK_MAC_MASK	0x0380
 #define E1000_FWSM_WLOCK_MAC_SHIFT	7
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
 #define E1000_FWSM_ULP_CFG_DONE		0x00000400  /* Low power cfg done */
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
 
 /* Shared Receive Address Registers */
 #define E1000_SHRAL_PCH_LPT(_i)		(0x05408 + ((_i) * 8))
 #define E1000_SHRAH_PCH_LPT(_i)		(0x0540C + ((_i) * 8))
 
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
 #define E1000_H2ME		0x05B50    /* Host to ME */
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
 #define E1000_H2ME_ULP		0x00000800 /* ULP Indication Bit */
 #define E1000_H2ME_ENFORCE_SETTINGS	0x00001000 /* Enforce Settings */
 
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
 #define ID_LED_DEFAULT_ICH8LAN	((ID_LED_DEF1_DEF2 << 12) | \
 				 (ID_LED_OFF1_OFF2 <<  8) | \
 				 (ID_LED_OFF1_ON2  <<  4) | \
@@ -97,11 +62,9 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define E1000_ICH8_LAN_INIT_TIMEOUT	1500
 
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
 /* FEXT register bit definition */
 #define E1000_FEXT_PHY_CABLE_DISCONNECTED	0x00000004
 
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
 #define E1000_FEXTNVM_SW_CONFIG		1
 #define E1000_FEXTNVM_SW_CONFIG_ICH8M	(1 << 27) /* different on ICH8M */
 
@@ -114,11 +77,25 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define E1000_FEXTNVM6_REQ_PLL_CLK	0x00000100
 #define E1000_FEXTNVM6_ENABLE_K1_ENTRY_CONDITION	0x00000200
-
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
+#define E1000_FEXTNVM6_K1_OFF_ENABLE	0x80000000
+/* bit for disabling packet buffer read */
+#define E1000_FEXTNVM7_DISABLE_PB_READ	0x00040000
+#define E1000_FEXTNVM7_SIDE_CLK_UNGATE	0x00000004
 #define E1000_FEXTNVM7_DISABLE_SMB_PERST	0x00000020
+#define E1000_FEXTNVM8_UNBIND_DPG_FROM_MPHY	0x00000400
+#define E1000_FEXTNVM9_IOSFSB_CLKGATE_DIS	0x00000800
+#define E1000_FEXTNVM9_IOSFSB_CLKREQ_DIS	0x00001000
+#define E1000_FEXTNVM11_DISABLE_PB_READ		0x00000200
+#define E1000_FEXTNVM11_DISABLE_MULR_FIX	0x00002000
+#define E1000_FEXTNVM12_DONT_WAK_DPG_CLKREQ	0x00001000
+/* bit24: RXDCTL thresholds granularity: 0 - cache lines, 1 - descriptors */
+#define E1000_RXDCTL_THRESH_UNIT_DESC	0x01000000
 
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
+#define NVM_SIZE_MULTIPLIER 4096  /*multiplier for NVMS field*/
+#define E1000_FLASH_BASE_ADDR 0xE000 /*offset of NVM access regs*/
+#define E1000_CTRL_EXT_NVMVS 0x3 /*NVM valid sector */
+#define E1000_TARC0_CB_MULTIQ_3_REQ	0x30000000
+#define E1000_TARC0_CB_MULTIQ_2_REQ	0x20000000
 #define PCIE_ICH8_SNOOP_ALL	PCIE_NO_SNOOP_ALL
 
 #define E1000_ICH_RAR_ENTRIES	7
@@ -180,12 +157,13 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define E1000_NVM_K1_CONFIG	0x1B /* NVM K1 Config Word */
 #define E1000_NVM_K1_ENABLE	0x1  /* NVM Enable K1 bit */
+#define K1_ENTRY_LATENCY	0
+#define K1_MIN_TIME		1
 
 /* SMBus Control Phy Register */
 #define CV_SMB_CTRL		PHY_REG(769, 23)
 #define CV_SMB_CTRL_FORCE_SMBUS	0x0001
 
-#if !defined(EXTERNAL_RELEASE) || (defined(NAHUM6LP_HW) && defined(ULP_SUPPORT))
 /* I218 Ultra Low Power Configuration 1 Register */
 #define I218_ULP_CONFIG1		PHY_REG(779, 16)
 #define I218_ULP_CONFIG1_START		0x0001 /* Start auto ULP config */
@@ -194,9 +172,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #define I218_ULP_CONFIG1_INBAND_EXIT	0x0020 /* Inband on ULP exit */
 #define I218_ULP_CONFIG1_WOL_HOST	0x0040 /* WoL Host on ULP exit */
 #define I218_ULP_CONFIG1_RESET_TO_SMBUS	0x0100 /* Reset to SMBus mode */
+/* enable ULP even if when phy powered down via lanphypc */
+#define I218_ULP_CONFIG1_EN_ULP_LANPHYPC	0x0400
+/* disable clear of sticky ULP on PERST */
+#define I218_ULP_CONFIG1_DIS_CLR_STICKY_ON_PERST	0x0800
 #define I218_ULP_CONFIG1_DISABLE_SMB_PERST	0x1000 /* Disable on PERST# */
 
-#endif /* !EXTERNAL_RELEASE || (NAHUM6LP_HW && ULP_SUPPORT) */
 /* SMBus Address Phy Register */
 #define HV_SMB_ADDR		PHY_REG(768, 26)
 #define HV_SMB_ADDR_MASK	0x007F
@@ -230,8 +211,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 /* PHY Power Management Control */
 #define HV_PM_CTRL		PHY_REG(770, 17)
-#define HV_PM_CTRL_PLL_STOP_IN_K1_GIGA	0x100
+#define HV_PM_CTRL_K1_CLK_REQ		0x200
 #define HV_PM_CTRL_K1_ENABLE		0x4000
+
+#define I217_PLL_CLOCK_GATE_REG	PHY_REG(772, 28)
+#define I217_PLL_CLOCK_GATE_MASK	0x07FF
 
 #define SW_FLAG_TIMEOUT		1000 /* SW Semaphore flag timeout in ms */
 
@@ -262,12 +246,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #define I82577_MSE_THRESHOLD	0x0887 /* 82577 Mean Square Error Threshold */
 #define I82579_MSE_LINK_DOWN	0x2411 /* MSE count before dropping link */
 #define I82579_RX_CONFIG		0x3412 /* Receive configuration */
+#define I82579_LPI_PLL_SHUT		0x4412 /* LPI PLL Shut Enable */
 #define I82579_EEE_PCS_STATUS		0x182E	/* IEEE MMD Register 3.1 >> 8 */
 #define I82579_EEE_CAPABILITY		0x0410 /* IEEE MMD Register 3.20 */
 #define I82579_EEE_ADVERTISEMENT	0x040E /* IEEE MMD Register 7.60 */
 #define I82579_EEE_LP_ABILITY		0x040F /* IEEE MMD Register 7.61 */
 #define I82579_EEE_100_SUPPORTED	(1 << 1) /* 100BaseTx EEE */
 #define I82579_EEE_1000_SUPPORTED	(1 << 2) /* 1000BaseTx EEE */
+#define I82579_LPI_100_PLL_SHUT	(1 << 2) /* 100M LPI PLL Shut Enabled */
 #define I217_EEE_PCS_STATUS	0x9401   /* IEEE MMD Register 3.1 */
 #define I217_EEE_CAPABILITY	0x8000   /* IEEE MMD Register 3.20 */
 #define I217_EEE_ADVERTISEMENT	0x8001   /* IEEE MMD Register 7.60 */
@@ -290,24 +276,23 @@ POSSIBILITY OF SUCH DAMAGE.
 /* Receive Address Initial CRC Calculation */
 #define E1000_PCH_RAICC(_n)	(0x05F50 + ((_n) * 4))
 
-#if defined(QV_RELEASE) || !defined(NO_PCH_LPT_B0_SUPPORT)
+#define E1000_PCI_VENDOR_ID_REGISTER	0x00
+
 #define E1000_PCI_REVISION_ID_REG	0x08
-#endif /* defined(QV_RELEASE) || !defined(NO_PCH_LPT_B0_SUPPORT) */
 void e1000_set_kmrn_lock_loss_workaround_ich8lan(struct e1000_hw *hw,
 						 bool state);
 void e1000_igp3_phy_powerdown_workaround_ich8lan(struct e1000_hw *hw);
 void e1000_gig_downshift_workaround_ich8lan(struct e1000_hw *hw);
 void e1000_suspend_workarounds_ich8lan(struct e1000_hw *hw);
-void e1000_resume_workarounds_pchlan(struct e1000_hw *hw);
+u32 e1000_resume_workarounds_pchlan(struct e1000_hw *hw);
 s32 e1000_configure_k1_ich8lan(struct e1000_hw *hw, bool k1_enable);
+s32 e1000_configure_k0s_lpt(struct e1000_hw *hw, u8 entry_latency, u8 min_time);
 void e1000_copy_rx_addrs_to_phy_ich8lan(struct e1000_hw *hw);
 s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable);
 s32 e1000_read_emi_reg_locked(struct e1000_hw *hw, u16 addr, u16 *data);
 s32 e1000_write_emi_reg_locked(struct e1000_hw *hw, u16 addr, u16 data);
 s32 e1000_set_eee_pchlan(struct e1000_hw *hw);
-#if defined(NAHUM6LP_HW) && defined(ULP_SUPPORT)
 s32 e1000_enable_ulp_lpt_lp(struct e1000_hw *hw, bool to_sx);
 s32 e1000_disable_ulp_lpt_lp(struct e1000_hw *hw, bool force);
-#endif /* NAHUM6LP_HW && ULP_SUPPORT */
 #endif /* _E1000_ICH8LAN_H_ */
 void e1000_demote_ltr(struct e1000_hw *hw, bool demote, bool link);

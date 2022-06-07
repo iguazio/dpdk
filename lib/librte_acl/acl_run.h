@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #ifndef	_ACL_RUN_H_
@@ -39,7 +10,9 @@
 
 #define MAX_SEARCHES_AVX16	16
 #define MAX_SEARCHES_SSE8	8
+#define MAX_SEARCHES_ALTIVEC8	8
 #define MAX_SEARCHES_SSE4	4
+#define MAX_SEARCHES_ALTIVEC4	4
 #define MAX_SEARCHES_SCALAR	2
 
 #define GET_NEXT_4BYTES(prm, idx)	\
@@ -67,10 +40,10 @@ struct acl_flow_data {
 	uint32_t            trie;
 	/* current trie index (0 to N-1) */
 	uint32_t            cmplt_size;
-	uint32_t            total_packets;
-	uint32_t            categories;
-	/* number of result categories per packet. */
 	/* maximum number of packets to process */
+	uint32_t            total_packets;
+	/* number of result categories per packet. */
+	uint32_t            categories;
 	const uint64_t     *trans;
 	const uint8_t     **data;
 	uint32_t           *results;
@@ -87,7 +60,7 @@ struct completion {
 	int32_t   priority[RTE_ACL_MAX_CATEGORIES]; /* running priorities. */
 	uint32_t  count;                            /* num of remaining tries */
 	/* true for allocated struct */
-} __attribute__((aligned(XMM_SIZE)));
+} __rte_aligned(XMM_SIZE);
 
 /*
  * One parms structure for each slot in the search engine.

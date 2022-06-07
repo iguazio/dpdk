@@ -1,44 +1,14 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <rte_devargs.h>
+#include <rte_pci.h>
+#include <rte_bus_pci.h>
 #include <rte_kvargs.h>
 
-#include <cmdline_parse.h>
-#include <cmdline_parse_etheraddr.h>
-
 #include "rte_eth_bond.h"
-#include "rte_eth_bond_private.h"
+#include "eth_bond_private.h"
 
 const char *pmd_bond_init_valid_arguments[] = {
 	PMD_BOND_SLAVE_PORT_KVARG,
@@ -47,22 +17,21 @@ const char *pmd_bond_init_valid_arguments[] = {
 	PMD_BOND_XMIT_POLICY_KVARG,
 	PMD_BOND_SOCKET_ID_KVARG,
 	PMD_BOND_MAC_ADDR_KVARG,
-
+	PMD_BOND_AGG_MODE_KVARG,
+	"driver",
 	NULL
 };
 
 static inline int
 find_port_id_by_pci_addr(const struct rte_pci_addr *pci_addr)
 {
+	struct rte_pci_device *pci_dev;
 	struct rte_pci_addr *eth_pci_addr;
 	unsigned i;
 
-	for (i = 0; i < rte_eth_dev_count(); i++) {
-
-		if (rte_eth_devices[i].pci_dev == NULL)
-			continue;
-
-		eth_pci_addr = &(rte_eth_devices[i].pci_dev->addr);
+	RTE_ETH_FOREACH_DEV(i) {
+		pci_dev = RTE_ETH_DEV_TO_PCI(&rte_eth_devices[i]);
+		eth_pci_addr = &pci_dev->addr;
 
 		if (pci_addr->bus == eth_pci_addr->bus &&
 			pci_addr->devid == eth_pci_addr->devid &&
@@ -78,14 +47,23 @@ find_port_id_by_dev_name(const char *name)
 {
 	unsigned i;
 
-	for (i = 0; i < rte_eth_dev_count(); i++) {
+	RTE_ETH_FOREACH_DEV(i) {
 		if (rte_eth_devices[i].data == NULL)
 			continue;
 
-		if (strcmp(rte_eth_devices[i].data->name, name) == 0)
+		if (strcmp(rte_eth_devices[i].device->name, name) == 0)
 			return i;
 	}
 	return -1;
+}
+
+static inline int
+bond_pci_addr_cmp(const struct rte_device *dev, const void *_pci_addr)
+{
+	const struct rte_pci_device *pdev = RTE_DEV_TO_PCI_CONST(dev);
+	const struct rte_pci_addr *paddr = _pci_addr;
+
+	return rte_pci_addr_cmp(&pdev->addr, paddr);
 }
 
 /**
@@ -96,10 +74,23 @@ static inline int
 parse_port_id(const char *port_str)
 {
 	struct rte_pci_addr dev_addr;
+	struct rte_bus *pci_bus;
+	struct rte_device *dev;
 	int port_id;
 
+	pci_bus = rte_bus_find_by_name("pci");
+	if (pci_bus == NULL) {
+		RTE_BOND_LOG(ERR, "unable to find PCI bus\n");
+		return -1;
+	}
+
 	/* try parsing as pci address, physical devices */
-	if (eal_parse_pci_DomBDF(port_str, &dev_addr) == 0) {
+	if (pci_bus->parse(port_str, &dev_addr) == 0) {
+		dev = pci_bus->find_device(NULL, bond_pci_addr_cmp, &dev_addr);
+		if (dev == NULL) {
+			RTE_BOND_LOG(ERR, "unable to find PCI device");
+			return -1;
+		}
 		port_id = find_port_id_by_pci_addr(&dev_addr);
 		if (port_id < 0)
 			return -1;
@@ -126,7 +117,7 @@ parse_port_id(const char *port_str)
 }
 
 int
-bond_ethdev_parse_slave_port_kvarg(const char *key __rte_unused,
+bond_ethdev_parse_slave_port_kvarg(const char *key,
 		const char *value, void *extra_args)
 {
 	struct bond_ethdev_slave_ports *slave_ports;
@@ -139,11 +130,12 @@ bond_ethdev_parse_slave_port_kvarg(const char *key __rte_unused,
 	if (strcmp(key, PMD_BOND_SLAVE_PORT_KVARG) == 0) {
 		int port_id = parse_port_id(value);
 		if (port_id < 0) {
-			RTE_BOND_LOG(ERR, "Invalid slave port value (%s) specified", value);
+			RTE_BOND_LOG(ERR, "Invalid slave port value (%s) specified",
+				     value);
 			return -1;
 		} else
 			slave_ports->slaves[slave_ports->slave_count++] =
-					(uint8_t)port_id;
+					port_id;
 	}
 	return 0;
 }
@@ -182,6 +174,38 @@ bond_ethdev_parse_slave_mode_kvarg(const char *key __rte_unused,
 }
 
 int
+bond_ethdev_parse_slave_agg_mode_kvarg(const char *key __rte_unused,
+		const char *value, void *extra_args)
+{
+	uint8_t *agg_mode;
+
+	if (value == NULL || extra_args == NULL)
+		return -1;
+
+	agg_mode = extra_args;
+
+	errno = 0;
+	if (strncmp(value, "stable", 6) == 0)
+		*agg_mode = AGG_STABLE;
+
+	if (strncmp(value, "bandwidth", 9) == 0)
+		*agg_mode = AGG_BANDWIDTH;
+
+	if (strncmp(value, "count", 5) == 0)
+		*agg_mode = AGG_COUNT;
+
+	switch (*agg_mode) {
+	case AGG_STABLE:
+	case AGG_BANDWIDTH:
+	case AGG_COUNT:
+		return 0;
+	default:
+		RTE_BOND_LOG(ERR, "Invalid agg mode value stable/bandwidth/count");
+		return -1;
+	}
+}
+
+int
 bond_ethdev_parse_socket_id_kvarg(const char *key __rte_unused,
 		const char *value, void *extra_args)
 {
@@ -196,8 +220,8 @@ bond_ethdev_parse_socket_id_kvarg(const char *key __rte_unused,
 	if (*endptr != 0 || errno != 0)
 		return -1;
 
-	/* validate mode value */
-	if (socket_id >= 0 && socket_id < number_of_sockets()) {
+	/* validate socket id value */
+	if (socket_id >= 0) {
 		*(uint8_t *)extra_args = (uint8_t)socket_id;
 		return 0;
 	}
@@ -217,7 +241,7 @@ bond_ethdev_parse_primary_slave_port_id_kvarg(const char *key __rte_unused,
 	if (primary_slave_port_id < 0)
 		return -1;
 
-	*(uint8_t *)extra_args = (uint8_t)primary_slave_port_id;
+	*(uint16_t *)extra_args = (uint16_t)primary_slave_port_id;
 
 	return 0;
 }
@@ -253,8 +277,7 @@ bond_ethdev_parse_bond_mac_addr_kvarg(const char *key __rte_unused,
 		return -1;
 
 	/* Parse MAC */
-	return cmdline_parse_etheraddr(NULL, value, extra_args,
-		sizeof(struct ether_addr));
+	return rte_ether_unformat_addr(value, extra_args);
 }
 
 int

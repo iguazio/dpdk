@@ -1,40 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
 
+#include <rte_common.h>
 #include <rte_string_fns.h>
 
 #include <cmdline_parse.h>
@@ -65,9 +37,10 @@ struct string_elt_str string_elt_strs[] = {
 		{"one#two\nwith\nnewlines#three", "two\nwith\nnewlines", 1},
 };
 
-#if CMDLINE_TEST_BUFSIZE < STR_TOKEN_SIZE
+#if (CMDLINE_TEST_BUFSIZE < STR_TOKEN_SIZE) \
+|| (CMDLINE_TEST_BUFSIZE < STR_MULTI_TOKEN_SIZE)
 #undef CMDLINE_TEST_BUFSIZE
-#define CMDLINE_TEST_BUFSIZE STR_TOKEN_SIZE
+#define CMDLINE_TEST_BUFSIZE RTE_MAX(STR_TOKEN_SIZE, STR_MULTI_TOKEN_SIZE)
 #endif
 
 struct string_nb_str {
@@ -97,6 +70,11 @@ struct string_parse_str string_parse_strs[] = {
 		{"two with\rgarbage\tcharacters\n",
 				"one#two with\rgarbage\tcharacters\n#three",
 				"two with\rgarbage\tcharacters\n"},
+		{"one two", "one", "one"}, /* fixed string */
+		{"one two", TOKEN_STRING_MULTI, "one two"}, /* multi string */
+		{"one two", NULL, "one"}, /* any string */
+		{"one two #three", TOKEN_STRING_MULTI, "one two "},
+		/* multi string with comment */
 };
 
 
@@ -124,7 +102,6 @@ struct string_invalid_str string_invalid_strs[] = {
 		 "toolong!!!toolong!!!toolong!!!toolong!!!toolong!!!toolong!!!"
 		 "toolong!!!toolong!!!toolong!!!toolong!!!toolong!!!toolong!!!"
 		 "toolong!!!" },
-		 {"invalid", ""},
 		 {"", "invalid"}
 };
 
@@ -135,19 +112,6 @@ const char * string_help_strs[] = {
 		"fixed_str",
 		"multi#str",
 };
-
-
-
-#define STRING_PARSE_STRS_SIZE \
-	(sizeof(string_parse_strs) / sizeof(string_parse_strs[0]))
-#define STRING_HELP_STRS_SIZE \
-	(sizeof(string_help_strs) / sizeof(string_help_strs[0]))
-#define STRING_ELT_STRS_SIZE \
-	(sizeof(string_elt_strs) / sizeof(string_elt_strs[0]))
-#define STRING_NB_STRS_SIZE \
-	(sizeof(string_nb_strs) / sizeof(string_nb_strs[0]))
-#define STRING_INVALID_STRS_SIZE \
-	(sizeof(string_invalid_strs) / sizeof(string_invalid_strs[0]))
 
 #define SMALL_BUF 8
 
@@ -226,7 +190,7 @@ test_parse_string_invalid_data(void)
 	unsigned i;
 
 	/* test parsing invalid strings */
-	for (i = 0; i < STRING_INVALID_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(string_invalid_strs); i++) {
 		memset(&token, 0, sizeof(token));
 		memset(buf, 0, sizeof(buf));
 
@@ -325,7 +289,7 @@ test_parse_string_valid(void)
 	unsigned i;
 
 	/* test parsing strings */
-	for (i = 0; i < STRING_PARSE_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(string_parse_strs); i++) {
 		memset(&token, 0, sizeof(token));
 		memset(buf, 0, sizeof(buf));
 
@@ -350,15 +314,14 @@ test_parse_string_valid(void)
 					string_parse_strs[i].str, help_str);
 			return -1;
 		}
-		if (strncmp(buf, string_parse_strs[i].result,
-				sizeof(string_parse_strs[i].result) - 1) != 0) {
+		if (strcmp(buf, string_parse_strs[i].result) != 0) {
 			printf("Error: result mismatch!\n");
 			return -1;
 		}
 	}
 
 	/* get number of string tokens and verify it's correct */
-	for (i = 0; i < STRING_NB_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(string_nb_strs); i++) {
 		memset(&token, 0, sizeof(token));
 
 		token.string_data.str = string_nb_strs[i].str;
@@ -372,7 +335,7 @@ test_parse_string_valid(void)
 	}
 
 	/* get token at specified position and verify it's correct */
-	for (i = 0; i < STRING_ELT_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(string_elt_strs); i++) {
 		memset(&token, 0, sizeof(token));
 		memset(buf, 0, sizeof(buf));
 
@@ -392,7 +355,7 @@ test_parse_string_valid(void)
 	}
 
 	/* cover all cases with help strings */
-	for (i = 0; i < STRING_HELP_STRS_SIZE; i++) {
+	for (i = 0; i < RTE_DIM(string_help_strs); i++) {
 		memset(&help_token, 0, sizeof(help_token));
 		memset(help_str, 0, sizeof(help_str));
 		help_token.string_data.str = string_help_strs[i];

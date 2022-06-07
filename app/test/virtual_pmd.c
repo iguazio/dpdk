@@ -1,38 +1,12 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <rte_mbuf.h>
 #include <rte_ethdev.h>
+#include <rte_ethdev_driver.h>
+#include <rte_pci.h>
+#include <rte_bus_pci.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
 #include <rte_memory.h>
@@ -79,7 +53,7 @@ static void  virtual_ethdev_stop(struct rte_eth_dev *eth_dev __rte_unused)
 	void *pkt = NULL;
 	struct virtual_ethdev_private *prv = eth_dev->data->dev_private;
 
-	eth_dev->data->dev_link.link_status = 0;
+	eth_dev->data->dev_link.link_status = ETH_LINK_DOWN;
 	eth_dev->data->dev_started = 0;
 	while (rte_ring_dequeue(prv->rx_queue, &pkt) != -ENOENT)
 		rte_pktmbuf_free(pkt);
@@ -104,7 +78,7 @@ virtual_ethdev_configure_fail(struct rte_eth_dev *dev __rte_unused)
 	return -1;
 }
 
-static void
+static int
 virtual_ethdev_info_get(struct rte_eth_dev *dev __rte_unused,
 		struct rte_eth_dev_info *dev_info)
 {
@@ -117,7 +91,8 @@ virtual_ethdev_info_get(struct rte_eth_dev *dev __rte_unused,
 	dev_info->max_tx_queues = (uint16_t)512;
 
 	dev_info->min_rx_bufsize = 0;
-	dev_info->pci_dev = NULL;
+
+	return 0;
 }
 
 static int
@@ -199,7 +174,7 @@ virtual_ethdev_link_update_success(struct rte_eth_dev *bonded_eth_dev,
 		int wait_to_complete __rte_unused)
 {
 	if (!bonded_eth_dev->data->dev_started)
-		bonded_eth_dev->data->dev_link.link_status = 0;
+		bonded_eth_dev->data->dev_link.link_status = ETH_LINK_DOWN;
 
 	return 0;
 }
@@ -211,16 +186,18 @@ virtual_ethdev_link_update_fail(struct rte_eth_dev *bonded_eth_dev __rte_unused,
 	return -1;
 }
 
-static void
+static int
 virtual_ethdev_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *stats)
 {
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
 
 	if (stats)
 		rte_memcpy(stats, &dev_private->eth_stats, sizeof(*stats));
+
+	return 0;
 }
 
-static void
+static int
 virtual_ethdev_stats_reset(struct rte_eth_dev *dev)
 {
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -231,16 +208,28 @@ virtual_ethdev_stats_reset(struct rte_eth_dev *dev)
 
 	/* Reset internal statistics */
 	memset(&dev_private->eth_stats, 0, sizeof(dev_private->eth_stats));
+
+	return 0;
 }
 
-static void
+static int
 virtual_ethdev_promiscuous_mode_enable(struct rte_eth_dev *dev __rte_unused)
-{}
+{
+	return 0;
+}
 
-static void
+static int
 virtual_ethdev_promiscuous_mode_disable(struct rte_eth_dev *dev __rte_unused)
-{}
+{
+	return 0;
+}
 
+static int
+virtual_ethdev_mac_address_set(__rte_unused struct rte_eth_dev *dev,
+			       __rte_unused struct rte_ether_addr *addr)
+{
+	return 0;
+}
 
 static const struct eth_dev_ops virtual_ethdev_default_dev_ops = {
 	.dev_configure = virtual_ethdev_configure_success,
@@ -253,15 +242,15 @@ static const struct eth_dev_ops virtual_ethdev_default_dev_ops = {
 	.rx_queue_release = virtual_ethdev_rx_queue_release,
 	.tx_queue_release = virtual_ethdev_tx_queue_release,
 	.link_update = virtual_ethdev_link_update_success,
+	.mac_addr_set = virtual_ethdev_mac_address_set,
 	.stats_get = virtual_ethdev_stats_get,
 	.stats_reset = virtual_ethdev_stats_reset,
 	.promiscuous_enable = virtual_ethdev_promiscuous_mode_enable,
 	.promiscuous_disable = virtual_ethdev_promiscuous_mode_disable
 };
 
-
 void
-virtual_ethdev_start_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_start_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -275,7 +264,7 @@ virtual_ethdev_start_fn_set_success(uint8_t port_id, uint8_t success)
 }
 
 void
-virtual_ethdev_configure_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_configure_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -288,7 +277,7 @@ virtual_ethdev_configure_fn_set_success(uint8_t port_id, uint8_t success)
 }
 
 void
-virtual_ethdev_rx_queue_setup_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_rx_queue_setup_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -301,7 +290,7 @@ virtual_ethdev_rx_queue_setup_fn_set_success(uint8_t port_id, uint8_t success)
 }
 
 void
-virtual_ethdev_tx_queue_setup_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_tx_queue_setup_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -314,7 +303,7 @@ virtual_ethdev_tx_queue_setup_fn_set_success(uint8_t port_id, uint8_t success)
 }
 
 void
-virtual_ethdev_link_update_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_link_update_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	struct virtual_ethdev_private *dev_private = dev->data->dev_private;
@@ -343,7 +332,7 @@ virtual_ethdev_rx_burst_success(void *queue __rte_unused,
 	dev_private = vrtl_eth_dev->data->dev_private;
 
 	rx_count = rte_ring_dequeue_burst(dev_private->rx_queue, (void **) bufs,
-			nb_pkts);
+			nb_pkts, NULL);
 
 	/* increments ipackets count */
 	dev_private->eth_stats.ipackets += rx_count;
@@ -367,7 +356,7 @@ static uint16_t
 virtual_ethdev_tx_burst_success(void *queue, struct rte_mbuf **bufs,
 		uint16_t nb_pkts)
 {
-	struct virtual_ethdev_queue *tx_q = (struct virtual_ethdev_queue *)queue;
+	struct virtual_ethdev_queue *tx_q = queue;
 
 	struct rte_eth_dev *vrtl_eth_dev;
 	struct virtual_ethdev_private *dev_private;
@@ -381,7 +370,7 @@ virtual_ethdev_tx_burst_success(void *queue, struct rte_mbuf **bufs,
 		nb_pkts = 0;
 	else
 		nb_pkts = rte_ring_enqueue_burst(dev_private->tx_queue, (void **)bufs,
-				nb_pkts);
+				nb_pkts, NULL);
 
 	/* increment opacket count */
 	dev_private->eth_stats.opackets += nb_pkts;
@@ -403,7 +392,7 @@ virtual_ethdev_tx_burst_fail(void *queue, struct rte_mbuf **bufs,
 
 	int i;
 
-	tx_q = (struct virtual_ethdev_queue *)queue;
+	tx_q = queue;
 	vrtl_eth_dev = &rte_eth_devices[tx_q->port_id];
 	dev_private = vrtl_eth_dev->data->dev_private;
 
@@ -430,7 +419,7 @@ virtual_ethdev_tx_burst_fail(void *queue, struct rte_mbuf **bufs,
 
 
 void
-virtual_ethdev_rx_burst_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_rx_burst_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct rte_eth_dev *vrtl_eth_dev = &rte_eth_devices[port_id];
 
@@ -442,7 +431,7 @@ virtual_ethdev_rx_burst_fn_set_success(uint8_t port_id, uint8_t success)
 
 
 void
-virtual_ethdev_tx_burst_fn_set_success(uint8_t port_id, uint8_t success)
+virtual_ethdev_tx_burst_fn_set_success(uint16_t port_id, uint8_t success)
 {
 	struct virtual_ethdev_private *dev_private = NULL;
 	struct rte_eth_dev *vrtl_eth_dev = &rte_eth_devices[port_id];
@@ -458,7 +447,7 @@ virtual_ethdev_tx_burst_fn_set_success(uint8_t port_id, uint8_t success)
 }
 
 void
-virtual_ethdev_tx_burst_fn_set_tx_pkt_fail_count(uint8_t port_id,
+virtual_ethdev_tx_burst_fn_set_tx_pkt_fail_count(uint16_t port_id,
 		uint8_t packet_fail_count)
 {
 	struct virtual_ethdev_private *dev_private = NULL;
@@ -470,7 +459,7 @@ virtual_ethdev_tx_burst_fn_set_tx_pkt_fail_count(uint8_t port_id,
 }
 
 void
-virtual_ethdev_set_link_status(uint8_t port_id, uint8_t link_status)
+virtual_ethdev_set_link_status(uint16_t port_id, uint8_t link_status)
 {
 	struct rte_eth_dev *vrtl_eth_dev = &rte_eth_devices[port_id];
 
@@ -478,18 +467,19 @@ virtual_ethdev_set_link_status(uint8_t port_id, uint8_t link_status)
 }
 
 void
-virtual_ethdev_simulate_link_status_interrupt(uint8_t port_id,
+virtual_ethdev_simulate_link_status_interrupt(uint16_t port_id,
 		uint8_t link_status)
 {
 	struct rte_eth_dev *vrtl_eth_dev = &rte_eth_devices[port_id];
 
 	vrtl_eth_dev->data->dev_link.link_status = link_status;
 
-	_rte_eth_dev_callback_process(vrtl_eth_dev, RTE_ETH_EVENT_INTR_LSC);
+	_rte_eth_dev_callback_process(vrtl_eth_dev, RTE_ETH_EVENT_INTR_LSC,
+				      NULL);
 }
 
 int
-virtual_ethdev_add_mbufs_to_rx_queue(uint8_t port_id,
+virtual_ethdev_add_mbufs_to_rx_queue(uint16_t port_id,
 		struct rte_mbuf **pkt_burst, int burst_length)
 {
 	struct rte_eth_dev *vrtl_eth_dev = &rte_eth_devices[port_id];
@@ -497,11 +487,11 @@ virtual_ethdev_add_mbufs_to_rx_queue(uint8_t port_id,
 			vrtl_eth_dev->data->dev_private;
 
 	return rte_ring_enqueue_burst(dev_private->rx_queue, (void **)pkt_burst,
-			burst_length);
+			burst_length, NULL);
 }
 
 int
-virtual_ethdev_get_mbufs_from_tx_queue(uint8_t port_id,
+virtual_ethdev_get_mbufs_from_tx_queue(uint16_t port_id,
 		struct rte_mbuf **pkt_burst, int burst_length)
 {
 	struct virtual_ethdev_private *dev_private;
@@ -509,31 +499,16 @@ virtual_ethdev_get_mbufs_from_tx_queue(uint8_t port_id,
 
 	dev_private = vrtl_eth_dev->data->dev_private;
 	return rte_ring_dequeue_burst(dev_private->tx_queue, (void **)pkt_burst,
-		burst_length);
+		burst_length, NULL);
 }
 
-static uint8_t
-get_number_of_sockets(void)
-{
-	int sockets = 0;
-	int i;
-	const struct rte_memseg *ms = rte_eal_get_physmem_layout();
-
-	for (i = 0; i < RTE_MAX_MEMSEG && ms[i].addr != NULL; i++) {
-		if (sockets < ms[i].socket_id)
-			sockets = ms[i].socket_id;
-	}
-	/* Number of sockets = maximum socket_id + 1 */
-	return ++sockets;
-}
 
 int
-virtual_ethdev_create(const char *name, struct ether_addr *mac_addr,
+virtual_ethdev_create(const char *name, struct rte_ether_addr *mac_addr,
 		uint8_t socket_id, uint8_t isr_support)
 {
 	struct rte_pci_device *pci_dev = NULL;
 	struct rte_eth_dev *eth_dev = NULL;
-	struct eth_driver *eth_drv = NULL;
 	struct rte_pci_driver *pci_drv = NULL;
 	struct rte_pci_id *id_table = NULL;
 	struct virtual_ethdev_private *dev_private = NULL;
@@ -544,15 +519,8 @@ virtual_ethdev_create(const char *name, struct ether_addr *mac_addr,
 	 * and internal (dev_private) data
 	 */
 
-	if (socket_id >= get_number_of_sockets())
-		goto err;
-
 	pci_dev = rte_zmalloc_socket(name, sizeof(*pci_dev), 0, socket_id);
 	if (pci_dev == NULL)
-		goto err;
-
-	eth_drv = rte_zmalloc_socket(name, sizeof(*eth_drv), 0, socket_id);
-	if (eth_drv == NULL)
 		goto err;
 
 	pci_drv = rte_zmalloc_socket(name, sizeof(*pci_drv), 0, socket_id);
@@ -581,12 +549,13 @@ virtual_ethdev_create(const char *name, struct ether_addr *mac_addr,
 		goto err;
 
 	/* reserve an ethdev entry */
-	eth_dev = rte_eth_dev_allocate(name, RTE_ETH_DEV_PCI);
+	eth_dev = rte_eth_dev_allocate(name);
 	if (eth_dev == NULL)
 		goto err;
 
-	pci_dev->numa_node = socket_id;
-	pci_drv->name = virtual_ethdev_driver_name;
+	pci_dev->device.numa_node = socket_id;
+	pci_dev->device.name = eth_dev->data->name;
+	pci_drv->driver.name = virtual_ethdev_driver_name;
 	pci_drv->id_table = id_table;
 
 	if (isr_support)
@@ -595,19 +564,17 @@ virtual_ethdev_create(const char *name, struct ether_addr *mac_addr,
 		pci_drv->drv_flags &= ~RTE_PCI_DRV_INTR_LSC;
 
 
-	eth_drv->pci_drv = (struct rte_pci_driver)(*pci_drv);
-	eth_dev->driver = eth_drv;
+	eth_dev->device = &pci_dev->device;
+	eth_dev->device->driver = &pci_drv->driver;
 
 	eth_dev->data->nb_rx_queues = (uint16_t)1;
 	eth_dev->data->nb_tx_queues = (uint16_t)1;
 
-	TAILQ_INIT(&(eth_dev->link_intr_cbs));
-
-	eth_dev->data->dev_link.link_status = 0;
-	eth_dev->data->dev_link.link_speed = ETH_LINK_SPEED_10000;
+	eth_dev->data->dev_link.link_status = ETH_LINK_DOWN;
+	eth_dev->data->dev_link.link_speed = ETH_SPEED_NUM_10G;
 	eth_dev->data->dev_link.link_duplex = ETH_LINK_FULL_DUPLEX;
 
-	eth_dev->data->mac_addrs = rte_zmalloc(name, ETHER_ADDR_LEN, 0);
+	eth_dev->data->mac_addrs = rte_zmalloc(name, RTE_ETHER_ADDR_LEN, 0);
 	if (eth_dev->data->mac_addrs == NULL)
 		goto err;
 
@@ -625,18 +592,19 @@ virtual_ethdev_create(const char *name, struct ether_addr *mac_addr,
 	dev_private->dev_ops = virtual_ethdev_default_dev_ops;
 	eth_dev->dev_ops = &dev_private->dev_ops;
 
-	eth_dev->pci_dev = pci_dev;
-	eth_dev->pci_dev->driver = &eth_drv->pci_drv;
+	pci_dev->device.driver = &pci_drv->driver;
+	eth_dev->device = &pci_dev->device;
 
 	eth_dev->rx_pkt_burst = virtual_ethdev_rx_burst_success;
 	eth_dev->tx_pkt_burst = virtual_ethdev_tx_burst_success;
+
+	rte_eth_dev_probing_finish(eth_dev);
 
 	return eth_dev->data->port_id;
 
 err:
 	rte_free(pci_dev);
 	rte_free(pci_drv);
-	rte_free(eth_drv);
 	rte_free(id_table);
 	rte_free(dev_private);
 

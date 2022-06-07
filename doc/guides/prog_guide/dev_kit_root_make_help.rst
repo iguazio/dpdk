@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 .. _Development_Kit_Root_Makefile_Help:
 
@@ -54,7 +27,7 @@ This is an optional parameter, the default output directory is build.
 
     .. code-block:: console
 
-        make config O=mybuild T=x86_64-native-linuxapp-gcc
+        make config O=mybuild T=x86_64-native-linux-gcc
 
 Build Targets
 -------------
@@ -107,22 +80,17 @@ Install Targets
 
 *   Install
 
-    Build the DPDK binary.
-    Actually, this builds each supported target in a separate directory.
-    The name of each directory is the name of the target.
-    The name of the targets to install can be optionally specified using T=mytarget.
-    The target name can contain wildcard \* characters.
     The list of available targets are in $(RTE_SDK)/config (remove the defconfig\_ prefix).
+
+    The GNU standards variables may be used:
+    http://gnu.org/prep/standards/html_node/Directory-Variables.html and
+    http://gnu.org/prep/standards/html_node/DESTDIR.html
 
     Example:
 
     .. code-block:: console
 
-        make install T=x86_64-*
-
-*   Uninstall
-
-    Remove installed target directories.
+        make install DESTDIR=myinstall prefix=/usr
 
 Test Targets
 ------------
@@ -138,25 +106,12 @@ Test Targets
 
         make test O=mybuild
 
-*   testall
-
-    Launch automatic tests for all installed target directories (after a make install).
-    The name of the targets to test can be optionally specified using T=mytarget.
-    The target name can contain wildcard (\*) characters.
-    The list of available targets are in $(RTE_SDK)/config (remove the defconfig\_  prefix).
-
-    Examples:
-
-    .. code-block:: console
-
-        make testall, make testall T=x86_64-*
-
 Documentation Targets
 ---------------------
 
 *   doc
 
-    Generate the Doxygen documentation (API, html and pdf).
+    Generate the documentation (API and guides).
 
 *   doc-api-html
 
@@ -170,40 +125,12 @@ Documentation Targets
 
     Generate the guides documentation in pdf.
 
-
-Deps Targets
-------------
-
-*   depdirs
-
-    This target is implicitly called by make config.
-    Typically, there is no need for a user to call it,
-    except if DEPDIRS-y variables have been updated in Makefiles.
-    It will generate the file  $(RTE_OUTPUT)/.depdirs.
-
-    Example:
-
-    .. code-block:: console
-
-        make depdirs O=mybuild
-
-*   depgraph
-
-    This command generates a dot graph of dependencies.
-    It can be displayed to debug circular dependency issues, or just to understand the dependencies.
-
-    Example:
-
-    .. code-block:: console
-
-        make depgraph O=mybuild > /tmp/graph.dot && dotty /tmp/ graph.dot
-
 Misc Targets
 ------------
 
 *   help
 
-    Show this help.
+    Show a quick help.
 
 Other Useful Command-line Variables
 -----------------------------------
@@ -236,7 +163,7 @@ For instance, the following command:
 .. code-block:: console
 
     cd $(RTE_SDK)
-    make config O=mybuild T=x86_64-native-linuxapp-gcc
+    make config O=mybuild T=x86_64-native-linux-gcc
     make O=mybuild
 
 is equivalent to:
@@ -244,7 +171,7 @@ is equivalent to:
 .. code-block:: console
 
     cd $(RTE_SDK)
-    make config O=mybuild T=x86_64-native-linuxapp-gcc
+    make config O=mybuild T=x86_64-native-linux-gcc
     cd mybuild
 
     # no need to specify O= now
@@ -259,10 +186,3 @@ the EXTRA_CFLAGS environment variable should be set before compiling as follows:
 .. code-block:: console
 
     export EXTRA_CFLAGS='-O0 -g'
-
-The DPDK and any user or sample applications can then be compiled in the usual way.
-For example:
-
-.. code-block:: console
-
-    make install T=x86_64-native-linuxapp-gcc make -C examples/<theapp>

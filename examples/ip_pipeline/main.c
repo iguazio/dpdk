@@ -1,165 +1,269 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2018 Intel Corporation
  */
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <sys/types.h>
 #include <string.h>
-#include <sys/queue.h>
-#include <stdarg.h>
-#include <errno.h>
-#include <getopt.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <getopt.h>
 
-#include <rte_common.h>
-#include <rte_byteorder.h>
-#include <rte_log.h>
-#include <rte_memory.h>
-#include <rte_memcpy.h>
-#include <rte_memzone.h>
-#include <rte_eal.h>
-#include <rte_per_lcore.h>
 #include <rte_launch.h>
-#include <rte_atomic.h>
-#include <rte_cycles.h>
-#include <rte_prefetch.h>
-#include <rte_lcore.h>
-#include <rte_per_lcore.h>
-#include <rte_branch_prediction.h>
-#include <rte_interrupts.h>
-#include <rte_pci.h>
-#include <rte_random.h>
-#include <rte_debug.h>
-#include <rte_ether.h>
-#include <rte_ethdev.h>
-#include <rte_ring.h>
-#include <rte_mempool.h>
-#include <rte_mbuf.h>
-#include <rte_ip.h>
-#include <rte_tcp.h>
-#include <rte_lpm.h>
-#include <rte_lpm6.h>
+#include <rte_eal.h>
 
-#include "main.h"
+#include "cli.h"
+#include "conn.h"
+#include "kni.h"
+#include "cryptodev.h"
+#include "link.h"
+#include "mempool.h"
+#include "pipeline.h"
+#include "swq.h"
+#include "tap.h"
+#include "thread.h"
+#include "tmgr.h"
 
-int
-main(int argc, char **argv)
+static const char usage[] =
+	"%s EAL_ARGS -- [-h HOST] [-p PORT] [-s SCRIPT]\n";
+
+static const char welcome[] =
+	"\n"
+	"Welcome to IP Pipeline!\n"
+	"\n";
+
+static const char prompt[] = "pipeline> ";
+
+static struct app_params {
+	struct conn_params conn;
+	char *script_name;
+} app = {
+	.conn = {
+		.welcome = welcome,
+		.prompt = prompt,
+		.addr = "0.0.0.0",
+		.port = 8086,
+		.buf_size = 1024 * 1024,
+		.msg_in_len_max = 1024,
+		.msg_out_len_max = 1024 * 1024,
+		.msg_handle = cli_process,
+	},
+	.script_name = NULL,
+};
+
+static int
+parse_args(int argc, char **argv)
 {
-	int ret;
+	char *app_name = argv[0];
+	struct option lgopts[] = {
+		{ NULL,  0, 0, 0 }
+	};
+	int opt, option_index;
+	int h_present, p_present, s_present, n_args, i;
 
-	/* Init EAL */
-	ret = rte_eal_init(argc, argv);
-	if (ret < 0)
-		return -1;
-	argc -= ret;
-	argv += ret;
+	/* Skip EAL input args */
+	n_args = argc;
+	for (i = 0; i < n_args; i++)
+		if (strcmp(argv[i], "--") == 0) {
+			argc -= i;
+			argv += i;
+			break;
+		}
 
-	/* Parse application arguments (after the EAL ones) */
-	ret = app_parse_args(argc, argv);
-	if (ret < 0) {
-		app_print_usage(argv[0]);
-		return -1;
-	}
+	if (i == n_args)
+		return 0;
 
-	/* Init */
-	app_init();
+	/* Parse args */
+	h_present = 0;
+	p_present = 0;
+	s_present = 0;
 
-	/* Launch per-lcore init on every lcore */
-	rte_eal_mp_remote_launch(app_lcore_main_loop, NULL, CALL_MASTER);
+	while ((opt = getopt_long(argc, argv, "h:p:s:", lgopts, &option_index))
+			!= EOF)
+		switch (opt) {
+		case 'h':
+			if (h_present) {
+				printf("Error: Multiple -h arguments\n");
+				return -1;
+			}
+			h_present = 1;
+
+			if (!strlen(optarg)) {
+				printf("Error: Argument for -h not provided\n");
+				return -1;
+			}
+
+			app.conn.addr = strdup(optarg);
+			if (app.conn.addr == NULL) {
+				printf("Error: Not enough memory\n");
+				return -1;
+			}
+			break;
+
+		case 'p':
+			if (p_present) {
+				printf("Error: Multiple -p arguments\n");
+				return -1;
+			}
+			p_present = 1;
+
+			if (!strlen(optarg)) {
+				printf("Error: Argument for -p not provided\n");
+				return -1;
+			}
+
+			app.conn.port = (uint16_t) atoi(optarg);
+			break;
+
+		case 's':
+			if (s_present) {
+				printf("Error: Multiple -s arguments\n");
+				return -1;
+			}
+			s_present = 1;
+
+			if (!strlen(optarg)) {
+				printf("Error: Argument for -s not provided\n");
+				return -1;
+			}
+
+			app.script_name = strdup(optarg);
+			if (app.script_name == NULL) {
+				printf("Error: Not enough memory\n");
+				return -1;
+			}
+			break;
+
+		default:
+			printf(usage, app_name);
+			return -1;
+		}
+
+	optind = 1; /* reset getopt lib */
 
 	return 0;
 }
 
 int
-app_lcore_main_loop(__attribute__((unused)) void *arg)
+main(int argc, char **argv)
 {
-	uint32_t core_id, i;
+	struct conn *conn;
+	int status;
 
-	core_id = rte_lcore_id();
+	/* Parse application arguments */
+	status = parse_args(argc, argv);
+	if (status < 0)
+		return status;
 
-	for (i = 0; i < app.n_cores; i++) {
-		struct app_core_params *p = &app.cores[i];
+	/* EAL */
+	status = rte_eal_init(argc, argv);
+	if (status < 0) {
+		printf("Error: EAL initialization failed (%d)\n", status);
+		return status;
+	};
 
-		if (p->core_id != core_id)
-			continue;
+	/* Connectivity */
+	conn = conn_init(&app.conn);
+	if (conn == NULL) {
+		printf("Error: Connectivity initialization failed (%d)\n",
+			status);
+		return status;
+	};
 
-		switch (p->core_type) {
-		case APP_CORE_MASTER:
-			app_ping();
-			app_main_loop_cmdline();
-			return 0;
-		case APP_CORE_RX:
-			app_main_loop_pipeline_rx();
-			/* app_main_loop_rx(); */
-			return 0;
-		case APP_CORE_TX:
-			app_main_loop_pipeline_tx();
-			/* app_main_loop_tx(); */
-			return 0;
-		case APP_CORE_PT:
-			/* app_main_loop_pipeline_passthrough(); */
-			app_main_loop_passthrough();
-			return 0;
-		case APP_CORE_FC:
-			app_main_loop_pipeline_flow_classification();
-			return 0;
-		case APP_CORE_FW:
-		case APP_CORE_RT:
-			app_main_loop_pipeline_routing();
-			return 0;
-
-#ifdef RTE_LIBRTE_ACL
-			app_main_loop_pipeline_firewall();
-			return 0;
-#else
-			rte_exit(EXIT_FAILURE, "ACL not present in build\n");
-#endif
-
-		case APP_CORE_IPV4_FRAG:
-			app_main_loop_pipeline_ipv4_frag();
-			return 0;
-		case APP_CORE_IPV4_RAS:
-			app_main_loop_pipeline_ipv4_ras();
-			return 0;
-
-		default:
-			rte_panic("%s: Invalid core type for core %u\n",
-				__func__, i);
-		}
+	/* Mempool */
+	status = mempool_init();
+	if (status) {
+		printf("Error: Mempool initialization failed (%d)\n", status);
+		return status;
 	}
 
-	rte_panic("%s: Algorithmic error\n", __func__);
-	return -1;
+	/* Link */
+	status = link_init();
+	if (status) {
+		printf("Error: Link initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* SWQ */
+	status = swq_init();
+	if (status) {
+		printf("Error: SWQ initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* Traffic Manager */
+	status = tmgr_init();
+	if (status) {
+		printf("Error: TMGR initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* TAP */
+	status = tap_init();
+	if (status) {
+		printf("Error: TAP initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* KNI */
+	status = kni_init();
+	if (status) {
+		printf("Error: KNI initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* Sym Crypto */
+	status = cryptodev_init();
+	if (status) {
+		printf("Error: Cryptodev initialization failed (%d)\n",
+				status);
+		return status;
+	}
+
+	/* Action */
+	status = port_in_action_profile_init();
+	if (status) {
+		printf("Error: Input port action profile initialization failed (%d)\n", status);
+		return status;
+	}
+
+	status = table_action_profile_init();
+	if (status) {
+		printf("Error: Action profile initialization failed (%d)\n",
+			status);
+		return status;
+	}
+
+	/* Pipeline */
+	status = pipeline_init();
+	if (status) {
+		printf("Error: Pipeline initialization failed (%d)\n", status);
+		return status;
+	}
+
+	/* Thread */
+	status = thread_init();
+	if (status) {
+		printf("Error: Thread initialization failed (%d)\n", status);
+		return status;
+	}
+
+	rte_eal_mp_remote_launch(
+		thread_main,
+		NULL,
+		SKIP_MASTER);
+
+	/* Script */
+	if (app.script_name)
+		cli_script_process(app.script_name,
+			app.conn.msg_in_len_max,
+			app.conn.msg_out_len_max);
+
+	/* Dispatch loop */
+	for ( ; ; ) {
+		conn_poll_for_conn(conn);
+
+		conn_poll_for_msg(conn);
+
+		kni_handle_request();
+	}
 }

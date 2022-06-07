@@ -1,35 +1,6 @@
-/*******************************************************************************
-
-Copyright (c) 2001-2014, Intel Corporation
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
- 1. Redistributions of source code must retain the above copyright notice,
-    this list of conditions and the following disclaimer.
-
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-
- 3. Neither the name of the Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-***************************************************************************/
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2001-2020 Intel Corporation
+ */
 
 #ifndef _E1000_PHY_H_
 #define _E1000_PHY_H_
@@ -120,6 +91,11 @@ s32 e1000_write_phy_reg_mphy(struct e1000_hw *hw, u32 address, u32 data,
 			     bool line_override);
 bool e1000_is_mphy_ready(struct e1000_hw *hw);
 
+s32 e1000_read_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr,
+			 u16 *data);
+s32 e1000_write_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr,
+			  u16 data);
+
 #define E1000_MAX_PHY_ADDR		8
 
 /* IGP01E1000 Specific Registers */
@@ -143,7 +119,6 @@ bool e1000_is_mphy_ready(struct e1000_hw *hw);
 #define GS40G_MAC_LB			0x4140
 #define GS40G_MAC_SPEED_1G		0X0006
 #define GS40G_COPPER_SPEC		0x0010
-#define GS40G_CS_POWER_DOWN		0x0002
 
 /* BM/HV Specific Registers */
 #define BM_PORT_CTRL_PAGE		769
@@ -275,6 +250,13 @@ bool e1000_is_mphy_ready(struct e1000_hw *hw);
 #define E1000_KMRNCTRLSTA_K1_CONFIG	0x7
 #define E1000_KMRNCTRLSTA_K1_ENABLE	0x0002 /* enable K1 */
 #define E1000_KMRNCTRLSTA_HD_CTRL	0x10   /* Kumeran HD Control */
+#define E1000_KMRNCTRLSTA_K0S_CTRL	0x1E	/* Kumeran K0s Control */
+#define E1000_KMRNCTRLSTA_K0S_CTRL_ENTRY_LTNCY_SHIFT	0
+#define E1000_KMRNCTRLSTA_K0S_CTRL_MIN_TIME_SHIFT	4
+#define E1000_KMRNCTRLSTA_K0S_CTRL_ENTRY_LTNCY_MASK	\
+	(3 << E1000_KMRNCTRLSTA_K0S_CTRL_ENTRY_LTNCY_SHIFT)
+#define E1000_KMRNCTRLSTA_K0S_CTRL_MIN_TIME_MASK \
+	(7 << E1000_KMRNCTRLSTA_K0S_CTRL_MIN_TIME_SHIFT)
 #define E1000_KMRNCTRLSTA_OP_MODES	0x1F   /* Kumeran Modes of Operation */
 #define E1000_KMRNCTRLSTA_OP_MODES_LSC2CSC	0x0002 /* change LSC to CSC */
 
@@ -323,5 +305,13 @@ struct sfp_e1000_flags {
 #define E1000_SFF_VENDOR_OUI_FTL	0x00906500
 #define E1000_SFF_VENDOR_OUI_AVAGO	0x00176A00
 #define E1000_SFF_VENDOR_OUI_INTEL	0x001B2100
+
+/* EEPROM byte offsets */
+#define IGB_SFF_8472_SWAP		0x5C
+#define IGB_SFF_8472_COMP		0x5E
+
+/* Bitmasks */
+#define IGB_SFF_ADDRESSING_MODE	0x4
+#define IGB_SFF_8472_UNSUP		0x00
 
 #endif

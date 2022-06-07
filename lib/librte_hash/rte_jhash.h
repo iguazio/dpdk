@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2015 Intel Corporation.
  */
 
 #ifndef _RTE_JHASH_H
@@ -48,6 +19,7 @@ extern "C" {
 #include <string.h>
 #include <limits.h>
 
+#include <rte_config.h>
 #include <rte_log.h>
 #include <rte_byteorder.h>
 
@@ -120,7 +92,7 @@ __rte_jhash_2hashes(const void *key, uint32_t length, uint32_t *pc,
 	 * If check_align is not set, first case will be used
 	 */
 #if defined(RTE_ARCH_X86_64) || defined(RTE_ARCH_I686) || defined(RTE_ARCH_X86_X32)
-	const uint32_t *k = key;
+	const uint32_t *k = (const uint32_t *)key;
 	const uint32_t s = 0;
 #else
 	const uint32_t *k = (uint32_t *)((uintptr_t)key & (uintptr_t)~3);
@@ -267,10 +239,10 @@ rte_jhash_2hashes(const void *key, uint32_t length, uint32_t *pc, uint32_t *pb)
 }
 
 /**
- * Same as rte_jhash2, but takes two seeds and return two uint32_ts.
+ * Same as rte_jhash_32b, but takes two seeds and return two uint32_ts.
  * pc and pb must be non-null, and *pc and *pb must both be initialized
  * with seeds. If you pass in (*pb)=0, the output (*pc) will be
- * the same as the return value from rte_jhash2.
+ * the same as the return value from rte_jhash_32b.
  *
  * @param k
  *   Key to calculate hash of.
@@ -290,7 +262,10 @@ rte_jhash_32b_2hashes(const uint32_t *k, uint32_t length, uint32_t *pc, uint32_t
 /**
  * The most generic version, hashes an arbitrary sequence
  * of bytes.  No alignment or length assumptions are made about
- * the input key.
+ * the input key.  For keys not aligned to four byte boundaries
+ * or a multiple of four bytes in length, the memory region
+ * just after may be read (but not used in the computation).
+ * This may cross a page boundary.
  *
  * @param key
  *   Key to calculate hash of.
@@ -326,17 +301,6 @@ rte_jhash(const void *key, uint32_t length, uint32_t initval)
  */
 static inline uint32_t
 rte_jhash_32b(const uint32_t *k, uint32_t length, uint32_t initval)
-{
-	uint32_t initval2 = 0;
-
-	rte_jhash_32b_2hashes(k, length, &initval, &initval2);
-
-	return initval;
-}
-
-static inline uint32_t
-__attribute__ ((deprecated))
-rte_jhash2(const uint32_t *k, uint32_t length, uint32_t initval)
 {
 	uint32_t initval2 = 0;
 

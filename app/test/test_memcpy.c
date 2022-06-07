@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdint.h>
@@ -37,10 +8,7 @@
 #include <stdlib.h>
 
 #include <rte_common.h>
-#include <rte_cycles.h>
 #include <rte_random.h>
-#include <rte_malloc.h>
-
 #include <rte_memcpy.h>
 
 #include "test.h"
@@ -64,18 +32,6 @@ static size_t buf_sizes[] = {
 static size_t buf_sizes[TEST_VALUE_RANGE];
 #define SMALL_BUFFER_SIZE       TEST_VALUE_RANGE
 #endif /* TEST_VALUE_RANGE == 0 */
-
-
-/*
- * Arrays of this size are used for measuring uncached memory accesses by
- * picking a random location within the buffer. Make this smaller if there are
- * memory allocation errors.
- */
-#define LARGE_BUFFER_SIZE       (100 * 1024 * 1024)
-
-/* How many times to run timing loop for performance tests */
-#define TEST_ITERATIONS         1000000
-#define TEST_BATCH_SIZE         100
 
 /* Data is aligned on this many bytes (power of 2) */
 #define ALIGNMENT_UNIT          32
@@ -147,12 +103,11 @@ static int
 func_test(void)
 {
 	unsigned int off_src, off_dst, i;
-	unsigned int num_buf_sizes = sizeof(buf_sizes) / sizeof(buf_sizes[0]);
 	int ret;
 
 	for (off_src = 0; off_src < ALIGNMENT_UNIT; off_src++) {
 		for (off_dst = 0; off_dst < ALIGNMENT_UNIT; off_dst++) {
-			for (i = 0; i < num_buf_sizes; i++) {
+			for (i = 0; i < RTE_DIM(buf_sizes); i++) {
 				ret = test_single_memcpy(off_src, off_dst,
 				                         buf_sizes[i]);
 				if (ret != 0)
@@ -174,8 +129,4 @@ test_memcpy(void)
 	return 0;
 }
 
-static struct test_command memcpy_cmd = {
-	.command = "memcpy_autotest",
-	.callback = test_memcpy,
-};
-REGISTER_TEST_COMMAND(memcpy_cmd);
+REGISTER_TEST_COMMAND(memcpy_autotest, test_memcpy);

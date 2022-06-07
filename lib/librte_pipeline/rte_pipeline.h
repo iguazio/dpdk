@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #ifndef __INCLUDE_RTE_PIPELINE_H__
@@ -42,7 +13,7 @@ extern "C" {
  * @file
  * RTE Pipeline
  *
- * This tool is part of the Intel DPDK Packet Framework tool suite and provides
+ * This tool is part of the DPDK Packet Framework tool suite and provides
  * a standard methodology (logically similar to OpenFlow) for rapid development
  * of complex packet processing pipelines out of ports, tables and actions.
  *
@@ -87,6 +58,7 @@ extern "C" {
 
 #include <rte_port.h>
 #include <rte_table.h>
+#include <rte_common.h>
 
 struct rte_mbuf;
 
@@ -142,12 +114,12 @@ struct rte_pipeline_table_stats {
 	/** Number of packets dropped by lookup miss action handler. */
 	uint64_t n_pkts_dropped_by_lkp_miss_ah;
 
-	/** Number of packets dropped by pipeline in behalf of this table based on
-	 * on action specified in table entry. */
+	/** Number of packets dropped by pipeline in behalf of this
+	 * table based on action specified in table entry. */
 	uint64_t n_pkts_dropped_lkp_hit;
 
-	/** Number of packets dropped by pipeline in behalf of this table based on
-	 * on action specified in table entry. */
+	/** Number of packets dropped by pipeline in behalf of this
+	 *  table based on action specified in table entry. */
 	uint64_t n_pkts_dropped_lkp_miss;
 };
 
@@ -187,7 +159,7 @@ int rte_pipeline_check(struct rte_pipeline *p);
  * @param p
  *   Handle to pipeline instance
  * @return
- *   0 on success, error code otherwise
+ *   Number of packets read and processed
  */
 int rte_pipeline_run(struct rte_pipeline *p);
 
@@ -244,6 +216,7 @@ struct rte_pipeline_table_entry {
 	/** Reserved action */
 	enum rte_pipeline_action action;
 
+	RTE_STD_C11
 	union {
 		/** Output port ID (meta-data for "Send packet to output port"
 		action) */
@@ -252,7 +225,7 @@ struct rte_pipeline_table_entry {
 		uint32_t table_id;
 	};
 	/** Start of table entry area for user defined actions and meta-data */
-	uint8_t action_data[0];
+	__extension__ uint8_t action_data[0];
 };
 
 /**
@@ -263,6 +236,8 @@ struct rte_pipeline_table_entry {
  * required not to free the packet buffer, which will be freed eventually by
  * the pipeline.
  *
+ * @param p
+ *   Handle to pipeline instance
  * @param pkts
  *   Burst of input packets specified as array of up to 64 pointers to struct
  *   rte_mbuf
@@ -283,8 +258,9 @@ struct rte_pipeline_table_entry {
  *   0 on success, error code otherwise
  */
 typedef int (*rte_pipeline_table_action_handler_hit)(
+	struct rte_pipeline *p,
 	struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
+	uint64_t pkts_mask,
 	struct rte_pipeline_table_entry **entries,
 	void *arg);
 
@@ -296,6 +272,8 @@ typedef int (*rte_pipeline_table_action_handler_hit)(
  * required not to free the packet buffer, which will be freed eventually by
  * the pipeline.
  *
+ * @param p
+ *   Handle to pipeline instance
  * @param pkts
  *   Burst of input packets specified as array of up to 64 pointers to struct
  *   rte_mbuf
@@ -316,8 +294,9 @@ typedef int (*rte_pipeline_table_action_handler_hit)(
  *   0 on success, error code otherwise
  */
 typedef int (*rte_pipeline_table_action_handler_miss)(
+	struct rte_pipeline *p,
 	struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
+	uint64_t pkts_mask,
 	struct rte_pipeline_table_entry *entry,
 	void *arg);
 
@@ -466,6 +445,70 @@ int rte_pipeline_table_entry_delete(struct rte_pipeline *p,
 	struct rte_pipeline_table_entry *entry);
 
 /**
+ * Pipeline table entry add bulk
+ *
+ * @param p
+ *   Handle to pipeline instance
+ * @param table_id
+ *   Table ID (returned by previous invocation of pipeline table create)
+ * @param keys
+ *   Array containing table entry keys
+ * @param entries
+ *   Array containing new contents for every table entry identified by key
+ * @param n_keys
+ *   Number of keys to add
+ * @param key_found
+ *   On successful invocation, key_found for every item in the array is set to
+ *   TRUE (value different than 0) if key was already present in the table
+ *   before the add operation and to FALSE (value 0) if not
+ * @param entries_ptr
+ *   On successful invocation, array *entries_ptr stores pointer to every table
+ *   entry associated with key. This can be used for further read-write accesses
+ *   to this table entry and is valid until the key is deleted from the table or
+ *   re-added (usually for associating different actions and/or action meta-data
+ *   to the current key)
+ * @return
+ *   0 on success, error code otherwise
+ */
+int rte_pipeline_table_entry_add_bulk(struct rte_pipeline *p,
+	uint32_t table_id,
+	void **keys,
+	struct rte_pipeline_table_entry **entries,
+	uint32_t n_keys,
+	int *key_found,
+	struct rte_pipeline_table_entry **entries_ptr);
+
+/**
+ * Pipeline table entry delete bulk
+ *
+ * @param p
+ *   Handle to pipeline instance
+ * @param table_id
+ *   Table ID (returned by previous invocation of pipeline table create)
+ * @param keys
+ *   Array containing table entry keys
+ * @param n_keys
+ *   Number of keys to delete
+ * @param key_found
+ *   On successful invocation, key_found for every item in the array is set to
+ *   TRUE (value different than 0) if key was found in the table before the
+ *   delete operation and to FALSE (value 0) if not
+ * @param entries
+ *   If entries pointer is NULL, this pointer is ignored for every entry found.
+ *   Else, after successful invocation, if specific key is found in the table
+ *   and entry points to a valid buffer, the table entry contents (as it was
+ *   before the delete was performed) is copied to this buffer.
+ * @return
+ *   0 on success, error code otherwise
+ */
+int rte_pipeline_table_entry_delete_bulk(struct rte_pipeline *p,
+	uint32_t table_id,
+	void **keys,
+	uint32_t n_keys,
+	int *key_found,
+	struct rte_pipeline_table_entry **entries);
+
+/**
  * Read pipeline table stats.
  *
  * This function reads table statistics identified by *table_id* of given
@@ -501,16 +544,14 @@ int rte_pipeline_table_stats_read(struct rte_pipeline *p, uint32_t table_id,
  * required not to free the packet buffer, which will be freed eventually by
  * the pipeline.
  *
+ * @param p
+ *   Handle to pipeline instance
  * @param pkts
  *   Burst of input packets specified as array of up to 64 pointers to struct
  *   rte_mbuf
  * @param n
  *   Number of packets in the input burst. This parameter specifies that
  *   elements 0 to (n-1) of pkts array are valid.
- * @param pkts_mask
- *   64-bit bitmask specifying which packets in the input burst are still valid
- *   after the action handler is executed. When pkts_mask bit n is set, then
- *   element n of pkts array is pointing to a valid packet.
  * @param arg
  *   Opaque parameter registered by the user at the pipeline table creation
  *   time
@@ -518,9 +559,9 @@ int rte_pipeline_table_stats_read(struct rte_pipeline *p, uint32_t table_id,
  *   0 on success, error code otherwise
  */
 typedef int (*rte_pipeline_port_in_action_handler)(
+	struct rte_pipeline *p,
 	struct rte_mbuf **pkts,
 	uint32_t n,
-	uint64_t *pkts_mask,
 	void *arg);
 
 /** Parameters for pipeline input port creation */
@@ -628,36 +669,15 @@ int rte_pipeline_port_in_stats_read(struct rte_pipeline *p, uint32_t port_id,
 #define RTE_PIPELINE_PORT_OUT_MAX                                   64
 
 /**
- * Pipeline output port action handler for single packet
- *
- * The action handler can decide to drop packets by resetting the pkt_mask
- * argument. In this case, the action handler is required not to free the
- * packet buffer, which will be freed eventually by the pipeline.
- *
- * @param pkt
- *   Input packet
- * @param pkt_mask
- *   Output argument set to 0 when the action handler decides to drop the input
- *   packet and to 1LLU otherwise
- * @param arg
- *   Opaque parameter registered by the user at the pipeline table creation
- *   time
- * @return
- *   0 on success, error code otherwise
- */
-typedef int (*rte_pipeline_port_out_action_handler)(
-	struct rte_mbuf *pkt,
-	uint64_t *pkt_mask,
-	void *arg);
-
-/**
- * Pipeline output port action handler bulk
+ * Pipeline output port action handler
  *
  * The action handler can decide to drop packets by resetting the associated
  * packet bit in the pkts_mask parameter. In this case, the action handler is
  * required not to free the packet buffer, which will be freed eventually by
  * the pipeline.
  *
+ * @param p
+ *   Handle to pipeline instance
  * @param pkts
  *   Burst of input packets specified as array of up to 64 pointers to struct
  *   rte_mbuf
@@ -671,9 +691,10 @@ typedef int (*rte_pipeline_port_out_action_handler)(
  * @return
  *   0 on success, error code otherwise
  */
-typedef int (*rte_pipeline_port_out_action_handler_bulk)(
+typedef int (*rte_pipeline_port_out_action_handler)(
+	struct rte_pipeline *p,
 	struct rte_mbuf **pkts,
-	uint64_t *pkts_mask,
+	uint64_t pkts_mask,
 	void *arg);
 
 /** Parameters for pipeline output port creation. The action handlers have to
@@ -686,12 +707,9 @@ struct rte_pipeline_port_out_params {
 	/** Opaque parameter to be passed to create operation when invoked */
 	void *arg_create;
 
-	/** Callback function executing the user actions on single input
-	packet */
-	rte_pipeline_port_out_action_handler f_action;
 	/** Callback function executing the user actions on bust of input
 	packets */
-	rte_pipeline_port_out_action_handler_bulk f_action_bulk;
+	rte_pipeline_port_out_action_handler f_action;
 	/** Opaque parameter to be passed to the action handler when invoked */
 	void *arg_ah;
 };
@@ -714,30 +732,6 @@ int rte_pipeline_port_out_create(struct rte_pipeline *p,
 	uint32_t *port_id);
 
 /**
- * Pipeline output port packet insert
- *
- * This function is called by the table action handler whenever it generates a
- * new packet to be sent out though one of the pipeline output ports. This
- * packet is not part of the burst of input packets read from any of the
- * pipeline input ports, so it is not an element of the pkts array input
- * parameter of the table action handler. This packet can be dropped by the
- * output port action handler.
- *
- * @param p
- *   Handle to pipeline instance
- * @param port_id
- *   Output port ID (returned by previous invocation of pipeline output port
- *   create) to send the packet specified by pkt
- * @param pkt
- *   New packet generated by the table action handler
- * @return
- *   0 on success, error code otherwise
- */
-int rte_pipeline_port_out_packet_insert(struct rte_pipeline *p,
-	uint32_t port_id,
-	struct rte_mbuf *pkt);
-
-/**
  * Read pipeline port out stats.
  *
  * This function reads port out statistics identified by *port_id* of given
@@ -756,6 +750,97 @@ int rte_pipeline_port_out_packet_insert(struct rte_pipeline *p,
  */
 int rte_pipeline_port_out_stats_read(struct rte_pipeline *p, uint32_t port_id,
 	struct rte_pipeline_port_out_stats *stats, int clear);
+
+/*
+ * Functions to be called as part of the port IN/OUT or table action handlers
+ *
+ */
+/**
+ * Action handler packet insert to output port
+ *
+ * This function can be called by any input/output port or table action handler
+ * to send a packet out through one of the pipeline output ports. This packet is
+ * generated by the action handler, i.e. this packet is not part of the burst of
+ * packets read from one of the pipeline input ports and currently processed by
+ * the pipeline (this packet is not an element of the pkts array input parameter
+ * of the action handler).
+ *
+ * @param p
+ *   Handle to pipeline instance
+ * @param port_id
+ *   Output port ID (returned by previous invocation of pipeline output port
+ *   create) to send the packet specified by pkt
+ * @param pkt
+ *   New packet generated by the action handler
+ * @return
+ *   0 on success, error code otherwise
+ */
+int rte_pipeline_port_out_packet_insert(struct rte_pipeline *p,
+	uint32_t port_id,
+	struct rte_mbuf *pkt);
+
+#define rte_pipeline_ah_port_out_packet_insert \
+	rte_pipeline_port_out_packet_insert
+
+/**
+ * Action handler packet hijack
+ *
+ * This function can be called by any input/output port or table action handler
+ * to hijack selected packets from the burst of packets read from one of the
+ * pipeline input ports and currently processed by the pipeline. The hijacked
+ * packets are removed from any further pipeline processing, with the action
+ * handler now having the full ownership for these packets.
+ *
+ * The action handler can further send the hijacked packets out through any
+ * pipeline output port by calling the rte_pipeline_ah_port_out_packet_insert()
+ * function. The action handler can also drop these packets by calling the
+ * rte_pktmbuf_free() function, although a better alternative is provided by
+ * the action handler using the rte_pipeline_ah_packet_drop() function.
+ *
+ * @param p
+ *   Handle to pipeline instance
+ * @param pkts_mask
+ *   64-bit bitmask specifying which of the packets handed over for processing
+ *   to the action handler is to be hijacked by the action handler. When
+ *   pkts_mask bit n is set, then element n of the pkts array (input argument to
+ *   the action handler) is hijacked.
+ * @return
+ *   0 on success, error code otherwise
+ */
+int rte_pipeline_ah_packet_hijack(struct rte_pipeline *p,
+	uint64_t pkts_mask);
+
+/**
+ * Action handler packet drop
+ *
+ * This function is called by the pipeline action handlers (port in/out, table)
+ * to drop the packets selected using packet mask.
+ *
+ * This function can be called by any input/output port or table action handler
+ * to drop selected packets from the burst of packets read from one of the
+ * pipeline input ports and currently processed by the pipeline. The dropped
+ * packets are removed from any further pipeline processing and the packet
+ * buffers are eventually freed to their buffer pool.
+ *
+ * This function updates the drop statistics counters correctly, therefore the
+ * recommended approach for dropping packets by the action handlers is to call
+ * this function as opposed to the action handler hijacking the packets first
+ * and then dropping them invisibly to the pipeline (by using the
+ * rte_pktmbuf_free() function).
+ *
+ * @param p
+ *   Handle to pipeline instance
+ * @param pkts_mask
+ *   64-bit bitmask specifying which of the packets handed over for processing
+ *   to the action handler is to be dropped by the action handler. When
+ *   pkts_mask bit n is set, then element n of the pkts array (input argument to
+ *   the action handler) is dropped.
+ * @return
+ *   0 on success, error code otherwise
+ */
+int rte_pipeline_ah_packet_drop(struct rte_pipeline *p,
+	uint64_t pkts_mask);
+
 #ifdef __cplusplus
 }
 #endif

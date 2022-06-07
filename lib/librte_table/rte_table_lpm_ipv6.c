@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <string.h>
@@ -81,7 +52,7 @@ static void *
 rte_table_lpm_ipv6_create(void *params, int socket_id, uint32_t entry_size)
 {
 	struct rte_table_lpm_ipv6_params *p =
-		(struct rte_table_lpm_ipv6_params *) params;
+		params;
 	struct rte_table_lpm_ipv6 *lpm;
 	struct rte_lpm6_config lpm6_config;
 	uint32_t total_size, nht_size;
@@ -109,7 +80,11 @@ rte_table_lpm_ipv6_create(void *params, int socket_id, uint32_t entry_size)
 			__func__);
 		return NULL;
 	}
-
+	if (p->name == NULL) {
+		RTE_LOG(ERR, TABLE, "%s: Table name is NULL\n",
+			__func__);
+		return NULL;
+	}
 	entry_size = RTE_ALIGN(entry_size, sizeof(uint64_t));
 
 	/* Memory allocation */
@@ -128,7 +103,7 @@ rte_table_lpm_ipv6_create(void *params, int socket_id, uint32_t entry_size)
 	lpm6_config.max_rules = p->n_rules;
 	lpm6_config.number_tbl8s = p->number_tbl8s;
 	lpm6_config.flags = 0;
-	lpm->lpm = rte_lpm6_create("LPM IPv6", socket_id, &lpm6_config);
+	lpm->lpm = rte_lpm6_create(p->name, socket_id, &lpm6_config);
 	if (lpm->lpm == NULL) {
 		rte_free(lpm);
 		RTE_LOG(ERR, TABLE,
@@ -148,7 +123,7 @@ rte_table_lpm_ipv6_create(void *params, int socket_id, uint32_t entry_size)
 static int
 rte_table_lpm_ipv6_free(void *table)
 {
-	struct rte_table_lpm_ipv6 *lpm = (struct rte_table_lpm_ipv6 *) table;
+	struct rte_table_lpm_ipv6 *lpm = table;
 
 	/* Check input parameters */
 	if (lpm == NULL) {
@@ -204,12 +179,11 @@ rte_table_lpm_ipv6_entry_add(
 	int *key_found,
 	void **entry_ptr)
 {
-	struct rte_table_lpm_ipv6 *lpm = (struct rte_table_lpm_ipv6 *) table;
+	struct rte_table_lpm_ipv6 *lpm = table;
 	struct rte_table_lpm_ipv6_key *ip_prefix =
-		(struct rte_table_lpm_ipv6_key *) key;
-	uint32_t nht_pos, nht_pos0_valid;
+		key;
+	uint32_t nht_pos = 0, nht_pos0 = 0, nht_pos0_valid = 0;
 	int status;
-	uint8_t nht_pos0;
 
 	/* Check input parameters */
 	if (lpm == NULL) {
@@ -252,7 +226,7 @@ rte_table_lpm_ipv6_entry_add(
 
 	/* Add rule to low level LPM table */
 	if (rte_lpm6_add(lpm->lpm, ip_prefix->ip, ip_prefix->depth,
-		(uint8_t) nht_pos) < 0) {
+		nht_pos) < 0) {
 		RTE_LOG(ERR, TABLE, "%s: LPM IPv6 rule add failed\n", __func__);
 		return -1;
 	}
@@ -273,10 +247,10 @@ rte_table_lpm_ipv6_entry_delete(
 	int *key_found,
 	void *entry)
 {
-	struct rte_table_lpm_ipv6 *lpm = (struct rte_table_lpm_ipv6 *) table;
+	struct rte_table_lpm_ipv6 *lpm = table;
 	struct rte_table_lpm_ipv6_key *ip_prefix =
-		(struct rte_table_lpm_ipv6_key *) key;
-	uint8_t nht_pos;
+		key;
+	uint32_t nht_pos;
 	int status;
 
 	/* Check input parameters */
@@ -352,7 +326,7 @@ rte_table_lpm_ipv6_lookup(
 			uint8_t *ip = RTE_MBUF_METADATA_UINT8_PTR(pkt,
 				lpm->offset);
 			int status;
-			uint8_t nht_pos;
+			uint32_t nht_pos;
 
 			status = rte_lpm6_lookup(lpm->lpm, ip, &nht_pos);
 			if (status == 0) {
@@ -371,7 +345,7 @@ rte_table_lpm_ipv6_lookup(
 static int
 rte_table_lpm_ipv6_stats_read(void *table, struct rte_table_stats *stats, int clear)
 {
-	struct rte_table_lpm_ipv6 *t = (struct rte_table_lpm_ipv6 *) table;
+	struct rte_table_lpm_ipv6 *t = table;
 
 	if (stats != NULL)
 		memcpy(stats, &t->stats, sizeof(t->stats));
@@ -387,6 +361,8 @@ struct rte_table_ops rte_table_lpm_ipv6_ops = {
 	.f_free = rte_table_lpm_ipv6_free,
 	.f_add = rte_table_lpm_ipv6_entry_add,
 	.f_delete = rte_table_lpm_ipv6_entry_delete,
+	.f_add_bulk = NULL,
+	.f_delete_bulk = NULL,
 	.f_lookup = rte_table_lpm_ipv6_lookup,
 	.f_stats = rte_table_lpm_ipv6_stats_read,
 };

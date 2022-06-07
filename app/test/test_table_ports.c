@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include "test_table_ports.h"
@@ -80,7 +51,7 @@ test_port_ring_reader(void)
 	mbuf[0] = (void *)rte_pktmbuf_alloc(pool);
 
 	expected_pkts = rte_ring_sp_enqueue_burst(port_ring_reader_params.ring,
-		mbuf, 1);
+		mbuf, 1, NULL);
 	received_pkts = rte_port_ring_reader_ops.f_rx(port, res_mbuf, 1);
 
 	if (received_pkts < expected_pkts)
@@ -93,7 +64,7 @@ test_port_ring_reader(void)
 		mbuf[i] = rte_pktmbuf_alloc(pool);
 
 	expected_pkts = rte_ring_sp_enqueue_burst(port_ring_reader_params.ring,
-		(void * const *) mbuf, RTE_PORT_IN_BURST_SIZE_MAX);
+		(void * const *) mbuf, RTE_PORT_IN_BURST_SIZE_MAX, NULL);
 	received_pkts = rte_port_ring_reader_ops.f_rx(port, res_mbuf,
 		RTE_PORT_IN_BURST_SIZE_MAX);
 
@@ -163,7 +134,7 @@ test_port_ring_writer(void)
 	rte_port_ring_writer_ops.f_flush(port);
 	expected_pkts = 1;
 	received_pkts = rte_ring_sc_dequeue_burst(port_ring_writer_params.ring,
-		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz);
+		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz, NULL);
 
 	if (received_pkts < expected_pkts)
 		return -7;
@@ -178,7 +149,7 @@ test_port_ring_writer(void)
 
 	expected_pkts = RTE_PORT_IN_BURST_SIZE_MAX;
 	received_pkts = rte_ring_sc_dequeue_burst(port_ring_writer_params.ring,
-		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz);
+		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz, NULL);
 
 	if (received_pkts < expected_pkts)
 		return -8;
@@ -193,7 +164,7 @@ test_port_ring_writer(void)
 
 	expected_pkts = RTE_PORT_IN_BURST_SIZE_MAX;
 	received_pkts = rte_ring_sc_dequeue_burst(port_ring_writer_params.ring,
-		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz);
+		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz, NULL);
 
 	if (received_pkts < expected_pkts)
 		return -8;
@@ -208,7 +179,7 @@ test_port_ring_writer(void)
 
 	expected_pkts = RTE_PORT_IN_BURST_SIZE_MAX;
 	received_pkts = rte_ring_sc_dequeue_burst(port_ring_writer_params.ring,
-		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz);
+		(void **)res_mbuf, port_ring_writer_params.tx_burst_sz, NULL);
 
 	if (received_pkts < expected_pkts)
 		return -9;

@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 Link Status Interrupt Sample Application
 ========================================
@@ -55,32 +28,9 @@ and the behavior of L2 forwarding each time the link status changes.
 Compiling the Application
 -------------------------
 
-#.  Go to the example directory:
+To compile the sample application see :doc:`compiling`.
 
-    .. code-block:: console
-
-        export RTE_SDK=/path/to/rte_sdk
-        cd ${RTE_SDK}/examples/link_status_interrupt
-
-#.  Set the target (a default target is used if not specified). For example:
-
-    .. code-block:: console
-
-        export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-    See the *DPDK Getting Started Guide* for possible RTE_TARGET values.
-
-#.  Build the application:
-
-    .. code-block:: console
-
-        make
-
-.. note::
-
-    The compiled application is written to the build subdirectory.
-    To have the application written to a different location,
-    the O=/path/to/build/directory option may be specified on the make command line.
+The application is located in the ``link_status_interrupt`` sub-directory.
 
 Running the Application
 -----------------------
@@ -99,12 +49,12 @@ where,
 
 *   -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default)
 
-To run the application in a linuxapp environment with 4 lcores, 4 memory channels, 16 ports and 8 RX queues per lcore,
+To run the application in a linux environment with 4 lcores, 4 memory channels, 16 ports and 8 RX queues per lcore,
 issue the command:
 
 .. code-block:: console
 
-    $ ./build/link_status_interrupt -c f -n 4-- -q 8 -p ffff
+    $ ./build/link_status_interrupt -l 0-3 -n 4-- -q 8 -p ffff
 
 Refer to the *DPDK Getting Started Guide* for general information on running applications
 and the Environment Abstraction Layer (EAL) options.
@@ -118,16 +68,16 @@ Command Line Arguments
 ~~~~~~~~~~~~~~~~~~~~~~
 
 The Link Status Interrupt sample application takes specific parameters,
-in addition to Environment Abstraction Layer (EAL) arguments (see Section 13.3).
+in addition to Environment Abstraction Layer (EAL) arguments (see Section `Running the Application`_).
 
 Command line parsing is done in the same way as it is done in the L2 Forwarding Sample Application.
-See Section 9.4.1, "Command Line Arguments" for more information.
+See :ref:`l2_fwd_app_cmd_arguments` for more information.
 
 Mbuf Pool Initialization
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Mbuf pool initialization is done in the same way as it is done in the L2 Forwarding Sample Application.
-See Section 9.4.2, "Mbuf Pool Initialization" for more information.
+See :ref:`l2_fwd_app_mbuf_init` for more information.
 
 Driver Initialization
 ~~~~~~~~~~~~~~~~~~~~~
@@ -138,21 +88,11 @@ To fully understand this code, it is recommended to study the chapters that rela
 
 .. code-block:: c
 
-    if (rte_eal_pci_probe() < 0)
-        rte_exit(EXIT_FAILURE, "Cannot probe PCI\n");
-
-    nb_ports = rte_eth_dev_count();
-    if (nb_ports == 0)
-        rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
-
-    if (nb_ports > RTE_MAX_ETHPORTS)
-        nb_ports = RTE_MAX_ETHPORTS;
-
     /*
      * Each logical core is assigned a dedicated TX queue on each port.
      */
 
-    for (portid = 0; portid < nb_ports; portid++) {
+    RTE_ETH_FOREACH_DEV(portid) {
         /* skip ports that are not enabled */
 
         if ((lsi_enabled_port_mask & (1 << portid)) == 0)
@@ -172,10 +112,6 @@ To fully understand this code, it is recommended to study the chapters that rela
         rte_eth_dev_info_get((uint8_t) portid, &dev_info);
     }
 
-Observe that:
-
-*   rte_eal_pci_probe()  parses the devices on the PCI bus and initializes recognized devices.
-
 The next step is to configure the RX and TX queues.
 For each port, there is only one RX queue (only one lcore is able to poll a given port).
 The number of TX queues depends on the number of available lcores.
@@ -194,10 +130,6 @@ The global configuration is stored in a static structure:
     static const struct rte_eth_conf port_conf = {
         .rxmode = {
             .split_hdr_size = 0,
-            .header_split = 0,   /**< Header Split disabled */
-            .hw_ip_checksum = 0, /**< IP checksum offload disabled */
-            .hw_vlan_filter = 0, /**< VLAN filtering disabled */
-            .hw_strip_crc= 0,    /**< CRC stripped by hardware */
         },
         .txmode = {},
         .intr_conf = {
@@ -222,9 +154,10 @@ An example callback function that has been written as indicated below.
 .. code-block:: c
 
     static void
-    lsi_event_callback(uint8_t port_id, enum rte_eth_event_type type, void *param)
+    lsi_event_callback(uint16_t port_id, enum rte_eth_event_type type, void *param)
     {
         struct rte_eth_link link;
+        int ret;
 
         RTE_SET_USED(param);
 
@@ -232,9 +165,11 @@ An example callback function that has been written as indicated below.
 
         printf("Event type: %s\n", type == RTE_ETH_EVENT_INTR_LSC ? "LSC interrupt" : "unknown event");
 
-        rte_eth_link_get_nowait(port_id, &link);
-
-        if (link.link_status) {
+        ret = rte_eth_link_get_nowait(port_id, &link);
+        if (ret < 0) {
+            printf("Failed to get port %d link status: %s\n\n",
+                   port_id, rte_strerror(-ret));
+        } else if (link.link_status) {
             printf("Port %d Link Up - speed %u Mbps - %s\n\n", port_id, (unsigned)link.link_speed,
                   (link.link_duplex == ETH_LINK_FULL_DUPLEX) ? ("full-duplex") : ("half-duplex"));
         } else
@@ -287,7 +222,7 @@ The list of queues that must be polled for a given lcore is stored in a private 
     struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 The n_rx_port and rx_port_list[] fields are used in the main packet processing loop
-(see Section 13.4.7, "Receive, Process and Transmit Packets" later in this chapter).
+(see `Receive, Process and Transmit Packets`_).
 
 The global configuration for the RX queues is stored in a static structure:
 
@@ -372,11 +307,11 @@ The processing is very simple: processes the TX port from the RX port and then r
     static void
     lsi_simple_forward(struct rte_mbuf *m, unsigned portid)
     {
-        struct ether_hdr *eth;
+        struct rte_ether_hdr *eth;
         void *tmp;
         unsigned dst_port = lsi_dst_ports[portid];
 
-        eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+        eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
         /* 02:00:00:00:00:xx */
 
@@ -385,7 +320,7 @@ The processing is very simple: processes the TX port from the RX port and then r
         *((uint64_t *)tmp) = 0x000000000002 + (dst_port << 40);
 
         /* src addr */
-        ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
+        rte_ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
 
         lsi_send_packet(m, dst_port);
     }
@@ -408,7 +343,7 @@ If the table is full, the whole packets table is transmitted using the lsi_send_
     /* Send the packet on an output interface */
 
     static int
-    lsi_send_packet(struct rte_mbuf *m, uint8_t port)
+    lsi_send_packet(struct rte_mbuf *m, uint16_t port)
     {
         unsigned lcore_id, len;
         struct lcore_queue_conf *qconf;

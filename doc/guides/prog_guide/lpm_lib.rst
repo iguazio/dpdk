@@ -1,32 +1,5 @@
-..  BSD LICENSE
-    Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Intel Corporation nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2010-2014 Intel Corporation.
 
 .. _LPM_Library:
 
@@ -61,6 +34,8 @@ The main methods exported by the LPM component are:
     In the case that there are multiple rules present in the LPM table that have the same 32-bit key,
     the algorithm picks the rule with the highest depth as the best match rule,
     which means that the rule has the highest number of most significant bits matching between the input key and the rule key.
+
+.. _lpm4_details:
 
 Implementation Details
 ----------------------
@@ -170,6 +145,38 @@ depending on whether we need to move to the next table or not.
 Prefix expansion is one of the keys of this algorithm,
 since it improves the speed dramatically by adding redundancy.
 
+Deletion
+~~~~~~~~
+
+When deleting a rule, a replacement rule is searched for. Replacement rule is an existing rule that has
+the longest prefix match with the rule to be deleted, but has shorter prefix.
+
+If a replacement rule is found, target tbl24 and tbl8 entries are updated to have the same depth and next hop
+value with the replacement rule.
+
+If no replacement rule can be found, target tbl24 and tbl8 entries will be cleared.
+
+Prefix expansion is performed if the rule's depth is not exactly 24 bits or 32 bits.
+
+After deleting a rule, a group of tbl8s that belongs to the same tbl24 entry are freed in following cases:
+
+*   All tbl8s in the group are empty .
+
+*   All tbl8s in the group have the same values and with depth no greater than 24.
+
+Free of tbl8s have different behaviors:
+
+*   If RCU is not used, tbl8s are cleared and reclaimed immediately.
+
+*   If RCU is used, tbl8s are reclaimed when readers are in quiescent state.
+
+When the LPM is not using RCU, tbl8 group can be freed immediately even though the readers might be using
+the tbl8 group entries. This might result in incorrect lookup results.
+
+RCU QSBR process is integrated for safe tbl8 group reclamation. Application has certain responsibilities
+while using this feature. Please refer to resource reclamation framework of :ref:`RCU library <RCU_Library>`
+for more details.
+
 Lookup
 ~~~~~~
 
@@ -220,4 +227,4 @@ References
     `http://www.ietf.org/rfc/rfc1519 <http://www.ietf.org/rfc/rfc1519>`_
 
 *   Pankaj Gupta, Algorithms for Routing Lookups and Packet Classification, PhD Thesis, Stanford University,
-    2000  (`http://klamath.stanford.edu/~pankaj/thesis/ thesis_1sided.pdf <http://klamath.stanford.edu/~pankaj/thesis/%20thesis_1sided.pdf>`_ )
+    2000  (`http://klamath.stanford.edu/~pankaj/thesis/thesis_1sided.pdf <http://klamath.stanford.edu/~pankaj/thesis/thesis_1sided.pdf>`_ )

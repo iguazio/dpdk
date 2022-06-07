@@ -1,65 +1,44 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #ifndef _IXGBE_RXTX_H_
 #define _IXGBE_RXTX_H_
 
+/*
+ * Rings setup and release.
+ *
+ * TDBA/RDBA should be aligned on 16 byte boundary. But TDLEN/RDLEN should be
+ * multiple of 128 bytes. So we align TDBA/RDBA on 128 byte boundary. This will
+ * also optimize cache line size effect. H/W supports up to cache line size 128.
+ */
+#define	IXGBE_ALIGN	128
+
+#define IXGBE_RXD_ALIGN	(IXGBE_ALIGN / sizeof(union ixgbe_adv_rx_desc))
+#define IXGBE_TXD_ALIGN	(IXGBE_ALIGN / sizeof(union ixgbe_adv_tx_desc))
+
+/*
+ * Maximum number of Ring Descriptors.
+ *
+ * Since RDLEN/TDLEN should be multiple of 128 bytes, the number of ring
+ * descriptors should meet the following condition:
+ *      (num_ring_desc * sizeof(rx/tx descriptor)) % 128 == 0
+ */
+#define	IXGBE_MIN_RING_DESC	32
+#define	IXGBE_MAX_RING_DESC	4096
 
 #define RTE_PMD_IXGBE_TX_MAX_BURST 32
 #define RTE_PMD_IXGBE_RX_MAX_BURST 32
+#define RTE_IXGBE_TX_MAX_FREE_BUF_SZ 64
 
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
-#define RTE_IXGBE_DESCS_PER_LOOP           4
-#elif defined(RTE_IXGBE_INC_VECTOR)
-#define RTE_IXGBE_DESCS_PER_LOOP           4
-#else
-#define RTE_IXGBE_DESCS_PER_LOOP           1
+#define RTE_IXGBE_DESCS_PER_LOOP    4
+
+#if defined(RTE_ARCH_X86) || defined(RTE_ARCH_ARM64) || defined(RTE_ARCH_ARM)
+#define RTE_IXGBE_RXQ_REARM_THRESH      32
+#define RTE_IXGBE_MAX_RX_BURST          RTE_IXGBE_RXQ_REARM_THRESH
 #endif
 
-#define RTE_MBUF_DATA_DMA_ADDR(mb) \
-	(uint64_t) ((mb)->buf_physaddr + (mb)->data_off)
-
-#define RTE_MBUF_DATA_DMA_ADDR_DEFAULT(mb) \
-	(uint64_t) ((mb)->buf_physaddr + RTE_PKTMBUF_HEADROOM)
-
-#ifdef RTE_IXGBE_INC_VECTOR
-#define RTE_IXGBE_VPMD_RX_BURST         32
-#define RTE_IXGBE_VPMD_TX_BURST         32
-#define RTE_IXGBE_RXQ_REARM_THRESH      RTE_IXGBE_VPMD_RX_BURST
-#define RTE_IXGBE_TX_MAX_FREE_BUF_SZ    64
-#endif
-
-#define RX_RING_SZ ((IXGBE_MAX_RING_DESC + RTE_IXGBE_DESCS_PER_LOOP - 1) * \
+#define RX_RING_SZ ((IXGBE_MAX_RING_DESC + RTE_PMD_IXGBE_RX_MAX_BURST) * \
 		    sizeof(union ixgbe_adv_rx_desc))
 
 #ifdef RTE_PMD_PACKET_PREFETCH
@@ -71,6 +50,19 @@
 #define RTE_IXGBE_REGISTER_POLL_WAIT_10_MS  10
 #define RTE_IXGBE_WAIT_100_US               100
 #define RTE_IXGBE_VMTXSW_REGISTER_COUNT     2
+
+#define IXGBE_TX_MAX_SEG                    40
+
+#define IXGBE_TX_MIN_PKT_LEN		     14
+
+#define IXGBE_PACKET_TYPE_MASK_82599        0X7F
+#define IXGBE_PACKET_TYPE_MASK_X550         0X10FF
+#define IXGBE_PACKET_TYPE_MASK_TUNNEL       0XFF
+#define IXGBE_PACKET_TYPE_TUNNEL_BIT        0X1000
+
+#define IXGBE_PACKET_TYPE_MAX               0X80
+#define IXGBE_PACKET_TYPE_TN_MAX            0X100
+#define IXGBE_PACKET_TYPE_SHIFT             0X04
 
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
@@ -116,28 +108,34 @@ struct ixgbe_rx_queue {
 	uint16_t            nb_rx_desc; /**< number of RX descriptors. */
 	uint16_t            rx_tail;  /**< current value of RDT register. */
 	uint16_t            nb_rx_hold; /**< number of held free RX desc. */
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
 	uint16_t rx_nb_avail; /**< nr of staged pkts ready to ret to app */
 	uint16_t rx_next_avail; /**< idx of next staged pkt to ret to app */
 	uint16_t rx_free_trigger; /**< triggers rx buffer allocation */
+	uint8_t            rx_using_sse;
+	/**< indicates that vector RX is in use */
+#ifdef RTE_LIBRTE_SECURITY
+	uint8_t            using_ipsec;
+	/**< indicates that IPsec RX feature is in use */
 #endif
-#ifdef RTE_IXGBE_INC_VECTOR
-	uint16_t            rxrearm_nb; /**< the idx we start the re-arming from */
-	uint16_t            rxrearm_start;  /**< number of remaining to be re-armed */
+#if defined(RTE_ARCH_X86) || defined(RTE_ARCH_ARM64) || defined(RTE_ARCH_ARM)
+	uint16_t            rxrearm_nb;     /**< number of remaining to be re-armed */
+	uint16_t            rxrearm_start;  /**< the idx we start the re-arming from */
 #endif
 	uint16_t            rx_free_thresh; /**< max free RX desc to hold. */
 	uint16_t            queue_id; /**< RX queue index. */
 	uint16_t            reg_idx;  /**< RX queue register index. */
-	uint8_t             port_id;  /**< Device port identifier. */
+	uint16_t            pkt_type_mask;  /**< Packet type mask for different NICs. */
+	uint16_t            port_id;  /**< Device port identifier. */
 	uint8_t             crc_len;  /**< 0 if CRC stripped, 4 otherwise. */
 	uint8_t             drop_en;  /**< If not 0, set SRRCTL.Drop_En. */
 	uint8_t             rx_deferred_start; /**< not in global dev start. */
-#ifdef RTE_LIBRTE_IXGBE_RX_ALLOW_BULK_ALLOC
+	/** flags to set in mbuf when a vlan is detected. */
+	uint64_t            vlan_flags;
+	uint64_t	    offloads; /**< Rx offloads with DEV_RX_OFFLOAD_* */
 	/** need to alloc dummy mbuf, for wraparound when scanning hw ring */
 	struct rte_mbuf fake_mbuf;
 	/** hold packets to return to application */
 	struct rte_mbuf *rx_stage[RTE_PMD_IXGBE_RX_MAX_BURST*2];
-#endif
 };
 
 /**
@@ -151,7 +149,7 @@ enum ixgbe_advctx_num {
 
 /** Offload features */
 union ixgbe_tx_offload {
-	uint64_t data;
+	uint64_t data[2];
 	struct {
 		uint64_t l2_len:7; /**< L2 (MAC) Header Length. */
 		uint64_t l3_len:9; /**< L3 (IP) Header Length. */
@@ -159,6 +157,15 @@ union ixgbe_tx_offload {
 		uint64_t tso_segsz:16; /**< TCP TSO segment size */
 		uint64_t vlan_tci:16;
 		/**< VLAN Tag Control Identifier (CPU order). */
+
+		/* fields for TX offloading of tunnels */
+		uint64_t outer_l3_len:8; /**< Outer L3 (IP) Hdr Length. */
+		uint64_t outer_l2_len:8; /**< Outer L2 (MAC) Hdr Length. */
+#ifdef RTE_LIBRTE_SECURITY
+		/* inline ipsec related*/
+		uint64_t sa_idx:8;	/**< TX SA database entry index */
+		uint64_t sec_pad_len:4;	/**< padding length */
+#endif
 	};
 };
 
@@ -191,7 +198,10 @@ struct ixgbe_tx_queue {
 	/** TX ring virtual address. */
 	volatile union ixgbe_adv_tx_desc *tx_ring;
 	uint64_t            tx_ring_phys_addr; /**< TX ring DMA address. */
-	struct ixgbe_tx_entry *sw_ring;      /**< virtual address of SW ring. */
+	union {
+		struct ixgbe_tx_entry *sw_ring; /**< address of SW ring for scalar PMD. */
+		struct ixgbe_tx_entry_v *sw_ring_v; /**< address of SW ring for vector PMD */
+	};
 	volatile uint32_t   *tdt_reg_addr; /**< Address of TDT register. */
 	uint16_t            nb_tx_desc;    /**< number of TX descriptors. */
 	uint16_t            tx_tail;       /**< current value of TDT reg. */
@@ -210,16 +220,20 @@ struct ixgbe_tx_queue {
 	uint16_t tx_next_rs; /**< next desc to set RS bit */
 	uint16_t            queue_id;      /**< TX queue index. */
 	uint16_t            reg_idx;       /**< TX queue register index. */
-	uint8_t             port_id;       /**< Device port identifier. */
+	uint16_t            port_id;       /**< Device port identifier. */
 	uint8_t             pthresh;       /**< Prefetch threshold register. */
 	uint8_t             hthresh;       /**< Host threshold register. */
 	uint8_t             wthresh;       /**< Write-back threshold reg. */
-	uint32_t txq_flags; /**< Holds flags for this TXq */
+	uint64_t offloads; /**< Tx offload flags of DEV_TX_OFFLOAD_* */
 	uint32_t            ctx_curr;      /**< Hardware context states. */
 	/** Hardware context0 history. */
 	struct ixgbe_advctx_info ctx_cache[IXGBE_CTX_NUM];
 	const struct ixgbe_txq_ops *ops;       /**< txq ops */
 	uint8_t             tx_deferred_start; /**< not in global dev start. */
+#ifdef RTE_LIBRTE_SECURITY
+	uint8_t		    using_ipsec;
+	/**< indicates that IPsec TX feature is in use */
+#endif
 };
 
 struct ixgbe_txq_ops {
@@ -227,20 +241,6 @@ struct ixgbe_txq_ops {
 	void (*free_swring)(struct ixgbe_tx_queue *txq);
 	void (*reset)(struct ixgbe_tx_queue *txq);
 };
-
-/*
- * The "simple" TX queue functions require that the following
- * flags are set when the TX queue is configured:
- *  - ETH_TXQ_FLAGS_NOMULTSEGS
- *  - ETH_TXQ_FLAGS_NOVLANOFFL
- *  - ETH_TXQ_FLAGS_NOXSUMSCTP
- *  - ETH_TXQ_FLAGS_NOXSUMUDP
- *  - ETH_TXQ_FLAGS_NOXSUMTCP
- * and that the RS bit threshold (tx_rs_thresh) is at least equal to
- * RTE_PMD_IXGBE_TX_MAX_BURST.
- */
-#define IXGBE_SIMPLE_FLAGS ((uint32_t)ETH_TXQ_FLAGS_NOMULTSEGS | \
-			    ETH_TXQ_FLAGS_NOOFFLOADS)
 
 /*
  * Populate descriptors with the following info:
@@ -278,18 +278,26 @@ void ixgbe_set_tx_function(struct rte_eth_dev *dev, struct ixgbe_tx_queue *txq);
  */
 void ixgbe_set_rx_function(struct rte_eth_dev *dev);
 
+int ixgbe_check_supported_loopback_mode(struct rte_eth_dev *dev);
 uint16_t ixgbe_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 		uint16_t nb_pkts);
 uint16_t ixgbe_recv_scattered_pkts_vec(void *rx_queue,
 		struct rte_mbuf **rx_pkts, uint16_t nb_pkts);
 int ixgbe_rx_vec_dev_conf_condition_check(struct rte_eth_dev *dev);
 int ixgbe_rxq_vec_setup(struct ixgbe_rx_queue *rxq);
+void ixgbe_rx_queue_release_mbufs_vec(struct ixgbe_rx_queue *rxq);
+int ixgbe_dev_tx_done_cleanup(void *tx_queue, uint32_t free_cnt);
 
-#ifdef RTE_IXGBE_INC_VECTOR
+extern const uint32_t ptype_table[IXGBE_PACKET_TYPE_MAX];
+extern const uint32_t ptype_table_tn[IXGBE_PACKET_TYPE_TN_MAX];
 
-uint16_t ixgbe_xmit_pkts_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
-		uint16_t nb_pkts);
+uint16_t ixgbe_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
+				    uint16_t nb_pkts);
 int ixgbe_txq_vec_setup(struct ixgbe_tx_queue *txq);
 
-#endif /* RTE_IXGBE_INC_VECTOR */
+uint64_t ixgbe_get_tx_port_offloads(struct rte_eth_dev *dev);
+uint64_t ixgbe_get_rx_queue_offloads(struct rte_eth_dev *dev);
+uint64_t ixgbe_get_rx_port_offloads(struct rte_eth_dev *dev);
+uint64_t ixgbe_get_tx_queue_offloads(struct rte_eth_dev *dev);
+
 #endif /* _IXGBE_RXTX_H_ */

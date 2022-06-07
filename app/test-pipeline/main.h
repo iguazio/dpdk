@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2016 Intel Corporation
  */
 
 #ifndef _MAIN_H_
@@ -116,12 +87,29 @@ enum {
 	e_APP_PIPELINE_ACL,
 	e_APP_PIPELINE_LPM,
 	e_APP_PIPELINE_LPM_IPV6,
+
+	e_APP_PIPELINE_HASH_CUCKOO_KEY8,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY16,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY32,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY48,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY64,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY80,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY96,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY112,
+	e_APP_PIPELINE_HASH_CUCKOO_KEY128,
 	e_APP_PIPELINES
 };
 
 void app_main_loop_rx(void);
 void app_main_loop_rx_metadata(void);
-uint64_t test_hash(void *key, uint32_t key_size, uint64_t seed);
+uint64_t test_hash(void *key,
+	void *key_mask,
+	uint32_t key_size,
+	uint64_t seed);
+
+uint32_t test_hash_cuckoo(const void *key,
+	uint32_t key_size,
+	uint32_t seed);
 
 void app_main_loop_worker(void);
 void app_main_loop_worker_pipeline_stub(void);
@@ -136,5 +124,7 @@ void app_main_loop_tx(void);
 #ifndef APP_FLUSH
 #define APP_FLUSH 0x3FF
 #endif
+
+#define APP_METADATA_OFFSET(offset) (sizeof(struct rte_mbuf) + (offset))
 
 #endif /* _MAIN_H_ */

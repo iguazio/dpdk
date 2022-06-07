@@ -1,34 +1,6 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2014-2015 Chelsio Communications.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Chelsio Communications nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2014-2018 Chelsio Communications.
+ * All rights reserved.
  */
 
 #ifndef _CXGBE_COMPAT_H_
@@ -38,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 #include <rte_common.h>
 #include <rte_memcpy.h>
@@ -45,54 +18,34 @@
 #include <rte_cycles.h>
 #include <rte_spinlock.h>
 #include <rte_log.h>
+#include <rte_io.h>
+#include <rte_net.h>
 
-#define dev_printf(level, fmt, args...) \
-	RTE_LOG(level, PMD, "rte_cxgbe_pmd: " fmt, ## args)
+extern int cxgbe_logtype;
+extern int cxgbe_mbox_logtype;
 
-#define dev_err(x, args...) dev_printf(ERR, args)
-#define dev_info(x, args...) dev_printf(INFO, args)
-#define dev_warn(x, args...) dev_printf(WARNING, args)
+#define dev_printf(level, logtype, fmt, ...) \
+	rte_log(RTE_LOG_ ## level, logtype, \
+		"rte_cxgbe_pmd: " fmt, ##__VA_ARGS__)
 
-#ifdef RTE_LIBRTE_CXGBE_DEBUG
-#define dev_debug(x, args...) dev_printf(DEBUG, args)
-#else
-#define dev_debug(x, args...) do { } while (0)
-#endif
+#define dev_err(x, fmt, ...) \
+	dev_printf(ERR, cxgbe_logtype, fmt, ##__VA_ARGS__)
+#define dev_info(x, fmt, ...) \
+	dev_printf(INFO, cxgbe_logtype, fmt, ##__VA_ARGS__)
+#define dev_warn(x, fmt, ...) \
+	dev_printf(WARNING, cxgbe_logtype, fmt, ##__VA_ARGS__)
+#define dev_debug(x, fmt, ...) \
+	dev_printf(DEBUG, cxgbe_logtype, fmt, ##__VA_ARGS__)
 
-#ifdef RTE_LIBRTE_CXGBE_DEBUG_REG
-#define CXGBE_DEBUG_REG(x, args...) dev_printf(DEBUG, "REG:" args)
-#else
-#define CXGBE_DEBUG_REG(x, args...) do { } while (0)
-#endif
+#define CXGBE_DEBUG_MBOX(x, fmt, ...) \
+	dev_printf(DEBUG, cxgbe_mbox_logtype, "MBOX:" fmt, ##__VA_ARGS__)
 
-#ifdef RTE_LIBRTE_CXGBE_DEBUG_MBOX
-#define CXGBE_DEBUG_MBOX(x, args...) dev_printf(DEBUG, "MBOX:" args)
-#else
-#define CXGBE_DEBUG_MBOX(x, args...) do { } while (0)
-#endif
-
-#ifdef RTE_LIBRTE_CXGBE_DEBUG_TX
-#define CXGBE_DEBUG_TX(x, args...) dev_printf(DEBUG, "TX:" args)
-#else
-#define CXGBE_DEBUG_TX(x, args...) do { } while (0)
-#endif
-
-#ifdef RTE_LIBRTE_CXGBE_DEBUG_RX
-#define CXGBE_DEBUG_RX(x, args...) dev_printf(DEBUG, "RX:" args)
-#else
-#define CXGBE_DEBUG_RX(x, args...) do { } while (0)
-#endif
-
-#ifdef RTE_LIBRTE_CXGBE_DEBUG
 #define CXGBE_FUNC_TRACE() \
-	RTE_LOG(DEBUG, PMD, "CXGBE trace: %s\n", __func__)
-#else
-#define CXGBE_FUNC_TRACE() do { } while (0)
-#endif
+	dev_printf(DEBUG, cxgbe_logtype, "CXGBE trace: %s\n", __func__)
 
-#define pr_err(y, args...) dev_err(0, y, ##args)
-#define pr_warn(y, args...) dev_warn(0, y, ##args)
-#define pr_info(y, args...) dev_info(0, y, ##args)
+#define pr_err(fmt, ...) dev_err(0, fmt, ##__VA_ARGS__)
+#define pr_warn(fmt, ...) dev_warn(0, fmt, ##__VA_ARGS__)
+#define pr_info(fmt, ...) dev_info(0, fmt, ##__VA_ARGS__)
 #define BUG() pr_err("BUG at %s:%d", __func__, __LINE__)
 
 #define ASSERT(x) do {\
@@ -119,10 +72,11 @@
 #define L1_CACHE_BYTES  BIT(L1_CACHE_SHIFT)
 
 #define PAGE_SHIFT  12
-#define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
-#define PTR_ALIGN(p, a) ((typeof(p))ALIGN((unsigned long)(p), (a)))
+#define CXGBE_ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define PTR_ALIGN(p, a) ((typeof(p))CXGBE_ALIGN((unsigned long)(p), (a)))
 
 #define VLAN_HLEN 4
+#define ETHER_ADDR_LEN 6
 
 #define rmb()     rte_rmb() /* dpdk rte provided rmb */
 #define wmb()     rte_wmb() /* dpdk rte provided wmb */
@@ -133,7 +87,6 @@ typedef uint16_t  u16;
 typedef uint32_t  u32;
 typedef int32_t   s32;
 typedef uint64_t  u64;
-typedef int       bool;
 typedef uint64_t  dma_addr_t;
 
 #ifndef __le16
@@ -169,21 +122,25 @@ typedef uint64_t  dma_addr_t;
 
 #define FALSE	0
 #define TRUE	1
-#define false	0
-#define true	1
 
+#ifndef min
 #define min(a, b) RTE_MIN(a, b)
+#endif
+
+#ifndef max
 #define max(a, b) RTE_MAX(a, b)
+#endif
 
 /*
  * round up val _p to a power of 2 size _s
  */
-#define roundup(_p, _s) (((unsigned long)(_p) + (_s - 1)) & ~(_s - 1))
+#define cxgbe_roundup(_p, _s) (((unsigned long)(_p) + (_s - 1)) & ~(_s - 1))
 
-#undef container_of
+#ifndef container_of
 #define container_of(ptr, type, member) ({ \
 		typeof(((type *)0)->member)(*__mptr) = (ptr); \
 		(type *)((char *)__mptr - offsetof(type, member)); })
+#endif
 
 #define ARRAY_SIZE(arr) RTE_DIM(arr)
 
@@ -195,6 +152,26 @@ typedef uint64_t  dma_addr_t;
 #define be32_to_cpu(o) rte_be_to_cpu_32(o)
 #define be64_to_cpu(o) rte_be_to_cpu_64(o)
 #define le32_to_cpu(o) rte_le_to_cpu_32(o)
+
+#ifndef ntohs
+#define ntohs(o) be16_to_cpu(o)
+#endif
+
+#ifndef ntohl
+#define ntohl(o) be32_to_cpu(o)
+#endif
+
+#ifndef htons
+#define htons(o) cpu_to_be16(o)
+#endif
+
+#ifndef htonl
+#define htonl(o) cpu_to_be32(o)
+#endif
+
+#ifndef caddr_t
+typedef char *caddr_t;
+#endif
 
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define DELAY(x) rte_delay_us(x)
@@ -214,13 +191,13 @@ static inline uint8_t hweight32(uint32_t word32)
 } /* weight32 */
 
 /**
- * fls - find last (most-significant) bit set
+ * cxgbe_fls - find last (most-significant) bit set
  * @x: the word to search
  *
  * This is defined the same way as ffs.
- * Note fls(0) = 0, fls(1) = 1, fls(0x80000000) = 32.
+ * Note cxgbe_fls(0) = 0, cxgbe_fls(1) = 1, cxgbe_fls(0x80000000) = 32.
  */
-static inline int fls(int x)
+static inline int cxgbe_fls(int x)
 {
 	return x ? sizeof(x) * 8 - __builtin_clz(x) : 0;
 }
@@ -254,7 +231,7 @@ static inline unsigned long ilog2(unsigned long n)
 
 static inline void writel(unsigned int val, volatile void __iomem *addr)
 {
-	*(volatile unsigned int *)addr = val;
+	rte_write32(val, addr);
 }
 
 static inline void writeq(u64 val, volatile void __iomem *addr)
@@ -263,4 +240,21 @@ static inline void writeq(u64 val, volatile void __iomem *addr)
 	writel(val >> 32, (void *)((uintptr_t)addr + 4));
 }
 
+static inline void writel_relaxed(unsigned int val, volatile void __iomem *addr)
+{
+	rte_write32_relaxed(val, addr);
+}
+
+/*
+ * Multiplies an integer by a fraction, while avoiding unnecessary
+ * overflow or loss of precision.
+ */
+static inline unsigned int mult_frac(unsigned int x, unsigned int numer,
+				     unsigned int denom)
+{
+	unsigned int quot = x / denom;
+	unsigned int rem = x % denom;
+
+	return (quot * numer) + ((rem * numer) / denom);
+}
 #endif /* _CXGBE_COMPAT_H_ */

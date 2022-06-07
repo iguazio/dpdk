@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 #include <string.h>
 
@@ -88,7 +59,7 @@ static void *
 rte_port_ring_reader_frag_create(void *params, int socket_id, int is_ipv4)
 {
 	struct rte_port_ring_reader_frag_params *conf =
-			(struct rte_port_ring_reader_frag_params *) params;
+			params;
 	struct rte_port_ring_reader_frag *port;
 
 	/* Check input parameters */
@@ -159,7 +130,7 @@ rte_port_ring_reader_frag_rx(void *port,
 		uint32_t n_pkts)
 {
 	struct rte_port_ring_reader_frag *p =
-			(struct rte_port_ring_reader_frag *) port;
+			port;
 	uint32_t n_pkts_out;
 
 	n_pkts_out = 0;
@@ -186,7 +157,8 @@ rte_port_ring_reader_frag_rx(void *port,
 		/* If "pkts" buffer is empty, read packet burst from ring */
 		if (p->n_pkts == 0) {
 			p->n_pkts = rte_ring_sc_dequeue_burst(p->ring,
-				(void **) p->pkts, RTE_PORT_IN_BURST_SIZE_MAX);
+				(void **) p->pkts, RTE_PORT_IN_BURST_SIZE_MAX,
+				NULL);
 			RTE_PORT_RING_READER_FRAG_STATS_PKTS_IN_ADD(p, p->n_pkts);
 			if (p->n_pkts == 0)
 				return n_pkts_out;
@@ -229,9 +201,10 @@ rte_port_ring_reader_frag_rx(void *port,
 
 		/* Copy meta-data from input jumbo packet to its fragments */
 		for (i = 0; i < p->n_frags; i++) {
-			uint8_t *src = RTE_MBUF_METADATA_UINT8_PTR(pkt, 0);
+			uint8_t *src =
+			  RTE_MBUF_METADATA_UINT8_PTR(pkt, sizeof(struct rte_mbuf));
 			uint8_t *dst =
-				RTE_MBUF_METADATA_UINT8_PTR(p->frags[i], 0);
+			  RTE_MBUF_METADATA_UINT8_PTR(p->frags[i], sizeof(struct rte_mbuf));
 
 			memcpy(dst, src, p->metadata_size);
 		}
@@ -275,7 +248,7 @@ rte_port_frag_reader_stats_read(void *port,
 		struct rte_port_in_stats *stats, int clear)
 {
 	struct rte_port_ring_reader_frag *p =
-		(struct rte_port_ring_reader_frag *) port;
+		port;
 
 	if (stats != NULL)
 		memcpy(stats, &p->stats, sizeof(p->stats));

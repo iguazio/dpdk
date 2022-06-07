@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdio.h>
@@ -39,6 +10,7 @@
 #include <errno.h>
 
 #include <rte_memory.h>
+#include <rte_ethdev.h>
 #include <rte_string_fns.h>
 
 #include "common.h"
@@ -70,31 +42,34 @@ usage(void)
  * array variable
  */
 static int
-parse_portmask(uint8_t max_ports, const char *portmask)
+parse_portmask(const char *portmask)
 {
 	char *end = NULL;
-	unsigned long pm;
-	uint8_t count = 0;
+	unsigned long long pm;
+	uint16_t id;
 
 	if (portmask == NULL || *portmask == '\0')
 		return -1;
 
 	/* convert parameter to a number and verify */
-	pm = strtoul(portmask, &end, 16);
-	if (end == NULL || *end != '\0' || pm == 0)
+	errno = 0;
+	pm = strtoull(portmask, &end, 16);
+	if (errno != 0 || end == NULL || *end != '\0')
 		return -1;
 
-	/* loop through bits of the mask and mark ports */
-	while (pm != 0){
-		if (pm & 0x01){ /* bit is set in mask, use port */
-			if (count >= max_ports)
-				printf("WARNING: requested port %u not present"
-				" - ignoring\n", (unsigned)count);
-			else
-			    ports->id[ports->num_ports++] = count;
-		}
-		pm = (pm >> 1);
-		count++;
+	RTE_ETH_FOREACH_DEV(id) {
+		unsigned long msk = 1u << id;
+
+		if ((pm & msk) == 0)
+			continue;
+
+		pm &= ~msk;
+		ports->id[ports->num_ports++] = id;
+	}
+
+	if (pm != 0) {
+		printf("WARNING: leftover ports in mask %#llx - ignoring\n",
+		       pm);
 	}
 
 	return 0;
@@ -128,7 +103,7 @@ parse_num_clients(const char *clients)
  * on error.
  */
 int
-parse_app_args(uint8_t max_ports, int argc, char *argv[])
+parse_app_args(int argc, char *argv[])
 {
 	int option_index, opt;
 	char **argvopt = argv;
@@ -141,7 +116,7 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[])
 		&option_index)) != EOF){
 		switch (opt){
 			case 'p':
-				if (parse_portmask(max_ports, optarg) != 0){
+				if (parse_portmask(optarg) != 0) {
 					usage();
 					return -1;
 				}
